@@ -10,11 +10,8 @@ set(CNPG_PLUGINVAL_VERSION "1.0.4")
 set(CNPG_PLUGINVAL_WINDOWS_URL
     "https://github.com/Tracktion/pluginval/releases/download/v${CNPG_PLUGINVAL_VERSION}/pluginval_Windows.zip")
 
-# SHA-256 of pluginval_Windows.zip for v1.0.4 -- NOT YET VERIFIED.
-# GitHub's release API reports no digest for this asset, and Tracktion's release notes don't
-# publish one either (both checked 2026-07-30). Downloading and hashing the binary is
-# explicit-permission-required and out of scope for this task; Task P0.6 ("Install pluginval
-# ... on the dev machine; record version") is the task that actually fetches the binary, so it
-# owns computing this hash and replacing the placeholder below. Do not trust this value, and
-# do not wire an integrity check against it, until P0.6 closes that out.
-set(CNPG_PLUGINVAL_WINDOWS_SHA256 "UNVERIFIED-PENDING-P0.6")
+# SHA-256 of pluginval_Windows.zip for v1.0.4 -- verified by Task P0.6.
+# Computed 2026-07-30 via PowerShell `Get-FileHash -Algorithm SHA256` over the asset downloaded
+# directly from the official Tracktion GitHub release page (URL above); pluginval.exe extracted
+# from that archive reports `pluginval - 1.0.4`, confirming the asset matches the pinned version.
+set(CNPG_PLUGINVAL_WINDOWS_SHA256 "C08E61CE3B96DB41636F8EC7E76F4C7E2C13EBDAC7FA1B5A1F52B4F32EC715AB")
