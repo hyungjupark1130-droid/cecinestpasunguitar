@@ -12,6 +12,13 @@ add_executable(cnpg_tests
     dsp/OutputGainTests.cpp
     dsp/ParamStructsTests.cpp
     dsp/ScopedFtzDazGuardTests.cpp
+    support/AllocationGuard.cpp
+)
+
+# Lets any test include shared test-support headers as "support/<Header>.h" (e.g.
+# support/AllocationGuard.h), regardless of which tests/<subdir> the including file lives in.
+target_include_directories(cnpg_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(cnpg_tests PRIVATE

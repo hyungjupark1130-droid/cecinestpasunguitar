@@ -1,12 +1,11 @@
 #include "cnpg/dsp/NoteAllocator.h"
 
+#include "support/AllocationGuard.h"
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <atomic>
 #include <cstdint>
-#include <cstdlib>
-#include <new>
 
 using cnpg::dsp::AllocationMode;
 using cnpg::dsp::BlockEventQueue;
@@ -179,25 +178,13 @@ TEST_CASE("NoteAllocator: AllocationMode values are accepted by setParams withou
 }
 
 // -- allocate() performs no heap allocation ---------------------------------------------------
-// Global replacement operator new/delete (docs/plan.md Task P1.2 acceptance criteria: "allocate
-// performs no allocation (counting-new test)"). Routed through malloc/free so program behavior
-// is otherwise unchanged; every allocation across the whole cnpg_tests binary increments
-// g_allocationCount, but only the delta measured tightly around the allocate() call below is
-// asserted on.
-
-namespace {
-std::atomic<std::size_t> g_allocationCount{0};
-} // namespace
-
-void* operator new(std::size_t size) {
-    ++g_allocationCount;
-    if (void* ptr = std::malloc(size))
-        return ptr;
-    throw std::bad_alloc();
-}
-
-void operator delete(void* ptr) noexcept { std::free(ptr); }
-void operator delete(void* ptr, std::size_t) noexcept { std::free(ptr); }
+// Uses the shared counting-new instrumentation in tests/support/AllocationGuard.h/.cpp
+// (docs/plan.md Task P1.2 acceptance criteria: "allocate performs no allocation (counting-new
+// test)"). The global operator new/delete overrides that make the counting possible live in
+// exactly one translation unit, AllocationGuard.cpp -- not here -- since Task P1.5's own
+// counting-new requirement (docs/plan.md line 1078) needs the identical mechanism in a second
+// test file, and a second definition of operator new(std::size_t) would be a duplicate-symbol
+// link error.
 
 TEST_CASE("NoteAllocator: allocate() performs no heap allocation", "[contract]") {
     NoteAllocator allocator;
@@ -210,9 +197,8 @@ TEST_CASE("NoteAllocator: allocate() performs no heap allocation", "[contract]")
     allocator.allocate(events, 2, outEvents);
     outEvents.clear();
 
-    const std::size_t before = g_allocationCount.load();
+    cnpg::test::resetAllocationCount();
     allocator.allocate(events, 2, outEvents);
-    const std::size_t after = g_allocationCount.load();
 
-    REQUIRE(after == before);
+    REQUIRE(cnpg::test::allocationCount() == 0);
 }
