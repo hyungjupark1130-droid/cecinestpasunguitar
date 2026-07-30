@@ -1,0 +1,282 @@
+name: CI
+
+# Solo-dev project without a fixed PR-only workflow yet: run on every push (any branch, so a
+# branch pushed straight to the remote for the first time still gets a CI signal) and on pull
+# requests targeting main, plus manual dispatch for re-runs.
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Cancel superseded runs on the same branch/PR to save minutes; keep every push to main.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Cheap, build-independent guard: cmake/Dependencies.cmake pins JUCE/Catch2 by GIT_TAG (with
+  # GIT_SHALLOW TRUE, so a real SHA pin isn't possible there) and separately records each tag's
+  # resolved commit SHA as a comment. This job re-resolves both tags against their live remotes
+  # and fails if either has drifted from its recorded SHA (docs/plan.md section 1.3). Runs on
+  # its own so a build failure elsewhere never masks a pin-drift signal.
+  verify-pins:
+    name: verify-pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify dependency pin immutability
+        run: cmake -P .github/scripts/verify-pins.cmake
+
+  # Full build: cnpg_dsp + cnpg_plugin (VST3 + Standalone) + cnpg_tests via MSVC/VS2022, the
+  # complete test suite (every Catch2 tag), a clang-format check, the golden-commit guard, a
+  # never-gating benchmark report, and the pluginval strictness-10 gate against the built VST3.
+  windows:
+    name: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # check-golden-commit.sh needs history back to the push/PR base to diff commit ranges.
+          fetch-depth: 0
+
+      - name: Cache FetchContent dependency sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps/*-src
+          key: ${{ runner.os }}-deps-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      # shell: bash (not the windows-latest default pwsh) throughout this job's plain command
+      # steps: GitHub's pwsh wrapper does not reliably fail a step just because the last native
+      # command exited non-zero unless the script explicitly checks $LASTEXITCODE, whereas bash's
+      # implicit `-eo pipefail` (GitHub's default bash invocation) does this correctly out of the
+      # box. Steps below that already check $LASTEXITCODE explicitly (the pluginval run) stay in
+      # pwsh for its convenience there.
+      - name: Configure (windows-msvc-release preset)
+        shell: bash
+        run: cmake --preset windows-msvc-release
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release
+
+      - name: Test (ctest, full suite)
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: clang-format check (dsp/ plugin/ tests/)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find dsp plugin tests -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) -print0)
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No C++ sources found under dsp/ plugin/ tests/ yet; nothing to format-check."
+            exit 0
+          fi
+          echo "Checking ${#files[@]} file(s)..."
+          clang-format --dry-run --Werror "${files[@]}"
+
+      - name: Determine commit range for golden-commit guard
+        id: golden_range
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Golden-commit guard (tests/data/golden/** requires a Regenerate-Goldens trailer)
+        shell: bash
+        # Invoked via `bash <script>` rather than relying on the executable bit + shebang: this
+        # repo is developed on Windows where `core.filemode=false` is typical, so an execute bit
+        # set with chmod is easy to lose again on a future edit without anyone noticing locally.
+        run: bash .github/scripts/check-golden-commit.sh "${{ steps.golden_range.outputs.base }}" "${{ steps.golden_range.outputs.head }}"
+
+      # cnpg_bench lands in P1.10 (docs/plan.md). This step is intentionally structured to never
+      # fail the job -- neither now (binary doesn't exist yet) nor later (a perf regression must
+      # never gate CI; the 25-30% single-core figure is a manual milestone criterion read from
+      # this artifact, per docs/plan.md Global Constraints).
+      - name: Benchmark report (never gates)
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
+          bench_exe="build/bin/Release/cnpg_bench.exe"
+          if [[ -f "$bench_exe" ]]; then
+            echo "Running cnpg_bench..."
+            "$bench_exe" | tee cnpg-bench-report.txt
+          else
+            echo "cnpg_bench has not landed yet (lands P1.10 per docs/plan.md); nothing to report." | tee cnpg-bench-report.txt
+          fi
+          exit 0
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnpg-bench-report
+          path: cnpg-bench-report.txt
+          if-no-files-found: ignore
+
+      - name: Resolve pluginval pin (cmake/PluginvalPin.cmake is the single source of truth)
+        id: pluginval_pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe="$RUNNER_TEMP/print-pluginval-pin.cmake"
+          cat > "$probe" <<'EOF'
+          include(cmake/PluginvalPin.cmake)
+          message("PLUGINVAL_URL=${CNPG_PLUGINVAL_WINDOWS_URL}")
+          message("PLUGINVAL_SHA256=${CNPG_PLUGINVAL_WINDOWS_SHA256}")
+          EOF
+          # cmake's plain message() (no STATUS/etc. mode) writes to stderr, not stdout -- capture
+          # both streams or the sed extraction below silently sees an empty $output.
+          output="$(cmake -P "$probe" 2>&1)"
+          url="$(sed -n 's/^PLUGINVAL_URL=//p' <<<"$output")"
+          sha256="$(sed -n 's/^PLUGINVAL_SHA256=//p' <<<"$output")"
+          if [[ -z "$url" || -z "$sha256" ]]; then
+            echo "::error::Failed to resolve CNPG_PLUGINVAL_WINDOWS_URL / _SHA256 from cmake/PluginvalPin.cmake" >&2
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pluginval download
+        id: pluginval_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pluginval
+          key: ${{ runner.os }}-pluginval-${{ hashFiles('cmake/PluginvalPin.cmake') }}
+
+      - name: Download pluginval (pinned, SHA-256 verified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest_dir="$RUNNER_TEMP/pluginval"
+          zip_path="$dest_dir/pluginval_Windows.zip"
+          mkdir -p "$dest_dir"
+
+          if [[ "${{ steps.pluginval_cache.outputs.cache-hit }}" != "true" || ! -f "$zip_path" ]]; then
+            echo "Downloading pluginval from ${{ steps.pluginval_pin.outputs.url }}"
+            curl -sSL -o "$zip_path" "${{ steps.pluginval_pin.outputs.url }}"
+          else
+            echo "Using cached pluginval download at $zip_path"
+          fi
+
+          # Always re-verify the hash, cache hit or not (P0.6/docs/decisions/0001 baseline: CI
+          # re-verifies against the pin every run rather than trusting a prior copy blindly).
+          expected="$(tr '[:lower:]' '[:upper:]' <<<"${{ steps.pluginval_pin.outputs.sha256 }}")"
+          actual="$(sha256sum "$zip_path" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::pluginval_Windows.zip SHA-256 mismatch. Expected $expected, got $actual" >&2
+            exit 1
+          fi
+          echo "pluginval SHA-256 verified: $actual"
+
+          rm -rf "$dest_dir/extracted"
+          mkdir -p "$dest_dir/extracted"
+          unzip -q "$zip_path" -d "$dest_dir/extracted"
+
+      - name: Run pluginval (strictness 10, per docs/decisions/0001-pluginval-baseline.md)
+        shell: pwsh
+        run: |
+          $pluginvalExe = Get-ChildItem -Path "$env:RUNNER_TEMP/pluginval/extracted" -Recurse -Filter pluginval.exe | Select-Object -First 1
+          if (-not $pluginvalExe) {
+            throw "pluginval.exe not found under $env:RUNNER_TEMP/pluginval/extracted after unzip"
+          }
+
+          $vst3Path = "build/plugin/cnpg_plugin_artefacts/Release/VST3/cecinestpasunguitar.vst3"
+          if (-not (Test-Path $vst3Path)) {
+            throw "VST3 artefact not found at $vst3Path (see docs/decisions/0001-pluginval-baseline.md for the correct JUCE artefact path)"
+          }
+
+          New-Item -ItemType Directory -Force -Path "pluginval-logs" | Out-Null
+          $logPath = "pluginval-logs/pluginval.log"
+
+          & $pluginvalExe.FullName --strictness-level 10 --validate $vst3Path 2>&1 | Tee-Object -FilePath $logPath
+          $exitCode = $LASTEXITCODE
+
+          if ($exitCode -ne 0) {
+            Write-Error "pluginval failed with exit code $exitCode -- see $logPath"
+            exit $exitCode
+          }
+
+      - name: Upload pluginval log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pluginval-log
+          path: pluginval-logs/pluginval.log
+          if-no-files-found: warn
+
+      - name: Upload VST3 / Standalone artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnpg-plugin-artefacts
+          path: |
+            build/plugin/cnpg_plugin_artefacts/Release/VST3/
+            build/plugin/cnpg_plugin_artefacts/Release/Standalone/
+          if-no-files-found: warn
+
+  # dsp/-only portability guard (docs/plan.md section 1.4/1.5): CNPG_BUILD_PLUGIN=OFF via the
+  # linux-dsp-only preset, so JUCE is never fetched or compiled here. Matrix over GCC and Clang
+  # because cmake/CompilerWarnings.cmake's cnpg_set_warnings() promises both stay warning-clean,
+  # not just GCC.
+  ubuntu:
+    name: ubuntu (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Cache FetchContent dependency sources
+        uses: actions/cache@v4
+        with:
+          path: build-dsp/_deps/*-src
+          key: ${{ runner.os }}-deps-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Configure (linux-dsp-only preset)
+        run: cmake --preset linux-dsp-only 2>&1 | tee configure.log
+
+      # No explicit --target list: the linux-dsp-only preset already sets CNPG_BUILD_PLUGIN=OFF,
+      # so the default "all" target is exactly { cnpg_dsp, cnpg_tests } today and will grow to
+      # include cnpg_bench / cnpg_render / cnpg_calibrate automatically as each lands in
+      # tests/CMakeLists.txt (P1/P2) -- matching the brief's "each as it lands" without needing
+      # a workflow edit per target.
+      - name: Build (cnpg_dsp, cnpg_tests, and cnpg_bench/cnpg_render/cnpg_calibrate as they land)
+        run: cmake --build --preset linux-dsp-only 2>&1 | tee build.log
+
+      - name: Verify no JUCE fetch or compile in this job's log (portability guard)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -qi 'juce' configure.log build.log; then
+            echo "::error::Found a 'juce' reference in the ubuntu dsp-only job log -- CNPG_BUILD_PLUGIN=OFF must keep this job entirely JUCE-free." >&2
+            grep -i 'juce' configure.log build.log >&2
+            exit 1
+          fi
+          echo "Confirmed: no 'juce' reference in configure.log or build.log."
+
+      - name: Test (ctest, dsp/ portability guard)
+        run: ctest --test-dir build-dsp --output-on-failure
