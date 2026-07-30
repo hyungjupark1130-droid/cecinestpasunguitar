@@ -8,8 +8,7 @@
 
 namespace cnpg::dsp {
 
-struct OutputGainParams
-{
+struct OutputGainParams {
     float gainDb = 0.0f;
 };
 
@@ -21,9 +20,8 @@ struct OutputGainParams
 // can never overshoot either one. If no new target was set since the last process()
 // call, the gain is already settled and process() is a plain per-sample multiply (exact
 // for unity gain, since multiplying an IEEE-754 float by 1.0f is bit-exact).
-class OutputGain
-{
-public:
+class OutputGain {
+  public:
     // Message thread; may allocate. Nothing to allocate here (no buffers, only two
     // scalar gains), but every module keeps this signature per the unified contract.
     void prepare(double sampleRate, int maxBlockSize);
@@ -40,9 +38,9 @@ public:
     // Realtime-safe; never allocates or locks. Valid for numSamples in [1, maxBlockSize].
     void process(const Sample* in, Sample* out, int numSamples) noexcept;
 
-private:
-    float currentGainLinear_ = 1.0f;  // last settled linear gain
-    float targetGainLinear_  = 1.0f;  // linear gain requested by the most recent setParams()
+  private:
+    float currentGainLinear_ = 1.0f; // last settled linear gain
+    float targetGainLinear_ = 1.0f;  // linear gain requested by the most recent setParams()
 };
 
-}  // namespace cnpg::dsp
+} // namespace cnpg::dsp

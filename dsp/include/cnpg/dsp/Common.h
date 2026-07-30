@@ -7,15 +7,15 @@
 
 namespace cnpg::dsp {
 
-using Sample   = float;   // realtime path (float32, locked)
-using Sample64 = double;  // offline references, goldens, energy accounting in tests
+using Sample = float;    // realtime path (float32, locked)
+using Sample64 = double; // offline references, goldens, energy accounting in tests
 
 // Design-envelope constants; all preallocation in prepare() is sized against these.
-inline constexpr int kMaxStrings         = 8;       // active count configurable 1..8, default 6
-inline constexpr int kMinMidiNote        = 21;       // A0
-inline constexpr int kMaxMidiNote        = 108;      // C8
-inline constexpr double kMaxDesignRateHz = 96000.0;  // 44.1-96 kHz guaranteed; 192 kHz best-effort
-inline constexpr int kMaxOversampling    = 8;        // Oversampler factor upper bound; valid factors {2, 4, 8} only
+inline constexpr int kMaxStrings = 8;               // active count configurable 1..8, default 6
+inline constexpr int kMinMidiNote = 21;             // A0
+inline constexpr int kMaxMidiNote = 108;            // C8
+inline constexpr double kMaxDesignRateHz = 96000.0; // 44.1-96 kHz guaranteed; 192 kHz best-effort
+inline constexpr int kMaxOversampling = 8;          // Oversampler factor upper bound; valid factors {2, 4, 8} only
 
 // Module lifecycle convention (informal concept; every module in dsp/ conforms):
 //   void prepare(double sampleRate, int maxBlockSize);   // message thread, may allocate
@@ -31,4 +31,4 @@ inline constexpr int kMaxOversampling    = 8;        // Oversampler factor upper
 // process(...) never allocates, locks, throws, performs I/O, or traps on denormals
 // (FTZ/DAZ is engaged by the caller's RAII guard in processBlock, not by this module).
 
-}  // namespace cnpg::dsp
+} // namespace cnpg::dsp

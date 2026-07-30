@@ -12,15 +12,11 @@ using cnpg::dsp::Sample;
 
 namespace {
 
-float dbToLinearRef(float gainDb)
-{
-    return std::pow(10.0f, gainDb / 20.0f);
-}
+float dbToLinearRef(float gainDb) { return std::pow(10.0f, gainDb / 20.0f); }
 
-}  // namespace
+} // namespace
 
-TEST_CASE("OutputGain: unity gain passes a buffer bit-exactly after smoothing settles", "[contract]")
-{
+TEST_CASE("OutputGain: unity gain passes a buffer bit-exactly after smoothing settles", "[contract]") {
     OutputGain gain;
     gain.prepare(44100.0, 512);
 
@@ -49,8 +45,7 @@ TEST_CASE("OutputGain: unity gain passes a buffer bit-exactly after smoothing se
         REQUIRE(output[static_cast<size_t>(i)] == input[static_cast<size_t>(i)]);
 }
 
-TEST_CASE("OutputGain: a 12 dB step reaches target within one block without exceeding it", "[contract]")
-{
+TEST_CASE("OutputGain: a 12 dB step reaches target within one block without exceeding it", "[contract]") {
     OutputGain gain;
     gain.prepare(44100.0, 512);
 
@@ -58,7 +53,7 @@ TEST_CASE("OutputGain: a 12 dB step reaches target within one block without exce
     constexpr int numSamples = 128;
     std::vector<Sample> input(numSamples, 1.0f);
     std::vector<Sample> output(numSamples, 0.0f);
-    gain.process(input.data(), output.data(), numSamples);  // settle at 0 dB (unity)
+    gain.process(input.data(), output.data(), numSamples); // settle at 0 dB (unity)
 
     gain.setParams(OutputGainParams{12.0f});
     gain.process(input.data(), output.data(), numSamples);
@@ -77,8 +72,7 @@ TEST_CASE("OutputGain: a 12 dB step reaches target within one block without exce
         REQUIRE(output[static_cast<size_t>(i)] >= output[static_cast<size_t>(i - 1)] - 1e-6f);
 }
 
-TEST_CASE("OutputGain: reset() clears ramp state", "[contract]")
-{
+TEST_CASE("OutputGain: reset() clears ramp state", "[contract]") {
     OutputGain gain;
     gain.prepare(44100.0, 512);
 
@@ -86,11 +80,11 @@ TEST_CASE("OutputGain: reset() clears ramp state", "[contract]")
     constexpr int numSamples = 64;
     std::vector<Sample> input(numSamples, 1.0f);
     std::vector<Sample> output(numSamples, 0.0f);
-    gain.process(input.data(), output.data(), numSamples);  // settle at 0 dB / unity
+    gain.process(input.data(), output.data(), numSamples); // settle at 0 dB / unity
 
     // Retarget without processing: current (unity) and target (+12 dB) now differ.
     gain.setParams(OutputGainParams{12.0f});
-    gain.reset();  // must collapse the pending ramp immediately
+    gain.reset(); // must collapse the pending ramp immediately
 
     const float targetLinear = dbToLinearRef(12.0f);
     gain.process(input.data(), output.data(), numSamples);
@@ -101,8 +95,7 @@ TEST_CASE("OutputGain: reset() clears ramp state", "[contract]")
         REQUIRE(output[static_cast<size_t>(i)] == Catch::Approx(targetLinear).margin(1e-6));
 }
 
-TEST_CASE("OutputGain: process handles numSamples from 1 to maxBlockSize", "[contract]")
-{
+TEST_CASE("OutputGain: process handles numSamples from 1 to maxBlockSize", "[contract]") {
     constexpr int maxBlockSize = 512;
     OutputGain gain;
     gain.prepare(44100.0, maxBlockSize);
@@ -111,8 +104,7 @@ TEST_CASE("OutputGain: process handles numSamples from 1 to maxBlockSize", "[con
     std::vector<Sample> input(static_cast<size_t>(maxBlockSize), 1.0f);
     std::vector<Sample> output(static_cast<size_t>(maxBlockSize), 0.0f);
 
-    for (int numSamples = 1; numSamples <= maxBlockSize; ++numSamples)
-    {
+    for (int numSamples = 1; numSamples <= maxBlockSize; ++numSamples) {
         const float gainDb = (numSamples % 2 == 0) ? 6.0f : -6.0f;
         gain.setParams(OutputGainParams{gainDb});
         gain.process(input.data(), output.data(), numSamples);
