@@ -1,5 +1,16 @@
 # cnpg_dsp -- JUCE-free physics + block DSP static library.
 #
-# Target definition (STATIC library, dsp/include public include dir, dsp/src sources) lands
-# in Task P0.3 alongside the first module (OutputGain). Intentionally empty for now: this
-# file only needs to exist so the top-level CMakeLists.txt's add_subdirectory(dsp) succeeds.
+# STATIC library, public include dir dsp/include, sources from dsp/src. Links nothing
+# external (see docs/plan.md section 2: every dsp/ type is 100% JUCE-free and headless).
+# cnpg_set_warnings() is defined by cmake/CompilerWarnings.cmake, included by the
+# top-level CMakeLists.txt before add_subdirectory(dsp).
+
+add_library(cnpg_dsp STATIC
+    src/OutputGain.cpp
+)
+
+target_include_directories(cnpg_dsp PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+cnpg_set_warnings(cnpg_dsp)
