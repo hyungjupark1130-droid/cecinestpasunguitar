@@ -1,5 +1,7 @@
 #pragma once
 
+#include <type_traits>
+
 #include "cnpg/dsp/Common.h"
 
 // OutputGain -- see docs/plan.md section 2.11 ("Monitoring-chain helpers: CabFilter,
@@ -11,6 +13,12 @@ namespace cnpg::dsp {
 struct OutputGainParams {
     float gainDb = 0.0f;
 };
+
+// Task P1.1: every dsp param struct that a plugin/src::Parameters.cpp snapshot writes into
+// carries this assertion -- the audio thread copies the struct wholesale out of the
+// once-per-block APVTS snapshot with no allocation or locking, which requires trivial copyability.
+static_assert(std::is_trivially_copyable_v<OutputGainParams>,
+              "OutputGainParams must stay trivially copyable for the realtime APVTS snapshot path.");
 
 // A per-block-smoothed output gain. setParams() retargets the gain in decibels; the next
 // process() call ramps the internal linear gain linearly from its last settled value to

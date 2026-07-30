@@ -7,6 +7,8 @@
 
 add_executable(cnpg_tests
     dsp/OutputGainTests.cpp
+    dsp/ParamStructsTests.cpp
+    dsp/ScopedFtzDazGuardTests.cpp
 )
 
 target_link_libraries(cnpg_tests PRIVATE
