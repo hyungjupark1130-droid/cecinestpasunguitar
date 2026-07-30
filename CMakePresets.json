@@ -1,0 +1,78 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "displayName": "Windows MSVC Release",
+      "description": "Full build (cnpg_dsp + cnpg_plugin + cnpg_tests) via VS2022, config Release.",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Release",
+        "CNPG_BUILD_PLUGIN": "ON",
+        "CNPG_BUILD_TESTS": "ON",
+        "CNPG_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "displayName": "Windows MSVC Debug",
+      "description": "Full build (cnpg_dsp + cnpg_plugin + cnpg_tests) via VS2022, config Debug.",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug",
+        "CNPG_BUILD_PLUGIN": "ON",
+        "CNPG_BUILD_TESTS": "ON",
+        "CNPG_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "linux-dsp-only",
+      "displayName": "Linux dsp-only (portability guard)",
+      "description": "Headless cnpg_dsp + cnpg_tests build, JUCE never fetched; mirrors the ubuntu CI job locally.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-dsp",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CNPG_BUILD_PLUGIN": "OFF",
+        "CNPG_BUILD_TESTS": "ON",
+        "CNPG_WARNINGS_AS_ERRORS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "linux-dsp-only",
+      "configurePreset": "linux-dsp-only"
+    }
+  ]
+}
