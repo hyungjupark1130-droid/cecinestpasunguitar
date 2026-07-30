@@ -1,0 +1,32 @@
+# Build output
+build/
+build-*/
+out/
+
+# MSVC / Visual Studio artifacts
+.vs/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.log
+*.exp
+*.lib
+*.suo
+*.user
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+CMakeUserPresets.json
+Debug/
+Release/
+x64/
+x86/
+
+# Rendered audio output (cnpg_render, listening passes)
+renders/
+
+# Controller scratch directory — never committed
+.superpowers/
