@@ -32,9 +32,20 @@ jobs:
   # Full build: cnpg_dsp + cnpg_plugin (VST3 + Standalone) + cnpg_tests via MSVC/VS2022, the
   # complete test suite (every Catch2 tag), a clang-format check, the golden-commit guard, a
   # never-gating benchmark report, and the pluginval strictness-10 gate against the built VST3.
+  #
+  # Pinned to windows-2022 (NOT windows-latest): as of this writing windows-latest has migrated
+  # to Windows Server 2025 / Visual Studio 2026 (see actions/runner-images' README "Available
+  # Images" table -- windows-latest now resolves to the windows-2025-vs2026 image), which has no
+  # "Visual Studio 17 2022" instance for CMake's VS generator to find (confirmed by CI run
+  # 30569598971: "CMake Error ... Generator Visual Studio 17 2022 could not find any instance of
+  # Visual Studio."). windows-2022 is still a supported, non-deprecated GA label (per the same
+  # README) and its readme confirms Visual Studio Enterprise 2022 17.14.x is installed -- the
+  # same major toolchain (VS2022) as the dev machine's windows-msvc-release/-debug presets, so
+  # this keeps CI and local builds on matching compilers/warning behavior with zero changes to
+  # CMakePresets.json or the local presets. Revisit if/when windows-2022 itself is deprecated.
   windows:
     name: windows
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
