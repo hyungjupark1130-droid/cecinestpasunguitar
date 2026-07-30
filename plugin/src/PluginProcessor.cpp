@@ -5,8 +5,9 @@
 namespace {
 
 // P0 walking-skeleton sine-tone proof (docs/plan.md Task P0.4 step 3). This is a fixed test
-// stimulus wired directly into the plugin shell, not a dsp/ module -- it is replaced once real
-// excitation/string/pickup dsp lands starting P1.1.
+// stimulus wired directly into the plugin shell, not a dsp/ module -- it is gain-staged through
+// cnpg::dsp::OutputGain starting P1.1, and is replaced entirely once the real
+// excitation/string/pickup/triode chain lands (docs/plan.md Task P1.9).
 constexpr double kSineFrequencyHz = 440.0;
 constexpr float kSineLevelDbfs = -18.0f;
 
@@ -14,10 +15,9 @@ float dbToLinear(float dB) noexcept { return std::pow(10.0f, dB / 20.0f); }
 
 const float kSineAmplitudeLinear = dbToLinear(kSineLevelDbfs);
 
-// State-version XML scaffold (docs/plan.md Task P0.4 step 4). Replaced by APVTS-backed state
-// in P1.1; the root tag name and attribute name are internal to this scaffold and do not need
-// to survive that migration.
-const juce::Identifier kStateRootTag("CNPG_PLUGIN_STATE");
+// APVTS-backed state (docs/plan.md Task P1.1 step 4): the attribute name is the only piece of
+// the P0.4 scaffold that survives -- the root tag is now the APVTS's own ValueTree type
+// ("PARAMETERS", set at construction below), not this scaffold's "CNPG_PLUGIN_STATE".
 const juce::Identifier kStateVersionAttribute("cnpgStateVersion");
 
 } // namespace
@@ -26,12 +26,19 @@ const juce::Identifier kStateVersionAttribute("cnpgStateVersion");
 PluginProcessor::PluginProcessor()
     : juce::AudioProcessor(juce::AudioProcessor::BusesProperties()
                                .withOutput("Output", juce::AudioChannelSet::stereo(), true)
-                               .withInput("Sidechain", juce::AudioChannelSet::stereo(), false)) {}
+                               .withInput("Sidechain", juce::AudioChannelSet::stereo(), false)),
+      apvts(*this, nullptr, "PARAMETERS", cnpg::params::createParameterLayout()) {
+    // Message thread, after apvts finishes constructing: see the RawParameterPointers doc
+    // comment in Parameters.h for why caching these once here (rather than looking parameters
+    // up by ID on the audio thread) is required for the once-per-block snapshot to be
+    // realtime-safe.
+    rawParams_ = cnpg::params::collectRawParameterPointers(apvts);
+}
 
 void PluginProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
-    juce::ignoreUnused(samplesPerBlock);
     currentSampleRate_ = sampleRate;
     sinePhase_ = 0.0;
+    outputGain_.prepare(sampleRate, samplesPerBlock);
 }
 
 void PluginProcessor::releaseResources() {}
@@ -51,7 +58,18 @@ bool PluginProcessor::supportsDoublePrecisionProcessing() const {
 
 void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) {
     juce::ignoreUnused(midiMessages);
-    juce::ScopedNoDenormals noDenormals;
+    // Instantiated first, per docs/plan.md Task P1.1 step 3: every dsp/ call below this point
+    // (currently just OutputGain::process) runs with FTZ/DAZ engaged. Replaces
+    // juce::ScopedNoDenormals with the dsp-side, headless-testable equivalent (docs/plan.md
+    // section 2 file tree: "there is no plugin DenormalGuard.h").
+    const cnpg::dsp::ScopedFtzDazGuard ftzDazGuard;
+
+    // Once-per-block APVTS snapshot (docs/plan.md Task P1.1 step 2): a trivial atomic-read
+    // adapter, no allocation or locking. Only outputGain is consumed by a real dsp/ module so
+    // far -- the rest becomes live as PluckExciter/StringNetwork/PickupTap/TriodeStage/
+    // CabFilter/SoftClipLimiter land starting P1.2 (docs/plan.md Task P1.9 wires the full
+    // chain).
+    const cnpg::params::Snapshot snapshot = cnpg::params::snapshotParameters(rawParams_);
 
     const int numSamples = buffer.getNumSamples();
     const int numOutputChannels = getTotalNumOutputChannels();
@@ -73,6 +91,14 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     }
 
     sinePhase_ = phase;
+
+    // Gain-stage the sine tone through the real OutputGain module, retargeted from this block's
+    // snapshot every call before process() runs (docs/plan.md Task P1.1 known ledger item: this
+    // ordering closes the P0.3 gap where a host re-prepare's unity reset could otherwise survive
+    // for a whole block). Default outputGainDb is 0 dB (unity), so the P0.5/P0.8 -18 dBFS
+    // reference level is unchanged unless the parameter is moved.
+    outputGain_.setParams(snapshot.outputGain);
+    outputGain_.process(firstChannel, firstChannel, numSamples);
 
     // Duplicate mono to every remaining output channel (docs/plan.md Task P0.4 step 3).
     for (int channel = 1; channel < numOutputChannels; ++channel)
@@ -132,21 +158,26 @@ void PluginProcessor::changeProgramName(int index, const juce::String& newName) 
 
 //==============================================================================
 void PluginProcessor::getStateInformation(juce::MemoryBlock& destData) {
-    juce::XmlElement xml(kStateRootTag);
-    xml.setAttribute(kStateVersionAttribute, kCnpgStateVersion);
-    copyXmlToBinary(xml, destData);
+    const juce::ValueTree state = apvts.copyState();
+    const std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    xml->setAttribute(kStateVersionAttribute, kCnpgStateVersion);
+    copyXmlToBinary(*xml, destData);
 }
 
 void PluginProcessor::setStateInformation(const void* data, int sizeInBytes) {
     const std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
 
-    if (xml == nullptr || !xml->hasTagName(kStateRootTag))
-        return; // malformed or foreign blob: reject to defaults
+    // Also how a P0.4-scaffold blob is safely rejected: its root tag is "CNPG_PLUGIN_STATE",
+    // never apvts.state.getType() ("PARAMETERS"), so it falls through to defaults here without
+    // reading getIntAttribute at all (no session-compatibility guarantee before P5, docs/plan.md
+    // Global Constraints).
+    if (xml == nullptr || !xml->hasTagName(apvts.state.getType()))
+        return; // malformed, foreign, or pre-APVTS blob: reject to defaults
 
     if (xml->getIntAttribute(kStateVersionAttribute, -1) != kCnpgStateVersion)
         return; // unknown version: reject to defaults (docs/plan.md Task P0.4 step 4)
 
-    // Nothing else to restore yet -- full APVTS-backed state arrives in P1.1.
+    apvts.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
 //==============================================================================
