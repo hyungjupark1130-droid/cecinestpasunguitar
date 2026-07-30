@@ -180,8 +180,18 @@ jobs:
 
           # Always re-verify the hash, cache hit or not (P0.6/docs/decisions/0001 baseline: CI
           # re-verifies against the pin every run rather than trusting a prior copy blindly).
+          #
+          # Extract via grep -oE for a bare 64-hex-char run rather than `cut -d' ' -f1`: on the
+          # windows runner $RUNNER_TEMP is a native Windows path (e.g. D:\a\_temp), and
+          # concatenating it with forward slashes above yields a mixed \ and / path. GNU
+          # sha256sum detects the backslash in the filename and switches to its "escaped
+          # filename" output mode, which prepends a literal backslash to the whole checksum
+          # line (`\<hash>  <escaped-name>`) -- `cut -d' ' -f1` then captures "\<hash>" instead
+          # of "<hash>", so the comparison below false-failed even though the downloaded file's
+          # real hash matched the pin exactly (confirmed against CI run 30570966891). Matching
+          # the hex run directly is immune to that escaping regardless of the path's shape.
           expected="$(tr '[:lower:]' '[:upper:]' <<<"${{ steps.pluginval_pin.outputs.sha256 }}")"
-          actual="$(sha256sum "$zip_path" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+          actual="$(sha256sum "$zip_path" | grep -oE '[0-9a-fA-F]{64}' | tr '[:lower:]' '[:upper:]')"
           if [[ "$actual" != "$expected" ]]; then
             echo "::error::pluginval_Windows.zip SHA-256 mismatch. Expected $expected, got $actual" >&2
             exit 1
