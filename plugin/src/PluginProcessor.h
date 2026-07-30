@@ -60,10 +60,13 @@ class PluginProcessor final : public juce::AudioProcessor {
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // Bumped from the P0.4 scaffold's 1: the APVTS-backed schema landing in P1.1 is a different,
-    // incompatible shape from the P0 XML blob, even though the root-tag check above already
-    // rejects the old blob on its own.
-    static constexpr int kCnpgStateVersion = 2;
+    // Stays 1 through all of P1 (docs/plan.md Task P2.1 is what bumps this to 2, and keeps it 2
+    // through all of P2; P2.1's own acceptance criterion requires loading a genuine version-1 P1
+    // state without crashing, which requires a version-1 P1 state to actually exist). The
+    // root-tag check above already rejects the P0.4 XML scaffold blob on its own, regardless of
+    // this integer, since that blob's root tag ("CNPG_PLUGIN_STATE") never matches the APVTS's
+    // ("PARAMETERS").
+    static constexpr int kCnpgStateVersion = 1;
 
   private:
     // Initialized in the constructor's member-initializer list (PluginProcessor.cpp), matching

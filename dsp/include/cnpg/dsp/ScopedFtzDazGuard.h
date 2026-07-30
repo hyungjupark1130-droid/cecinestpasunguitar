@@ -5,7 +5,7 @@
 // ScopedFtzDazGuard -- see docs/plan.md section 2 file tree ("(P1) JUCE-free RAII FTZ/DAZ
 // MXCSR guard, instantiated first in processBlock (dsp-side; there is no plugin
 // DenormalGuard.h)"). Task P1.1. Zero JUCE includes: this is the headless-testable equivalent
-// of juce::ScopedNoDenormals, living dsp-side so ScopedFtzDazGuardTests.cpp can read MXCSR
+// of JUCE's ScopedNoDenormals, living dsp-side so ScopedFtzDazGuardTests.cpp can read MXCSR
 // directly without linking JUCE.
 //
 // x86/x86_64 only (this project's two CI targets -- windows-2022 and ubuntu-latest -- and the
