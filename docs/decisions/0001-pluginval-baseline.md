@@ -86,3 +86,15 @@ the same command into CI using this same pin.
 
 Task P0.8 ("Manual acceptance — Ableton Live load check") records its pass/fail result and the Live
 version used, here, per `docs/plan.md`. Not yet performed — out of scope for P0.6.
+
+## Appendix: P0 Live smoke (Task P0.8 manual acceptance)
+
+- Date: 2026-07-30
+- Host: Ableton Live 12 Suite 12.4.3, Windows 11 Pro for Workstations
+- Performed by: project author (manual gate)
+- Results — ALL PASS:
+  - Browser lists plugin under vendor `Hyung Ju Park`; insertion on MIDI track succeeds
+  - Track meter shows the continuous sine on both channels at ~-18 dBFS
+  - Generic editor (plug-in window) opens and closes without crash (empty parameter list expected at P0)
+  - Live set save -> close -> reload: plugin restores, sound resumes, no crash (state version attribute survives)
+  - Sample-rate cycling 44.1 -> 48 -> 96 kHz: clean 440 Hz at each rate (covers the P0.5-deferred 96 kHz check)
