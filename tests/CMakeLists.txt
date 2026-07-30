@@ -6,6 +6,9 @@
 # in P2.
 
 add_executable(cnpg_tests
+    dsp/EventQueueTests.cpp
+    dsp/MidiTranslationTests.cpp
+    dsp/NoteAllocatorTests.cpp
     dsp/OutputGainTests.cpp
     dsp/ParamStructsTests.cpp
     dsp/ScopedFtzDazGuardTests.cpp

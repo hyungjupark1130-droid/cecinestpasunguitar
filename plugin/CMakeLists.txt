@@ -19,6 +19,7 @@ juce_add_plugin(cnpg_plugin
     COPY_PLUGIN_AFTER_BUILD   FALSE)
 
 target_sources(cnpg_plugin PRIVATE
+    src/MidiConverter.cpp
     src/Parameters.cpp
     src/PluginProcessor.cpp
 )
