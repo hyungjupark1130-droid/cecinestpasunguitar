@@ -11,6 +11,7 @@ add_executable(cnpg_tests
     dsp/NoteAllocatorTests.cpp
     dsp/OutputGainTests.cpp
     dsp/ParamStructsTests.cpp
+    dsp/PluckExciterTests.cpp
     dsp/ScopedFtzDazGuardTests.cpp
     support/AllocationGuard.cpp
 )

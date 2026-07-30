@@ -8,6 +8,7 @@
 add_library(cnpg_dsp STATIC
     src/NoteAllocator.cpp
     src/OutputGain.cpp
+    src/PluckExciter.cpp
 )
 
 target_include_directories(cnpg_dsp PUBLIC
