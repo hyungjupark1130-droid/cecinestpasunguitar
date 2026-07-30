@@ -26,7 +26,8 @@ inline constexpr int kMaxOversampling    = 8;        // Oversampler factor upper
 // prepare() sizes all state for the worst case (kMaxStrings, kMinMidiNote, maxBlockSize)
 // against max(hostSampleRate, kMaxDesignRateHz), so a 192 kHz best-effort host never
 // under-allocates. reset() is realtime-safe and clears transient state (delay-line
-// contents, ramp/smoothing progress) without touching last-configured parameters.
+// contents, ramp/smoothing progress) -- the exact scope of "state" is per-module and
+// documented on each module's own reset().
 // process(...) never allocates, locks, throws, performs I/O, or traps on denormals
 // (FTZ/DAZ is engaged by the caller's RAII guard in processBlock, not by this module).
 
