@@ -27,7 +27,6 @@
       "description": "Full build (cnpg_dsp + cnpg_plugin + cnpg_tests) via VS2022, config Release.",
       "inherits": "windows-base",
       "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "Release",
         "CNPG_BUILD_PLUGIN": "ON",
         "CNPG_BUILD_TESTS": "ON",
         "CNPG_WARNINGS_AS_ERRORS": "ON"
@@ -39,7 +38,6 @@
       "description": "Full build (cnpg_dsp + cnpg_plugin + cnpg_tests) via VS2022, config Debug.",
       "inherits": "windows-base",
       "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "Debug",
         "CNPG_BUILD_PLUGIN": "ON",
         "CNPG_BUILD_TESTS": "ON",
         "CNPG_WARNINGS_AS_ERRORS": "ON"
