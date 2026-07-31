@@ -107,10 +107,16 @@ jobs:
         # set with chmod is easy to lose again on a future edit without anyone noticing locally.
         run: bash .github/scripts/check-golden-commit.sh "${{ steps.golden_range.outputs.base }}" "${{ steps.golden_range.outputs.head }}"
 
-      # cnpg_bench lands in P1.10 (docs/plan.md). This step is intentionally structured to never
-      # fail the job -- neither now (binary doesn't exist yet) nor later (a perf regression must
-      # never gate CI; the 25-30% single-core figure is a manual milestone criterion read from
-      # this artifact, per docs/plan.md Global Constraints).
+      # cnpg_bench landed in P1.10 (docs/plan.md; tests/bench/BenchMain.cpp). This step is
+      # intentionally structured to never fail the job: a perf regression must never gate CI --
+      # the 25-30% single-core figure is a manual milestone criterion read from this artifact
+      # against docs/bench/p1-baseline.md / docs/bench/p2-exit.md, per docs/plan.md Global
+      # Constraints and section 4.7 ("Why CI never gates on performance"). The `-f` guard stays
+      # (rather than assuming the binary exists) so a future build-system change that stops
+      # producing it degrades this step to a message instead of a job failure. Runs the exact
+      # single-string configuration docs/bench/p1-baseline.md records, at a shorter --seconds than
+      # the dev-machine baseline (CI runners are noise-dominated and unrepresentative per section
+      # 4.7, so there is no value in spending 60 real seconds of shared-runner time here).
       - name: Benchmark report (never gates)
         shell: bash
         continue-on-error: true
@@ -119,9 +125,9 @@ jobs:
           bench_exe="build/bin/Release/cnpg_bench.exe"
           if [[ -f "$bench_exe" ]]; then
             echo "Running cnpg_bench..."
-            "$bench_exe" | tee cnpg-bench-report.txt
+            "$bench_exe" --strings 1 --samplerate 48000 --blocksize 128 --oversample 2 --seconds 10 | tee cnpg-bench-report.txt
           else
-            echo "cnpg_bench has not landed yet (lands P1.10 per docs/plan.md); nothing to report." | tee cnpg-bench-report.txt
+            echo "cnpg_bench binary not found at $bench_exe -- nothing to report." | tee cnpg-bench-report.txt
           fi
           exit 0
 

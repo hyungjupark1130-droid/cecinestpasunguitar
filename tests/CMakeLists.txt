@@ -4,6 +4,11 @@
 # alongside the first [contract] test. Links cnpg_dsp + Catch2::Catch2WithMain only --
 # no JUCE, per the naming registry. cnpg_bench and cnpg_render land in P1, cnpg_calibrate
 # in P2.
+#
+# cnpg_bench (Task P1.10) lives in its own subdirectory with its own CMakeLists.txt (the naming
+# registry's file tree, docs/plan.md section 2 line 177-178) since, unlike cnpg_tests, it links
+# cnpg_dsp only -- no Catch2 -- and needs its own target_compile_definitions for the git-commit
+# baked into its JSON report.
 
 add_executable(cnpg_tests
     dsp/AliasingGateTests.cpp
@@ -60,6 +65,8 @@ include(Catch)
 # `ctest -L contract` selects by tag exactly as docs/plan.md section 1.5's conventions
 # describe.
 catch_discover_tests(cnpg_tests ADD_TAGS_AS_LABELS)
+
+add_subdirectory(bench) # cnpg_bench -- Task P1.10
 
 # Regenerate-goldens target (docs/plan.md section 1.6). The section-1.6 draft drives this from
 # `cnpg_render --regenerate-goldens`; cnpg_render lands in Task P1.11, so until then the
