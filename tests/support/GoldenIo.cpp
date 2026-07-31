@@ -18,7 +18,7 @@ namespace cnpg::test {
 namespace {
 
 std::string rateFolder(double sampleRate) {
-    char buffer[32];
+    char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%d", static_cast<int>(sampleRate + 0.5));
     return std::string(buffer);
 }
@@ -93,7 +93,7 @@ void writeArray(std::ostream& os, const char* key, const std::vector<double>& va
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (i != 0)
             os << ", ";
-        char buffer[64];
+        char buffer[512];
         std::snprintf(buffer, sizeof(buffer), "%.*g", precision, values[i]);
         os << buffer;
     }
@@ -192,14 +192,14 @@ void writeGoldenSidecar(const std::filesystem::path& path, const GoldenSidecar& 
     file << "  \"tapPosition\": " << sidecar.tapPosition << ",\n";
     file << "  \"lengthSamples\": " << static_cast<long long>(sidecar.lengthSamples) << ",\n";
     {
-        char buffer[64];
+        char buffer[512];
         std::snprintf(buffer, sizeof(buffer), "%.1e", sidecar.atol);
         file << "  \"atol\": " << buffer << ",\n";
     }
     writeArray(file, "partialHz", sidecar.features.partialHz, 12);
     writeArray(file, "bandT60Seconds", sidecar.features.bandT60, 8);
     {
-        char buffer[64];
+        char buffer[512];
         std::snprintf(buffer, sizeof(buffer), "%.8g", sidecar.features.attackRmsDbfs);
         file << "  \"attackRmsDbfs\": " << buffer << "\n";
     }

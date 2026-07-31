@@ -505,7 +505,7 @@ TEST_CASE("SPIKE: fractional-delay comparison (report generator)", "[.][report]"
         const auto bent = measureBend(true);
         const auto still = measureBend(false);
 
-        char line[192];
+        char line[512];
         std::snprintf(line, sizeof(line), "%s,%.2f,%.2f,%.3e,%.3f", kindName(kind), staticNs, bendingNs, bent.first,
                       bent.second / std::max(still.second, 1e-300));
         std::cout << line << "\n";

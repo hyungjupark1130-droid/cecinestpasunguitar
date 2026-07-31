@@ -14,7 +14,7 @@ std::string variantName(cnpg::dsp::FractionalDelayKind kind) {
 }
 
 std::string scenarioFileName(int midiNote) {
-    char buffer[64];
+    char buffer[128];
     // docs/plan.md section 4.3 example: "midi069_pluck28_tap87".
     std::snprintf(buffer, sizeof(buffer), "midi%03d_pluck28_tap87", midiNote);
     return std::string(buffer);

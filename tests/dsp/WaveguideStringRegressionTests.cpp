@@ -31,7 +31,7 @@ std::string utcNow() {
 #else
     gmtime_r(&now, &utc);
 #endif
-    char buffer[32];
+    char buffer[128];
     std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02dZ", utc.tm_year + 1900, utc.tm_mon + 1,
                   utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec);
     return std::string(buffer);
@@ -194,7 +194,7 @@ TEST_CASE("REGRESSION/REGEN: rewrite string_ir goldens", "[.][regen]") {
                 GoldenSidecar oldSidecar;
                 const bool hadSidecar = readGoldenSidecar(goldenJsonPath(kind, sampleRate, midiNote), oldSidecar);
 
-                char line[256];
+                char line[512];
                 std::snprintf(line, sizeof(line), "%-9s %6.0f Hz MIDI %3d  maxSampleDiff %-12s f1 %+8.4f cents",
                               variantName(kind).c_str(), sampleRate, midiNote,
                               (maxDiff < 0.0) ? "(new)" : std::to_string(maxDiff).c_str(),

@@ -110,7 +110,7 @@ double measureCentsError(FractionalDelayKind kind, double sampleRate, int midiNo
 }
 
 std::string formatRow(int midiNote, double sampleRate, double cents) {
-    char buffer[128];
+    char buffer[512];
     std::snprintf(buffer, sizeof(buffer), "  MIDI %3d  %6.0f Hz  %9.1f Hz  %+8.3f cents", midiNote, sampleRate,
                   cnpg::test::midiNoteToHz(midiNote), cents);
     return std::string(buffer);
@@ -281,7 +281,7 @@ TEST_CASE("TUNING: full comparison table (report generator)", "[.][report]") {
         for (double sampleRate : kRates) {
             for (int midiNote = cnpg::dsp::kMinMidiNote; midiNote <= cnpg::dsp::kMaxMidiNote; ++midiNote) {
                 const double cents = measureCentsError(kind, sampleRate, midiNote);
-                char buffer[160];
+                char buffer[512];
                 std::snprintf(buffer, sizeof(buffer), "%s,%.0f,%d,%.4f,%.6f", name, sampleRate, midiNote,
                               cnpg::test::midiNoteToHz(midiNote), cents);
                 std::cout << buffer << "\n";
