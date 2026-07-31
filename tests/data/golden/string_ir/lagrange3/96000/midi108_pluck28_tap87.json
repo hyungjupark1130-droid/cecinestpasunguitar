@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 1,
-  "generatorCommit": "01d897a54f63969d8de1cd949ded2aa54e46257a",
-  "generatedUtc": "2026-07-31T02:27:55Z",
+  "schemaVersion": 2,
+  "dspSourceSha256": "7d7dd22a88f75686a1bab147c1d6370619153e0e9bcb5b07e94326e1b9962e34",
+  "generatedUtc": "2026-07-31T03:43:25Z",
   "dspStateVersion": 1,
   "sampleRate": 96000,
   "variant": "lagrange3",

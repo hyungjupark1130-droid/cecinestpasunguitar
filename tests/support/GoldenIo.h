@@ -15,8 +15,12 @@
 
 namespace cnpg::test {
 
-// Bumped whenever the sidecar's field set changes.
-inline constexpr int kGoldenSchemaVersion = 1;
+// Bumped whenever the sidecar's field set changes. v2 replaced `generatorCommit` -- a commit SHA
+// resolved at CMake configure time, which could only ever name the PARENT of the commit that
+// carried the goldens -- with `dspSourceSha256`, a content hash of the renderer's own sources
+// that is self-consistent inside the golden commit and checkable from any checkout. See
+// tests/support/SourceHash.h and tests/data/golden/README.md.
+inline constexpr int kGoldenSchemaVersion = 2;
 
 // Mirrors cnpg::CnpgAudioProcessor::kCnpgStateVersion in plugin/src/PluginProcessor.h. cnpg_tests
 // links no JUCE, so the value is restated here; docs/plan.md section 4.3 requires it in the
@@ -25,7 +29,7 @@ inline constexpr int kDspStateVersion = 1;
 
 struct GoldenSidecar {
     int schemaVersion = kGoldenSchemaVersion;
-    std::string generatorCommit;
+    std::string dspSourceSha256; // cnpg::test::dspSourceHash() at render time
     std::string generatedUtc;
     int dspStateVersion = kDspStateVersion;
     double sampleRate = 0.0;
@@ -53,8 +57,5 @@ void writeGoldenF64(const std::filesystem::path& path, const std::vector<double>
 
 bool readGoldenSidecar(const std::filesystem::path& path, GoldenSidecar& out);
 void writeGoldenSidecar(const std::filesystem::path& path, const GoldenSidecar& sidecar);
-
-// Commit the goldens were generated from (CNPG_GIT_COMMIT, resolved at CMake configure time).
-std::string generatorCommit();
 
 } // namespace cnpg::test

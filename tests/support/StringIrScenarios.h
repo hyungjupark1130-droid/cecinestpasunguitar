@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cnpg/dsp/StringNetwork.h"
 #include "cnpg/dsp/WaveguideString.h"
 
 #include <array>
@@ -11,12 +12,19 @@
 // entry point so a golden can never be compared against a render produced by different code than
 // the one that wrote it.
 //
-// P1.4 SCOPE NOTE: section 4.3 describes each scenario as a single-string StringNetwork render
-// capturing both the tap channel and bridgeOutputBuffer(). StringNetwork lands in Task P1.5 and
-// BridgeJunction in P2.4, so the P1.4 baseline captures the tap channel of the isolated
-// WaveguideString driven directly by a PluckExciter, with the same note set, duration, excitation
-// parameters and tap position. P1.5 re-renders these goldens through StringNetwork under the
-// `Regenerate-Goldens:` trailer rule.
+// SCOPE NOTE. Section 4.3 describes each scenario as a single-string StringNetwork render
+// capturing two signals: the tap channel from StringTapBuffers::channel(0) and
+// bridgeOutputBuffer(). Task P1.5 moved the render onto StringNetwork (the P1.4 baseline drove an
+// isolated WaveguideString, since StringNetwork did not exist yet), so the tap channel is now
+// captured exactly as specified.
+//
+// The bridge channel is still NOT captured, and will not be until Task P2.4. P1's bridge is the
+// trivial rigid termination of IBridgePort.h: it carries no load, so bridgeOutput() is identically
+// zero and a "golden" of it would be 3 s of zeros per scenario -- 60 files of nothing, gating
+// nothing. "CONTRACT: StringNetwork's P1 bridge output is identically zero" asserts that
+// emptiness directly instead, which is the same information at none of the cost. P2.4, which
+// gives the bridge a real admittance load, is where the second channel starts carrying signal and
+// is also already scheduled to regenerate these goldens for the coupled network.
 
 namespace cnpg::test {
 
@@ -32,6 +40,7 @@ inline constexpr float kStringIrHardness = 0.5f;
 inline constexpr float kStringIrNoiseAmount = 0.25f;
 inline constexpr float kStringIrTapPosition = 0.87f;
 inline constexpr double kStringIrSeconds = 3.0;
+inline constexpr int kStringIrBlockSize = 512;      // block size the scenario is rendered in
 inline constexpr double kStringIrGoldenAtol = 1e-7; // docs/plan.md section 4.3 layer (b)
 
 // Mirrors kNoiseSeed in dsp/src/PluckExciter.cpp; recorded in the sidecar so a future change to
@@ -45,8 +54,9 @@ inline constexpr std::array<double, 8> kStringIrT60Bands{63.0, 125.0, 250.0, 500
 std::string variantName(cnpg::dsp::FractionalDelayKind kind);
 std::string scenarioFileName(int midiNote);
 
-// Renders one scenario on the shipping float path and widens to double at capture time, exactly
-// as docs/plan.md section 4.3 specifies for the .f64 golden.
+// Renders one scenario through the shipping single-string StringNetwork topology on the float
+// path, widening to double at capture time exactly as docs/plan.md section 4.3 specifies for the
+// .f64 golden.
 std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote);
 
 // Layer-(a) reference features extracted from a rendered scenario.

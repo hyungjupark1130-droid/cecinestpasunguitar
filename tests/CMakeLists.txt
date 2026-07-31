@@ -21,6 +21,7 @@ add_executable(cnpg_tests
     dsp/WaveguideStringTuningTests.cpp
     support/AllocationGuard.cpp
     support/GoldenIo.cpp
+    support/SourceHash.cpp
     support/SpectralAnalysis.cpp
     support/StringIrScenarios.cpp
 )
@@ -31,26 +32,14 @@ target_include_directories(cnpg_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# Commit the goldens were generated from, for the sidecar's provenance field (docs/plan.md
-# section 4.3). Resolved at configure time; re-run CMake before regenerating goldens so the
-# recorded SHA matches the tree the render came from.
-find_package(Git QUIET)
-set(CNPG_GIT_COMMIT "unknown")
-if(GIT_FOUND)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-parse HEAD
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE CNPG_GIT_COMMIT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(NOT CNPG_GIT_COMMIT)
-        set(CNPG_GIT_COMMIT "unknown")
-    endif()
-endif()
-
+# The golden sidecars' provenance field (docs/plan.md section 4.3) is a content hash of
+# dsp/include + dsp/src computed at RENDER time from the checkout below -- see
+# tests/support/SourceHash.h for why a configure-time `git rev-parse HEAD` could never be correct
+# here (it names the parent of the commit that carries the goldens, always) and
+# tests/data/golden/README.md for how to verify a recorded hash against any checkout.
 target_compile_definitions(cnpg_tests PRIVATE
     CNPG_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/data/golden"
-    CNPG_GIT_COMMIT="${CNPG_GIT_COMMIT}"
+    CNPG_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(cnpg_tests PRIVATE

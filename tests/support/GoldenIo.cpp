@@ -9,10 +9,6 @@
 #error "CNPG_GOLDEN_DIR must be defined by tests/CMakeLists.txt"
 #endif
 
-#ifndef CNPG_GIT_COMMIT
-#define CNPG_GIT_COMMIT "unknown"
-#endif
-
 namespace cnpg::test {
 
 namespace {
@@ -148,7 +144,7 @@ bool readGoldenSidecar(const std::filesystem::path& path, GoldenSidecar& out) {
     double value = 0.0;
     if (readDouble(text, "schemaVersion", value))
         out.schemaVersion = static_cast<int>(value);
-    findValue(text, "generatorCommit", out.generatorCommit);
+    findValue(text, "dspSourceSha256", out.dspSourceSha256);
     findValue(text, "generatedUtc", out.generatedUtc);
     if (readDouble(text, "dspStateVersion", value))
         out.dspStateVersion = static_cast<int>(value);
@@ -178,7 +174,7 @@ void writeGoldenSidecar(const std::filesystem::path& path, const GoldenSidecar& 
     std::ofstream file(path, std::ios::trunc | std::ios::binary);
     file << "{\n";
     file << "  \"schemaVersion\": " << sidecar.schemaVersion << ",\n";
-    file << "  \"generatorCommit\": \"" << sidecar.generatorCommit << "\",\n";
+    file << "  \"dspSourceSha256\": \"" << sidecar.dspSourceSha256 << "\",\n";
     file << "  \"generatedUtc\": \"" << sidecar.generatedUtc << "\",\n";
     file << "  \"dspStateVersion\": " << sidecar.dspStateVersion << ",\n";
     file << "  \"sampleRate\": " << static_cast<long long>(sidecar.sampleRate) << ",\n";
@@ -205,7 +201,5 @@ void writeGoldenSidecar(const std::filesystem::path& path, const GoldenSidecar& 
     }
     file << "}\n";
 }
-
-std::string generatorCommit() { return std::string(CNPG_GIT_COMMIT); }
 
 } // namespace cnpg::test

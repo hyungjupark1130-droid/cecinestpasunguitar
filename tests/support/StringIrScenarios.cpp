@@ -2,9 +2,12 @@
 
 #include "support/SpectralAnalysis.h"
 
-#include "cnpg/dsp/PluckExciter.h"
+#include "cnpg/dsp/EventQueue.h"
+#include "cnpg/dsp/StringNetwork.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 
 namespace cnpg::test {
@@ -21,32 +24,44 @@ std::string scenarioFileName(int midiNote) {
 }
 
 std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote) {
-    cnpg::dsp::WaveguideString<float> string;
-    string.prepare(sampleRate, 512, kind);
-
-    cnpg::dsp::WaveguideStringParams params;
-    params.f0Hz = static_cast<float>(midiNoteToHz(midiNote));
-    params.bendSemitones = 0.0f;
+    // docs/plan.md section 4.3: "a single-string StringNetwork (1 active string, damper
+    // transparent, default BridgeAdmittanceParams)". The damper is transparent because
+    // DamperJunction does not exist yet (P2.2) and the bridge admittance is at its default
+    // because P1's port is the rigid termination (P2.4 loads it) -- both of which is what
+    // "transparent" and "default" mean at this point in the plan, not a deviation from it.
+    cnpg::dsp::StringNetworkParams params;
+    params.pickupPosition01 = kStringIrTapPosition;
     params.material = cnpg::dsp::StringMaterialParams{}; // documented defaults
-    string.setParams(params);
-    string.setAnalyticTuningCompensation(0.0f);
-    string.reset();
+    params.exciter.noiseAmount = kStringIrNoiseAmount;
 
-    cnpg::dsp::PluckExciter<float> exciter;
-    exciter.prepare(sampleRate, 512);
-    cnpg::dsp::PluckExciterParams exciterParams;
-    exciterParams.noiseAmount = kStringIrNoiseAmount;
-    exciter.setParams(exciterParams);
-    exciter.trigger(kStringIrVelocity, kStringIrPluckPosition, kStringIrHardness);
+    cnpg::dsp::StringNetwork<float> network;
+    network.prepare(sampleRate, kStringIrBlockSize, kind);
+    network.setNumStrings(1);
+    network.setParams(params);
+    network.reset(); // snaps the pickup smoother onto kStringIrTapPosition for the first sample
+
+    cnpg::dsp::NoteEvent noteOn{};
+    noteOn.type = cnpg::dsp::NoteEventType::NoteOn;
+    noteOn.sampleOffset = 0;
+    noteOn.stringIndex = 0;
+    noteOn.channel = 0;
+    noteOn.midiNote = static_cast<std::uint8_t>(midiNote);
+    noteOn.velocity = kStringIrVelocity;
+    noteOn.pluckPosition = kStringIrPluckPosition;
+    noteOn.hardness = kStringIrHardness;
+
+    cnpg::dsp::BlockEventQueue events;
+    events.push(noteOn);
 
     const auto count = static_cast<std::size_t>(kStringIrSeconds * sampleRate);
-    std::vector<double> out(count);
-    for (std::size_t n = 0; n < count; ++n) {
-        const float excitation = exciter.renderSample();
-        if (excitation != 0.0f)
-            string.injectAt(exciter.latchedPosition01(), excitation);
-        out[n] = static_cast<double>(string.readTapAt(kStringIrTapPosition));
-        string.tick();
+    std::vector<double> out;
+    out.reserve(count);
+    while (out.size() < count) {
+        const auto wanted = static_cast<int>(std::min<std::size_t>(kStringIrBlockSize, count - out.size()));
+        network.process(events, wanted);
+        const float* channel = network.tapBuffers().channel(0);
+        for (int n = 0; n < wanted; ++n)
+            out.push_back(static_cast<double>(channel[n]));
     }
     return out;
 }

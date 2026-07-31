@@ -1,4 +1,5 @@
 #include "support/GoldenIo.h"
+#include "support/SourceHash.h"
 #include "support/SpectralAnalysis.h"
 #include "support/StringIrScenarios.h"
 
@@ -40,7 +41,7 @@ std::string utcNow() {
 GoldenSidecar makeSidecar(FractionalDelayKind kind, double sampleRate, int midiNote, const std::vector<double>& samples,
                           const StringIrFeatures& features) {
     GoldenSidecar sidecar;
-    sidecar.generatorCommit = generatorCommit();
+    sidecar.dspSourceSha256 = dspSourceHash();
     sidecar.generatedUtc = utcNow();
     sidecar.sampleRate = sampleRate;
     sidecar.variant = variantName(kind);
@@ -74,6 +75,7 @@ const char* missingGoldenHint() {
 // ---------------------------------------------------------------------------------------------
 
 TEST_CASE("REGRESSION/A: feature invariants", "[regression]") {
+    std::string provenanceHash;
     for (FractionalDelayKind kind : kKinds) {
         for (double sampleRate : kStringIrSampleRates) {
             for (int midiNote : kStringIrMidiNotes) {
@@ -88,6 +90,15 @@ TEST_CASE("REGRESSION/A: feature invariants", "[regression]") {
                 // layer (b) -- which would otherwise notice -- is MSVC-only.
                 REQUIRE(reference.schemaVersion == kGoldenSchemaVersion);
                 REQUIRE(reference.dspStateVersion == kDspStateVersion);
+                // Provenance consistency: every sidecar in the set must name the SAME dsp/ source
+                // tree, so a half-finished regeneration -- some files rewritten, some left from an
+                // older tree -- fails here instead of shipping a set that no single checkout can
+                // account for. Whether that tree is the CURRENT one is a different question, and
+                // deliberately not asserted: see REGRESSION/P below.
+                REQUIRE(reference.dspSourceSha256.size() == 64);
+                if (provenanceHash.empty())
+                    provenanceHash = reference.dspSourceSha256;
+                REQUIRE(reference.dspSourceSha256 == provenanceHash);
                 REQUIRE(reference.variant == variantName(kind));
                 REQUIRE(reference.midiNote == midiNote);
                 REQUIRE(reference.sampleRate == sampleRate);
@@ -183,6 +194,49 @@ TEST_CASE("REGRESSION/B: float64 golden exactness", "[regression]") {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Provenance -- the sidecar field that says WHICH code wrote these bytes
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("REGRESSION/P: golden provenance is verifiable", "[regression]") {
+    // Schema v2 replaced `generatorCommit` with `dspSourceSha256` because a commit SHA resolved at
+    // CMake configure time is structurally incapable of naming the commit that CONTAINS the
+    // goldens -- the goldens are written before that commit exists, so the field always named its
+    // parent and no checkout could ever check it. A content hash of dsp/include + dsp/src has no
+    // such problem: the bytes it covers ship in the same commit as the goldens.
+    //
+    // This case guards the mechanism, not the freshness of the goldens. Freshness is what layers
+    // (a) and (b) above are -- they re-render with the current code on every CI run. Asserting
+    // "recorded hash == current hash" here would instead force a 60-file golden commit for any
+    // edit anywhere under dsp/, including ones this scenario cannot see (a comment, or a module
+    // like OutputGain that the render never touches), which would make the Regenerate-Goldens
+    // trailer a lie in the common case.
+    const std::string current = dspSourceHash();
+    INFO("CNPG_SOURCE_DIR must point at a checkout containing dsp/include and dsp/src");
+    REQUIRE(current.size() == 64);
+    REQUIRE(current.find_first_not_of("0123456789abcdef") == std::string::npos);
+    REQUIRE(dspSourceHash() == current); // deterministic: same tree, same digest, every call
+
+    // The digest really is SHA-256, checkable against any other implementation: FIPS 180-4's own
+    // published vectors, plus the empty string. Without this the sidecars would record 64 hex
+    // characters that only this file could reproduce, which is not provenance.
+    REQUIRE(sha256Hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    REQUIRE(sha256Hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    REQUIRE(sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+    GoldenSidecar reference;
+    REQUIRE(readGoldenSidecar(goldenJsonPath(FractionalDelayKind::Lagrange3, 48000.0, 69), reference));
+    std::cout << "[regression] golden provenance: sidecars record dsp source sha256 " << reference.dspSourceSha256
+              << "\n[regression] this checkout hashes to             " << current
+              << (reference.dspSourceSha256 == current ? "  (match)"
+                                                       : "  (differs -- dsp/ has moved since the "
+                                                         "last regeneration; layers (a)/(b) above "
+                                                         "are what decide whether that matters)")
+              << "\n";
+    SUCCEED();
+}
+
+// ---------------------------------------------------------------------------------------------
 // Regeneration entry point -- hidden ("[.]"), so CTest never discovers or runs it. Driven by the
 // cnpg_regen_goldens CMake target (docs/plan.md section 1.6).
 //
@@ -194,7 +248,7 @@ TEST_CASE("REGRESSION/B: float64 golden exactness", "[regression]") {
 
 TEST_CASE("REGEN: rewrite string_ir goldens", "[.][regen]") {
     std::cout << "Regenerating string_ir goldens under " << goldenRoot().string() << "\n";
-    std::cout << "commit " << generatorCommit() << "\n";
+    std::cout << "dsp source sha256 " << dspSourceHash() << "\n";
 
     for (FractionalDelayKind kind : kKinds) {
         for (double sampleRate : kStringIrSampleRates) {

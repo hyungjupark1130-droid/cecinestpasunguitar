@@ -222,6 +222,12 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
     for (int s = 0; s < numStrings_; ++s)
         exciters_[static_cast<std::size_t>(s)].setParams(params_.exciter);
 
+    // Ports past the active count present no incident wave. Written once per block rather than
+    // once per sample: scatter() is only ever handed numStrings_ ports, so these slots exist to
+    // keep the array wholly defined, not to be read.
+    for (int s = numStrings_; s < kMaxStrings; ++s)
+        portIncident_[static_cast<std::size_t>(s)] = SampleT(0);
+
     for (int n = 0; n < count; ++n) {
         // Sample-accurate consumption: every event whose (clamped) offset has been reached fires
         // BEFORE this sample is rendered, so an event at offset k first shows up in sample k.
@@ -270,9 +276,6 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
                 }
             }
         }
-
-        for (int s = numStrings_; s < kMaxStrings; ++s)
-            portIncident_[static_cast<std::size_t>(s)] = SampleT(0);
 
         // The port sees every string's outgoing bridge wave and publishes the mono bridge signal.
         // Its reflected waves are not routed back into the strings in P1 -- see setBridgePort().
