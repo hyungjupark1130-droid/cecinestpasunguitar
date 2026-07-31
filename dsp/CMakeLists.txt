@@ -6,11 +6,13 @@
 # top-level CMakeLists.txt before add_subdirectory(dsp).
 
 add_library(cnpg_dsp STATIC
+    src/CabFilter.cpp
     src/NoteAllocator.cpp
     src/OutputGain.cpp
     src/Oversampler.cpp
     src/PickupTap.cpp
     src/PluckExciter.cpp
+    src/SoftClipLimiter.cpp
     src/StringNetwork.cpp
     src/TriodeStage.cpp
     src/WaveguideString.cpp
