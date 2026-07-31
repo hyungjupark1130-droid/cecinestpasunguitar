@@ -47,7 +47,10 @@ TEST_CASE("PickupTapParams: default-constructs to its documented defaults", "[co
     constexpr PickupTapParams params;
     STATIC_REQUIRE(params.resonanceHz == 2500.0f);
     STATIC_REQUIRE(params.q == 2.0f);
-    STATIC_REQUIRE(params.outputGainDb == 0.0f);
+    // Task P1.9 gain staging: the trim's default is the measured -18 dBFS per-string calibration
+    // constant, not 0 dB. plugin/src/Parameters.cpp reads this same value for the APVTS default,
+    // and tests/dsp/MonitoringChainTests.cpp is what actually gates the -18 dBFS +/- 1 dB level.
+    STATIC_REQUIRE(params.outputGainDb == kNominalPickupTrimDb);
 }
 
 TEST_CASE("TriodeStageParams: default-constructs to its documented defaults", "[contract]") {

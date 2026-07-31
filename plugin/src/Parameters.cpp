@@ -18,6 +18,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     const juce::NormalisableRange<float> unitRange(0.0f, 1.0f);
     const juce::NormalisableRange<float> trimDbRange(-24.0f, 24.0f);
 
+    // Task P1.9 gain staging. The pickup trim is the stage that lands a single string on the
+    // -18 dBFS per-string nominal (docs/plan.md Task P1.9 step 3), and the calibrated value is
+    // measured, not chosen: cnpg::dsp::kNominalPickupTrimDb (see PickupTap.h for the measurement
+    // and the exact reference scenario). Both the default AND the range's centre are read from
+    // that one constant, so the plugin's default state IS the calibrated state, the user keeps a
+    // symmetric +/-24 dB of trim around it, and the dsp-side gate test
+    // (tests/dsp/MonitoringChainTests.cpp, which drives PickupTapParams{} directly) cannot drift
+    // apart from what the plugin actually ships.
+    const float pickupTrimDefaultDb = cnpg::dsp::PickupTapParams{}.outputGainDb;
+    const juce::NormalisableRange<float> pickupTrimDbRange(pickupTrimDefaultDb - 24.0f, pickupTrimDefaultDb + 24.0f);
+
     // Exciter
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::exciterDefaultPosition),
                                                            "Exciter Position", unitRange, 0.5f));
@@ -42,7 +53,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupQ), "Pickup Q",
                                                            juce::NormalisableRange<float>(0.1f, 10.0f), 2.0f));
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupOutputGainDb),
-                                                           "Pickup Output Gain", trimDbRange, 0.0f,
+                                                           "Pickup Output Gain", pickupTrimDbRange, pickupTrimDefaultDb,
                                                            juce::AudioParameterFloatAttributes().withLabel("dB")));
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupPosition01), "Pickup Position",
                                                            unitRange, 0.5f));
@@ -50,9 +61,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     // Triode
     layout.add(
         std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::triodeDrive), "Triode Drive", unitRange, 0.5f));
-    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::triodeOutputTrimDb),
-                                                           "Triode Output Trim", trimDbRange, 0.0f,
-                                                           juce::AudioParameterFloatAttributes().withLabel("dB")));
+    // Task P1.9 gain staging, part two. TriodeStage's small-signal gain in the SAMPLE domain is
+    // kGridVoltsPerFullScale at the default drive (+13.98 dB) -- see the block comment above
+    // cnpg::dsp::kUnityGainOutputTrimDb in TriodeStage.h. This trim takes exactly that back out,
+    // so a single string arriving at the -18 dBFS per-string nominal leaves the triode at
+    // -18 dBFS too and the whole ~+16 dB summing budget still fits under the limiter ceiling.
+    // Derived from the circuit constant, not measured and rounded, and centred on like the pickup
+    // trim so the user keeps a symmetric +/-24 dB either side of the calibrated value.
+    const juce::NormalisableRange<float> triodeTrimDbRange(cnpg::dsp::kUnityGainOutputTrimDb - 24.0f,
+                                                           cnpg::dsp::kUnityGainOutputTrimDb + 24.0f);
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        makeParameterID(ID::triodeOutputTrimDb), "Triode Output Trim", triodeTrimDbRange,
+        cnpg::dsp::kUnityGainOutputTrimDb, juce::AudioParameterFloatAttributes().withLabel("dB")));
     layout.add(std::make_unique<juce::AudioParameterBool>(makeParameterID(ID::triodeBypass), "Triode Bypass", false));
 
     // Monitoring chain

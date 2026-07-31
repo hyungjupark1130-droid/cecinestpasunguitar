@@ -158,9 +158,44 @@ struct KorenTriodeParams {
 
 struct TriodeStageParams {
     float drive = 0.5f;        // input gain into the waveshaper, calibrated against +16 dB summing headroom
-    float outputTrimDb = 0.0f; // post-stage trim
+    float outputTrimDb = 0.0f; // post-stage trim; see kUnityGainOutputTrimDb for what the PLUGIN defaults it to
     bool bypass = false;       // triode-bypass switch: audition the raw string (P1 monitoring chain)
 };
+
+// -----------------------------------------------------------------------------------------------
+// Sample-domain gain staging (Task P1.9 step 3): what `outputTrimDb` is set to, and why.
+// -----------------------------------------------------------------------------------------------
+//
+// buildTransferTable() normalizes the transfer curve to unity small-signal slope in VOLTS, and
+// waveshapeOne() converts an input SAMPLE to volts by multiplying by
+// 2*drive * kGridVoltsPerFullScale. The output is then emitted as a sample directly, in those same
+// normalized volts -- so the stage's small-signal gain in the SAMPLE domain is
+// 2*drive * kGridVoltsPerFullScale, which at the default drive of 0.5 is exactly
+// kGridVoltsPerFullScale, i.e. +13.98 dB. That is not a defect (it is what makes
+// kGridVoltsPerFullScale "the only free gain constant"), but it does mean the stage is NOT unity at
+// nominal until something takes those 13.98 dB back out, and `outputTrimDb` is the post-stage trim
+// whose whole job that is.
+//
+// kUnityGainOutputTrimDb below is exactly that value: -20*log10(kGridVoltsPerFullScale). It is what
+// plugin/src/Parameters.cpp uses as the APVTS default for triodeOutputTrimDb (and the centre of
+// that parameter's range), which is what keeps the shipped chain unity-at-nominal end to end: a
+// single string at the -18 dBFS per-string nominal (PickupTap.h's kNominalPickupTrimDb) leaves this
+// stage at -18 dBFS too, so the whole ~+16 dB multi-string summing budget still fits under the
+// SoftClipLimiter ceiling instead of being spent before the first chord.
+//
+// TriodeStageParams::outputTrimDb's own default stays 0.0f -- a trim's natural default is no trim,
+// and Task P1.7's [contract] tests measure this module's absolute transfer values against exactly
+// that. The calibration is a property of the assembled CHAIN, applied where the chain is assembled
+// (the plugin, and tests/dsp/MonitoringChainTests.cpp's ChainHarness), not smuggled into the
+// module's own idea of "no trim".
+//
+// Measured check, at the shipped default drive of 0.5 with this trim applied: the stage's
+// small-signal sample-domain gain is 1.000 (gated by a [contract] test in MonitoringChainTests.cpp).
+// At real signal levels a little more than that survives -- a -18 dBFS pluck measures +0.58 dB
+// through the stage rather than 0.00 dB -- because the curve is genuinely nonlinear by then. That
+// residual is the tube doing its job, and is deliberately NOT trimmed away: trimming it would make
+// the "unity" constant a function of whatever note and velocity it was measured at.
+inline constexpr float kUnityGainOutputTrimDb = -13.979400086720375f;
 
 static_assert(std::is_trivially_copyable_v<TriodeStageParams>,
               "TriodeStageParams must stay trivially copyable for the realtime APVTS snapshot path.");
@@ -171,6 +206,19 @@ static_assert(std::is_trivially_copyable_v<TriodeStageParams>,
 // module, unlike the sample-domain physics classes.
 class TriodeStage {
   public:
+    // vin -> grid-volts calibration for `drive`. A -18 dBFS single-string nominal sample (~0.1259)
+    // at drive=0.5 (unity pre-gain) produces a ~0.63 V grid swing -- comfortably inside the curve's
+    // gentle near-linear region, below the grid-conduction knee (Vgk_raw == 0 at vin == +Vk0, and
+    // Vk0 for the circuit constants in TriodeStage.cpp lands in the ~1-2 V range). At drive=1.0
+    // (2x pre-gain) the same nominal sample produces a ~1.26 V swing, close enough to that knee to
+    // show real, audible curvature growth; multi-string summing up to the +16 dB headroom budget
+    // (docs/plan.md section 2.9) pushes well past it. This is the one genuinely free "taste"
+    // constant in the whole chain -- everything else in the vin -> normalized-output path is either
+    // a locked circuit value or is self-normalized by buildTransferTable()'s own
+    // unity-small-signal-gain step. Public because kUnityGainOutputTrimDb is derived from it rather
+    // than guessed (see the block comment above).
+    static constexpr double kGridVoltsPerFullScale = 5.0;
+
     // Message thread; may allocate. Solves the DC operating point and the AC-load-line transfer
     // curve once (see the file-level comment), sizing and filling the internal cubic-interpolation
     // table -- the only allocation this class ever performs. Calls setParams(TriodeStageParams{})

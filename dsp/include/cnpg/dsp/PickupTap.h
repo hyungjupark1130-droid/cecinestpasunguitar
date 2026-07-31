@@ -60,10 +60,41 @@ namespace cnpg::dsp {
 
 template <typename SampleT> struct StringTapBuffers; // full definition: StringNetwork.h
 
+// -----------------------------------------------------------------------------------------------
+// The -18 dBFS per-string calibration constant (Task P1.9 step 3).
+// -----------------------------------------------------------------------------------------------
+//
+// docs/plan.md Task P1.9 requires "single string at velocity 1.0 peaks at -18 dBFS at the pickup
+// sum". PluckExciter already lands its BURST peak at exactly -18 dBFS at velocity 1.0
+// (dsp/src/PluckExciter.cpp, kNominalPeakDb) -- but that is the displacement injected INTO the
+// string, not what comes out of the pickup. Between the two sit the string's own loop losses and
+// the pickup's differentiating bandpass, whose skirt is far below its 2.5 kHz resonance at any
+// note's fundamental. Measured end to end (StringNetwork -> PickupTap, every other parameter at its
+// default, MIDI 45 / A2 at velocity 1.0, 2 s render), that path delivers:
+//
+//   44.1 kHz: -42.80 dBFS     48 kHz: -42.82 dBFS     96 kHz: -42.74 dBFS
+//
+// -- i.e. it is remarkably rate-independent (0.08 dB spread), so ONE constant calibrates every
+// supported rate. kNominalPickupTrimDb is that constant, rounded to 0.1 dB, and it is the default
+// of outputGainDb below; plugin/src/Parameters.cpp reads it straight out of PickupTapParams{} for
+// the APVTS default and centres the knob's +/-24 dB range on it, so the plugin's default state IS
+// the calibrated state and the two cannot drift apart.
+//
+// What the constant is NOT: a claim that every note lands at -18 dBFS. The same sweep across the
+// range measures -18.0 dBFS from MIDI 21 through 52 (flat to 0.04 dB -- the peak there is the
+// pluck transient passing the tap, which barely depends on pitch), rising to about -12.1 dBFS
+// around MIDI 64 where the string's harmonics line up best with the 2.5 kHz pickup resonance, then
+// falling away to -27 .. -30 dBFS at MIDI 108 as fewer and fewer harmonics survive the loop losses.
+// -18 dBFS is the NOMINAL the rest of the chain is gain-staged against (TriodeStage.h's drive
+// calibration, the +16 dB multi-string summing budget), and the calibration reference is the
+// specific documented scenario above -- not an automatic gain control.
+inline constexpr float kNominalPickupTrimDb = 24.8f;
+
 struct PickupTapParams {
-    float resonanceHz = 2500.0f; // RLC resonant frequency
-    float q = 2.0f;              // resonance Q (loading)
-    float outputGainDb = 0.0f;   // post-sum trim toward the -18 dBFS per-string nominal structure
+    float resonanceHz = 2500.0f;               // RLC resonant frequency
+    float q = 2.0f;                            // resonance Q (loading)
+    float outputGainDb = kNominalPickupTrimDb; // post-sum trim onto the -18 dBFS per-string
+                                               // nominal structure; see the block comment above
 };
 
 static_assert(std::is_trivially_copyable_v<PickupTapParams>,

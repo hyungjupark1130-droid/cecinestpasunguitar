@@ -35,16 +35,10 @@ constexpr double kGridSourceResistanceOhms = 68000.0;
 constexpr double kDomainHalfWidthVolts = 60.0;
 constexpr int kTableSize = 4097; // odd: (kTableSize-1)/2 is an exact-integer node at vin == 0
 
-// vin -> grid-volts calibration for `drive`. A -18 dBFS single-string nominal sample (~0.1259)
-// at drive=0.5 (unity pre-gain) produces a ~0.63 V grid swing -- comfortably inside the curve's
-// gentle near-linear region, below the grid-conduction knee (Vgk_raw == 0 at vin == +Vk0, and
-// Vk0 for the constants above lands in the ~1-2 V range). At drive=1.0 (2x pre-gain) the same
-// nominal sample produces a ~1.26 V swing, close enough to that knee to show real, audible
-// curvature growth; multi-string summing up to the +16 dB headroom budget (docs/plan.md section
-// 2.9) pushes well past it. This is the one genuinely free "taste" constant in the whole chain --
-// everything else in the vin -> normalized-output path is either a locked circuit value or is
-// self-normalized by buildTransferTable()'s own unity-small-signal-gain step (see TriodeStage.h).
-constexpr double kGridVoltsPerFullScale = 5.0;
+// The vin -> grid-volts calibration for `drive` now lives on the class itself, as
+// TriodeStage::kGridVoltsPerFullScale (TriodeStage.h) -- Task P1.9's gain staging derives the
+// stage's sample-domain makeup trim from it, so it has to be visible outside this file. Its full
+// rationale moved with it; unqualified uses below resolve to the class member.
 
 constexpr float kMinDrive = 0.0f;
 constexpr float kMaxDrive = 2.0f; // generous vs. the documented 0..1 nominal range; guards
