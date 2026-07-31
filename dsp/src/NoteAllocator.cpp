@@ -48,8 +48,13 @@ void NoteAllocator::allocate(const RawMidiEvent* events, int numEvents, BlockEve
             event.channel = raw.channel;
             event.midiNote = raw.data1;
             event.velocity = velocityToUnit(raw.data2);
-            event.pluckPosition = 0.5f; // P1: no per-note position source yet; neutral default
-            event.hardness = 0.5f;      // P1: no per-note hardness source yet; neutral default
+            // Nothing in plain MIDI note-on carries a pluck position or hardness, so the event
+            // says so explicitly instead of inventing a value: StringNetwork then resolves both
+            // against PluckExciterParams::defaultPosition / ::defaultHardness, which is what
+            // makes the APVTS Exciter Position / Exciter Hardness knobs audible. A per-note
+            // source (P5 MPE) fills these in with real values without touching this contract.
+            event.pluckPosition = kUnspecifiedNoteParam;
+            event.hardness = kUnspecifiedNoteParam;
 
             outEvents.push(event);
 
@@ -70,8 +75,8 @@ void NoteAllocator::allocate(const RawMidiEvent* events, int numEvents, BlockEve
             event.channel = raw.channel;
             event.midiNote = raw.data1;
             event.velocity = velocityToUnit(raw.data2);
-            event.pluckPosition = 0.0f;
-            event.hardness = 0.0f;
+            event.pluckPosition = kUnspecifiedNoteParam; // NoteOff excites nothing; both are unused
+            event.hardness = kUnspecifiedNoteParam;
 
             outEvents.push(event);
             stringSounding_ = false;

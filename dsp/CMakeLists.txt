@@ -9,6 +9,7 @@ add_library(cnpg_dsp STATIC
     src/NoteAllocator.cpp
     src/OutputGain.cpp
     src/PluckExciter.cpp
+    src/StringNetwork.cpp
     src/WaveguideString.cpp
 )
 

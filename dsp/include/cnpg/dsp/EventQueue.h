@@ -20,6 +20,15 @@ enum class NoteEventType : std::uint8_t {
     NoteOff // engages damper with felt time constant (unless deferred by sustain upstream, P2)
 };
 
+// Written into NoteEvent::pluckPosition / ::hardness when the event carries no per-note value of
+// its own, which is every event NoteAllocator emits in P1 -- plain MIDI note-on has nowhere to
+// put a pluck position, and the P5 MPE seam is what eventually supplies one. Any value outside
+// 0..1 means the same thing; this is simply the spelling the allocator uses. StringNetwork
+// resolves it against PluckExciterParams::defaultPosition / ::defaultHardness (docs/plan.md
+// section 2.3: "used when the note event carries no explicit position"), which is what keeps the
+// APVTS Exciter Position / Exciter Hardness knobs live.
+inline constexpr float kUnspecifiedNoteParam = -1.0f;
+
 struct NoteEvent {
     NoteEventType type;
     std::int32_t sampleOffset; // 0..numSamples-1, offset within the current block
@@ -27,8 +36,9 @@ struct NoteEvent {
     std::uint8_t channel;      // carried opaquely through P2; MPE seam for P5
     std::uint8_t midiNote;     // kMinMidiNote..kMaxMidiNote
     float velocity;            // 0..1; scales amplitude, adds mild hardness increase
-    float pluckPosition;       // 0..1 fraction of string length; latched at note-on
-    float hardness;            // 0..1 exciter hardness at note-on
+    float pluckPosition;       // 0..1 fraction of string length, latched at note-on; or
+                               // kUnspecifiedNoteParam (see above)
+    float hardness;            // 0..1 exciter hardness at note-on; or kUnspecifiedNoteParam
 };
 
 // Fixed-capacity ring buffer of NoteEvent, alloc-free after construction: all storage is a

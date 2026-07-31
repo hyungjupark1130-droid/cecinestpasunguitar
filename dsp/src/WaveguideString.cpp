@@ -19,7 +19,12 @@ constexpr double kTwoPi = 6.283185307179586476925286766559;
 // note at 44.1 kHz is (documented) clamped.
 constexpr double kMinLoopPeriodSamples = 10.0;
 
-// Rails are sized for kMinMidiNote detuned two semitones down (the P1 bend range), i.e. MIDI 19.
+// Rails are sized for kMinMidiNote detuned kPitchBendRangeSemitones DOWN, i.e. MIDI 19. Widening
+// the bend range means recomputing this literal (std::exp2 is not constexpr), which is why
+// Common.h calls the range a design-envelope constant.
+static_assert(kMinMidiNote == 21 && kPitchBendRangeSemitones == 2.0f,
+              "kSizingLowestF0Hz below is 440 * 2^((kMinMidiNote - kPitchBendRangeSemitones - 69) / 12); "
+              "recompute it if either constant moves.");
 constexpr double kSizingLowestF0Hz = 24.499714748859330; // 440 * 2^((19 - 69) / 12)
 
 constexpr double kSmoothingTimeSeconds = 0.008; // per-sample one-pole for f0, bend, and material
