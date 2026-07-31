@@ -50,17 +50,17 @@ All numbers produced by the in-repo harnesses on the dev machine (Windows 11, MS
 | lagrange3 | 96000 Hz | gated (33–96) | 0.0003 | 0.00007 |
 | lagrange3 | 96000 Hz | report-only (21–32, 97–108) | 0.0005 | 0.00015 |
 | thiran1 | 44100 Hz | gated (33–96) | 0.0003 | 0.00006 |
-| thiran1 | 44100 Hz | report-only (21–32, 97–108) | 0.0014 | 0.00035 |
+| thiran1 | 44100 Hz | report-only (21–32, 97–108) | 0.0005 | 0.00015 |
 | thiran1 | 48000 Hz | gated (33–96) | 0.0003 | 0.00007 |
-| thiran1 | 48000 Hz | report-only (21–32, 97–108) | 0.0011 | 0.00031 |
+| thiran1 | 48000 Hz | report-only (21–32, 97–108) | 0.0005 | 0.00015 |
 | thiran1 | 96000 Hz | gated (33–96) | 0.0003 | 0.00007 |
 | thiran1 | 96000 Hz | report-only (21–32, 97–108) | 0.0005 | 0.00015 |
 
 Both kinds are *identical* inside the gated band (0.0003 cents worst — 6600× inside the ±2-cent
 gate) and both are inside ±2 cents across the entire 88-note range at all three rates. The only
 difference is at MIDI 104–108 at 44.1/48 kHz, where Lagrange-3 reaches ~1 cent and Thiran-1 stays
-at ~0.001 cents. That difference is not a tuning-solve difference — the solve realizes the
-requested loop phase delay to better than 1e-6 cents for both (`CONTRACT: WaveguideString realizes
+at 0.0005 cents worst across its whole report-only band. That difference is not a tuning-solve
+difference — the solve realizes the requested loop phase delay to better than 1e-6 cents for both (`CONTRACT: WaveguideString realizes
 the requested loop period exactly`, 1584 grid points). It is the interpolator's magnitude response:
 Lagrange-3's lowpass droop damps the top notes' fundamental enough to broaden the resonance, and a
 broader peak biases slightly under the pluck's spectral slope. Thiran-1, being exactly allpass,
@@ -82,14 +82,26 @@ Metric definitions (both from the spike harness, 110 Hz note, ±2-semitone conti
 
 | variant | bend energy growth | bend transient ratio |
 |---|---|---|
-| Lagrange3 | 3.94e-4 | **1.251** |
-| Thiran1 | 1.53e-2 | **1624.7** |
+| Lagrange3 | 3.94e-4 | **1.25** |
+| Thiran1 | 1.53e-2 | **2477** |
 
 This is the decisive axis and it is not close. Thiran-1's allpass state is stale every time the
 integer part of the rail read steps — which during a ±2-semitone bend on a 110 Hz string happens
 dozens of times — and each step lands as an impulsive discontinuity three orders of magnitude above
 the signal's own sample-to-sample behaviour. Lagrange-3, holding no state of its own, glides at
-1.25× the static baseline, i.e. essentially clean. `docs/plan.md` locks "click-free global pitch
+1.25x the static baseline, i.e. essentially clean.
+
+Thiran-1's figure carries a second, structural contribution that is worth naming because it is not
+a tuning matter and would otherwise look like a free choice. Its allpass sits OUTSIDE the rail, so
+the rail is consumed at an integer delay and nothing past it is ever read again; the position ->
+delay map therefore has to run over the integer live window, and it steps with that integer during
+a bend. Lagrange-3's interpolator IS the rail read, so its map runs over the continuous realized
+span and never steps. Mapping Thiran-1 over the continuous span instead does not avoid the problem,
+it hides it: taps and injections near the bridge then address already-consumed slots -- at MIDI 108
+/ 44.1 kHz the entire dn-rail half of a p = 0.28 pluck lands past the read point and is silently
+discarded. See the `positionSpan_` note in `WaveguideString.h`.
+
+`docs/plan.md` locks "click-free global pitch
 bend" (Task P1.5) and lists bend cleanliness as physical-plausibility item 5 with corpus phrase
 `05_low_string_bends.mid` as an explicit abuse case; R2's early-warning signal is exactly this.
 
@@ -99,22 +111,23 @@ bend" (Task P1.5) and lists bend cleanliness as physical-plausibility item 5 wit
 
 | variant | static f0 (ns/sample) | continuously bending (ns/sample) |
 |---|---|---|
-| Lagrange3 | 17.6 | 164.8 |
-| Thiran1 | 15.2 | 174.3 |
+| Lagrange3 | 17.1 | 161.0 |
+| Thiran1 | 14.2 | 171.0 |
 
-Thiran-1 is ~14 % cheaper at rest (one allpass multiply-add per rail versus four taps) and slightly
-*more* expensive while bending. In budget terms, at 48 kHz one static string is 0.085 % of a core
-for Lagrange-3 versus 0.073 % for Thiran-1 — 0.07 percentage points per string, i.e. 0.4 points
-across the 6-string default configuration, against a 30 % gate.
+Thiran-1 is ~17 % cheaper at rest (one allpass multiply-add per rail versus four taps) and slightly
+*more* expensive while bending. In budget terms, at 48 kHz one static string costs 0.082 % of a
+core for Lagrange-3 versus 0.068 % for Thiran-1 — a difference of 0.014 percentage points per
+string, i.e. **0.085 points across the 6-string default configuration**, against a 30 % gate.
 
 **Verdict on axis 3: a small edge to Thiran-1, immaterial against the budget.**
 
 ## Decision rationale
 
-Thiran-1 wins two axes by margins that do not matter (a fraction of a cent outside the gated band;
-0.4 percentage points of a 30 % CPU budget). Lagrange-3 wins the one axis that is a locked product
-requirement, by a factor of 1300. Cheap and marginally sharper is not worth an audible click on
-every bend, and no amount of smoothing fixes a stale allpass state — the artefact is structural.
+Thiran-1 wins two axes by margins that do not matter (a fraction of a cent, entirely outside the
+gated band; 0.085 percentage points of a 30 % CPU budget). Lagrange-3 wins the one axis that is a
+locked product requirement, by a factor of about 2000. Cheap and marginally sharper is not worth an
+audible click on every bend, and no amount of smoothing fixes it — a stale allpass state and an
+integer-stepping position map are both structural.
 
 Lagrange-3 also composes better with the rest of the locked design: it is a *read*, so both rail
 spans stay continuous reals and every tap/injection position derived from them moves continuously
@@ -131,6 +144,9 @@ dispersion settings and all three rates, versus 2–4e-15 float64 noise for Thir
   maintained; the losing variant is not allowed to bit-rot.
 - The Thiran-1 `D` range is `[0.4, 1.8]`, not the textbook `[0.5, 1.5]`, for the reachability reason
   documented in `WaveguideString.cpp`. Narrowing it back would reopen a ~24-cent hole at MIDI 108.
+- Thiran-1's position -> delay map runs over the integer live rail window, Lagrange-3's over the
+  continuous realized span (`positionSpan_`). Anything that later moves the interpolator back into
+  the termination chain, for either kind, has to revisit that map.
 - P2.7 (`cnpg_calibrate`) measures whichever variant is configured; the residual it has to correct
   for Lagrange-3 at MIDI 104–108 is the ~1 cent above, well inside its own < 0.5-cent second-pass
   requirement.

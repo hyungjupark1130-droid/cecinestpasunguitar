@@ -97,19 +97,40 @@ TEMPLATE_TEST_CASE("CONTRACT: WaveguideString reset is idempotent and complete",
     for (FractionalDelayKind kind : kKinds) {
         WaveguideString<TestType> excited;
         configure(excited, 48000.0, kind, 130.81);
+
+        // Leave the smoothers mid-flight as well as the rails full, so reset() has something to
+        // clear on both fronts: retarget f0 a whole tone away and stop after only 64 ticks, far
+        // short of the ~8 ms smoother settling time.
         pluckAndRender(excited, 48000.0, 48000); // 1 s of ringing
+        WaveguideStringParams moving;
+        moving.f0Hz = 146.83f;
+        moving.material.dispersionAmount = 0.7f;
+        excited.setParams(moving);
+        for (int i = 0; i < 64; ++i)
+            excited.tick();
+
         excited.reset();
         excited.reset(); // twice must equal once
 
+        // The reference is a fresh instance carrying the SAME current parameters -- reset() clears
+        // state, it does not roll parameters back.
         WaveguideString<TestType> fresh;
-        configure(fresh, 48000.0, kind, 130.81);
+        configure(fresh, 48000.0, kind, static_cast<double>(moving.f0Hz), moving.material);
 
-        for (int i = 0; i < 2048; ++i) {
-            REQUIRE(excited.readTapAt(0.87f) == fresh.readTapAt(0.87f));
-            excited.tick();
-            fresh.tick();
-        }
         REQUIRE(excited.energyEstimate() == 0.0);
+        REQUIRE(excited.currentF0Hz() == fresh.currentF0Hz());
+
+        // Re-pluck BOTH and compare: silence-vs-silence would pass even if reset() left the
+        // smoothers mid-glide or the filter states dirty, since nothing would excite them.
+        const auto a = pluckAndRender(excited, 48000.0, 8192);
+        const auto b = pluckAndRender(fresh, 48000.0, 8192);
+        REQUIRE(a.size() == b.size());
+        bool sawSignal = false;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            REQUIRE(a[i] == b[i]);
+            sawSignal |= (a[i] != TestType(0));
+        }
+        REQUIRE(sawSignal);
     }
 }
 

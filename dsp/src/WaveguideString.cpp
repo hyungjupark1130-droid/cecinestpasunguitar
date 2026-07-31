@@ -299,7 +299,6 @@ template <typename SampleT> void WaveguideString<SampleT>::setParams(const Waveg
 template <typename SampleT>
 void WaveguideString<SampleT>::setAnalyticTuningCompensation(float delaySamplesCorrection) noexcept {
     analyticCorrectionSamples_ = static_cast<double>(delaySamplesCorrection);
-    calibrationActive_ = false;
     updateCoefficients();
 }
 
@@ -349,6 +348,9 @@ template <typename SampleT> void WaveguideString<SampleT>::advanceSmoothers() no
 }
 
 template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() noexcept {
+    if (up_.empty())
+        return; // not prepared yet; setParams/setLossBypassed before prepare() must stay inert
+
     const double f0 = clampd(f0Smoothed_, f0Min_, f0Max_);
     const double period = sampleRate_ / f0;
     const double w0 = kTwoPi * f0 / sampleRate_;
@@ -381,8 +383,11 @@ template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() 
             const double theta = 0.5 * w0 * (1.0 - tauMax);
             const double t = std::tan(clampd(theta, -1.5, 1.5));
             const double denom = sinw - t * cosw;
-            const double limit = (std::fabs(denom) > 1e-12) ? (t / denom) : 0.0;
-            disp = clampd(std::max(disp, limit), -0.95, 0.0);
+            if (std::fabs(denom) > 1e-12)
+                disp = clampd(std::max(disp, t / denom), -0.95, 0.0);
+            // else: the inversion is degenerate. Leaving `disp` alone costs a little tuning
+            // accuracy at one note; snapping it to 0 would be an audible one-sample jump.
+            // railSpan is separately floored at kMinRailSpan, so nothing can run out of rail.
         }
     }
     const double tauDispersion = static_cast<double>(kDispersionOrder) * allpassPhaseDelay(disp, w0, sinw, cosw);
@@ -390,9 +395,14 @@ template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() 
         ap.coeff = static_cast<SampleT>(disp);
 
     // --- split the remainder evenly between the two rail reads --------------------------------
+    // Clamped from ABOVE as well: analyticCorrectionSamples_ is caller-supplied and subtracted, so
+    // a negative correction would otherwise grow the rail read past the allocation and alias
+    // against fresh writes -- silently wrong output rather than a crash. The margin covers the
+    // +1 frame offset, the interpolator's 3-sample reach and the tap that reads one past the
+    // bridge.
+    const double maxRailSpan = static_cast<double>(up_.size()) - 6.0;
     const double railSpan =
-        std::max(kMinRailSpan, 0.5 * (period - tauDispersion - tauLoss - analyticCorrectionSamples_));
-    railSpan_ = railSpan;
+        clampd(0.5 * (period - tauDispersion - tauLoss - analyticCorrectionSamples_), kMinRailSpan, maxRailSpan);
 
     const bool lagrange = (kind_ == FractionalDelayKind::Lagrange3);
     const double delayMin = lagrange ? kLagrangeDelayMin : kThiranDelayMin;
@@ -439,9 +449,13 @@ template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() 
         realizedRailSpan_ = static_cast<double>(railBase_) + allpassPhaseDelay(a, w0, sinw, cosw);
     }
 
+    // See WaveguideString.h: Lagrange3's rail stays live out to railBase_ + 3, so the continuous
+    // realized span is addressable; Thiran1's rail is consumed at railBase_, so anything past it
+    // would be written or read after it has already left the loop.
+    positionSpan_ = lagrange ? realizedRailSpan_ : std::max(0.0, static_cast<double>(railBase_ - 1));
+
     realizedLoopDelay_ = 2.0 * realizedRailSpan_ + tauDispersion + tauLoss;
     energyCacheValid_ = false;
-    coefficientsValid_ = true;
 }
 
 template <typename SampleT>

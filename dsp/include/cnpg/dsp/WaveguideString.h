@@ -144,6 +144,8 @@ template <typename SampleT> class WaveguideString {
     //       cnpg_calibrate (P2.7) uses it to probe residuals. Calling this selects the analytic
     //       source, i.e. deactivates any table loaded by loadCalibrationTable.
     //   P2: per-note cents-correction table measured from the real dsp/ filters by cnpg_calibrate.
+    // P1 has exactly one source, so "selects" is currently vacuous -- Task P2.7 adds the selector
+    // together with the table's first real consumer.
     void setAnalyticTuningCompensation(float delaySamplesCorrection) noexcept;
 
     // Message thread; may allocate. Stores the table and nothing else -- the analytic source
@@ -160,7 +162,10 @@ template <typename SampleT> class WaveguideString {
     void injectAt(float position01, SampleT excitation) noexcept;
 
     // Fractional tap; amplitude-complementary linear crossfade (g1 + g2 = 1) for click-free
-    // position motion (P2). Exactly SampleT(0) at position01 == 0 by construction (rigid nut).
+    // position motion (P2). At position01 == 0 the two rails cancel to the accuracy of that linear
+    // crossfade against the loop's own interpolator -- near-silent at the rigid nut, but not
+    // bit-exactly zero, since the loop reads the rail with the fractional-delay interpolator while
+    // the tap reads it linearly.
     SampleT readTapAt(float position01) const noexcept;
 
     // 2-port insertion seam for DamperJunction at position p (DamperJunction itself is P2.2).
@@ -239,14 +244,11 @@ template <typename SampleT> class WaveguideString {
     SampleT railFractionalRead(const std::vector<SampleT>& rail, int writeIndex) const noexcept;
 
     // Position mapping. p = 0 (nut) is the freshest write of the up rail and the far end of the
-    // dn rail; p = 1 (bridge) is the far end of the up rail and the freshest dn write. Both use
-    // the REALIZED (continuous, fractional) rail span, so nothing steps when the integer part of
-    // the rail read moves during a bend -- that continuity is what keeps retune zipper-free.
-    double upDelayAt(float position01) const noexcept {
-        return 1.0 + static_cast<double>(position01) * realizedRailSpan_;
-    }
+    // dn rail; p = 1 (bridge) is the far end of the up rail and the freshest dn write. The span is
+    // whatever part of the rail is still ADDRESSABLE -- see positionSpan_.
+    double upDelayAt(float position01) const noexcept { return 1.0 + static_cast<double>(position01) * positionSpan_; }
     double dnDelayAt(float position01) const noexcept {
-        return 1.0 + (1.0 - static_cast<double>(position01)) * realizedRailSpan_;
+        return 1.0 + (1.0 - static_cast<double>(position01)) * positionSpan_;
     }
 
     void refreshEnergyCache() const noexcept;
@@ -279,18 +281,32 @@ template <typename SampleT> class WaveguideString {
     double dispersionTarget_ = 0.0; // allpass coefficient (<= 0), already mapped from the knob
     double dispersionSmoothed_ = 0.0;
     bool smoothersSettled_ = false;
-    bool coefficientsValid_ = false;
 
     double analyticCorrectionSamples_ = 0.0;
-    bool calibrationActive_ = false;      // P2.7 flips this; P1 always runs the analytic source
-    std::vector<float> calibrationCents_; // stored by loadCalibrationTable
+    std::vector<float> calibrationCents_; // stored by loadCalibrationTable; P2.7 adds the selector
     int calibrationFirstMidiNote_ = 0;
 
     // ---- rail reads and termination chain ------------------------------------------------------
     int railBase_ = 1;              // integer part of each rail read
-    double railSpan_ = 2.0;         // requested per-rail phase delay
     double realizedRailSpan_ = 2.0; // solved per-rail phase delay (railBase_ + interpolator)
     double fractionalDelay_ = 1.5;  // interpolator design delay
+
+    // Span used to map position01 onto a rail delay. This is NOT always realizedRailSpan_,
+    // because it must stay inside the part of the rail that is still addressable:
+    //   Lagrange3 -- the interpolator IS the rail read, so the rail is live out to railBase_ + 3
+    //     (its four taps). realizedRailSpan_ + 1 <= railBase_ + 3 for every D in [1, 2], so the
+    //     realized (continuous, fractional) span is usable directly. That is what keeps taps and
+    //     injections from stepping when the integer part of the rail read moves during a bend.
+    //   Thiran1 -- the allpass sits OUTSIDE the rail, so the rail is consumed at delay railBase_
+    //     and nothing past it is ever read again. Mapping over realizedRailSpan_ (= railBase_ plus
+    //     up to 1.8 samples of allpass phase delay) would put taps and injections near the bridge
+    //     into already-consumed slots: at MIDI 108 / 44.1 kHz railBase_ is 2, so the whole dn half
+    //     of a p = 0.28 pluck would land at delays 3-4 and be silently discarded. The span is
+    //     therefore railBase_ - 1, so p = 1 lands exactly on the last live slot. The cost is that
+    //     the mapping steps with railBase_ -- which is the same integer-stepping this class avoids
+    //     for Lagrange3, and one more reason Lagrange3 is the shipping default
+    //     (docs/decisions/0002-fractional-delay.md).
+    double positionSpan_ = 2.0;
     SampleT lagrangeCoeff_[kLagrangeTaps]{};
     FirstOrderAllpass fracState_[2]{}; // Thiran-1 allpass per rail (unused for Lagrange3)
     FirstOrderAllpass dispersion_[kDispersionOrder]{};

@@ -66,11 +66,12 @@ catch_discover_tests(cnpg_tests ADD_TAGS_AS_LABELS)
 # Regenerate-goldens target (docs/plan.md section 1.6). The section-1.6 draft drives this from
 # `cnpg_render --regenerate-goldens`; cnpg_render lands in Task P1.11, so until then the
 # regeneration entry point is the hidden ("[.]"-tagged, therefore never discovered by CTest and
-# never run in CI) Catch2 case REGRESSION/REGEN inside cnpg_tests. That keeps a single renderer
-# shared by the goldens and the tests they gate, which is the property that actually matters:
-# a golden can never be written by different code than the one that later compares against it.
+# never run in CI) Catch2 case "REGEN: rewrite string_ir goldens" inside cnpg_tests. That keeps
+# a single renderer shared by the goldens and the tests they gate, which is the property that
+# actually matters: a golden can never be written by different code than the one that later
+# compares against it.
 add_custom_target(cnpg_regen_goldens
-    COMMAND $<TARGET_FILE:cnpg_tests> "REGRESSION/REGEN: rewrite string_ir goldens"
+    COMMAND $<TARGET_FILE:cnpg_tests> "REGEN: rewrite string_ir goldens"
     DEPENDS cnpg_tests
     USES_TERMINAL
     COMMENT "Rewrites float64 golden IRs for every scenario/algorithm variant at 44.1/48/96 kHz")

@@ -57,6 +57,11 @@ GoldenSidecar makeSidecar(FractionalDelayKind kind, double sampleRate, int midiN
     return sidecar;
 }
 
+// The sidecar stores these as decimal text at the stream's default precision, and they originate
+// as `float` knob values widened to double, so an exact == is the wrong comparison for the
+// provenance checks -- 0.87f widens to 0.87000000476837158 but reads back as 0.87.
+bool sameProvenance(double a, double b) { return std::fabs(a - b) <= 1e-6; }
+
 const char* missingGoldenHint() {
     return "Golden file missing. Build the cnpg_regen_goldens target to create it, then commit "
            "with a 'Regenerate-Goldens: <reason>' trailer (docs/plan.md section 1.6).";
@@ -78,11 +83,24 @@ TEST_CASE("REGRESSION/A: feature invariants", "[regression]") {
                 GoldenSidecar reference;
                 REQUIRE(readGoldenSidecar(sidecarPath, reference));
 
+                // Provenance, not just features: a sidecar generated for a different rate, tap
+                // position, excitation or exciter seed is not a reference for THIS render, and
+                // layer (b) -- which would otherwise notice -- is MSVC-only.
                 REQUIRE(reference.schemaVersion == kGoldenSchemaVersion);
+                REQUIRE(reference.dspStateVersion == kDspStateVersion);
                 REQUIRE(reference.variant == variantName(kind));
                 REQUIRE(reference.midiNote == midiNote);
+                REQUIRE(reference.sampleRate == sampleRate);
+                REQUIRE(sameProvenance(reference.tapPosition, static_cast<double>(kStringIrTapPosition)));
+                REQUIRE(sameProvenance(reference.excitationVelocity, static_cast<double>(kStringIrVelocity)));
+                REQUIRE(sameProvenance(reference.excitationPluckPosition, static_cast<double>(kStringIrPluckPosition)));
+                REQUIRE(sameProvenance(reference.excitationHardness, static_cast<double>(kStringIrHardness)));
+                REQUIRE(sameProvenance(reference.excitationNoiseAmount, static_cast<double>(kStringIrNoiseAmount)));
+                REQUIRE(reference.noiseSeed == static_cast<double>(kStringIrNoiseSeed));
+                REQUIRE(reference.atol == kStringIrGoldenAtol);
 
                 const std::vector<double> rendered = renderStringIr(kind, sampleRate, midiNote);
+                REQUIRE(reference.lengthSamples == static_cast<double>(rendered.size()));
                 const StringIrFeatures features = extractStringIrFeatures(rendered, sampleRate, midiNote);
 
                 REQUIRE(features.partialHz.size() == reference.features.partialHz.size());
@@ -167,9 +185,14 @@ TEST_CASE("REGRESSION/B: float64 golden exactness", "[regression]") {
 // ---------------------------------------------------------------------------------------------
 // Regeneration entry point -- hidden ("[.]"), so CTest never discovers or runs it. Driven by the
 // cnpg_regen_goldens CMake target (docs/plan.md section 1.6).
+//
+// Deliberately NOT named "REGRESSION/...": Catch2 only skips hidden cases when the spec carries no
+// filter at all, so a name glob someone would plausibly type -- cnpg_tests "REGRESSION*" -- would
+// otherwise match this case and silently overwrite all 60 committed goldens as a side effect of
+// running the tests that gate them. Tag filters and CTest are safe either way.
 // ---------------------------------------------------------------------------------------------
 
-TEST_CASE("REGRESSION/REGEN: rewrite string_ir goldens", "[.][regen]") {
+TEST_CASE("REGEN: rewrite string_ir goldens", "[.][regen]") {
     std::cout << "Regenerating string_ir goldens under " << goldenRoot().string() << "\n";
     std::cout << "commit " << generatorCommit() << "\n";
 

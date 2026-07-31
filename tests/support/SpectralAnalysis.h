@@ -43,10 +43,11 @@ double centsBetween(double measuredHz, double referenceHz);
 // Equal temperament, A4 = 440 Hz.
 double midiNoteToHz(int midiNote);
 
-// Per-octave-band T60 in seconds via a 2nd-order bandpass plus Schroeder backward integration,
-// fitted over the -5 dB .. -25 dB span of the decay curve and extrapolated (T20 * 3). Returns a
-// negative value when the band carries too little energy for a valid fit -- callers treat that
-// as "band not present at this note" rather than a failure.
+// Per-octave-band T60 in seconds: a 4th-order octave bandpass (two cascaded RBJ sections -- a
+// single biquad's skirts leak a low note's fundamental into every band, see the .cpp) plus
+// Schroeder backward integration, fitted over the -5 dB .. -25 dB span of the decay curve and
+// extrapolated (T20 * 3). Returns a negative value when the band carries too little energy for
+// a valid fit -- callers treat that as "band not present at this note" rather than a failure.
 double bandT60Seconds(const std::vector<double>& samples, double sampleRate, double centreHz);
 
 // RMS in dBFS over the first `windowSeconds` of the signal.
