@@ -1,6 +1,6 @@
 // Task P1.1: compiles every dsp/ param struct landed so far for a module whose class hasn't
-// arrived yet (PluckExciter.h, StringNetwork.h, PickupTap.h, TriodeStage.h, CabFilter.h,
-// SoftClipLimiter.h -- OutputGain.h already has a full module and its own OutputGainTests.cpp).
+// arrived yet (PluckExciter.h, StringNetwork.h, TriodeStage.h, CabFilter.h, SoftClipLimiter.h --
+// OutputGain.h and PickupTap.h already have a full module and their own *Tests.cpp).
 // Each header's own static_assert(std::is_trivially_copyable_v<...>) already gates the
 // no-alloc-assurance acceptance criterion at compile time; the checks below additionally prove
 // aggregate initialization, default values, and plain-copy semantics behave as documented,
