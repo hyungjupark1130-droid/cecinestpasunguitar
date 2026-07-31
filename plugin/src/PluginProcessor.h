@@ -2,17 +2,40 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include "MidiConverter.h"
 #include "Parameters.h"
+#include "cnpg/dsp/CabFilter.h"
+#include "cnpg/dsp/EventQueue.h"
+#include "cnpg/dsp/NoteAllocator.h"
 #include "cnpg/dsp/OutputGain.h"
+#include "cnpg/dsp/Oversampler.h"
+#include "cnpg/dsp/PickupTap.h"
 #include "cnpg/dsp/ScopedFtzDazGuard.h"
+#include "cnpg/dsp/SoftClipLimiter.h"
+#include "cnpg/dsp/StringNetwork.h"
+#include "cnpg/dsp/TriodeStage.h"
 
-// cnpg_plugin's top-level juce::AudioProcessor. Owns the frozen bus layout, the APVTS-backed
-// state (Task P1.1), and the P0 walking-skeleton sine-tone proof (now gain-staged through the
-// real cnpg::dsp::OutputGain module, driven by the APVTS outputGainDb parameter). Plugin
-// identity (PRODUCT_NAME, COMPANY_NAME, PLUGIN_MANUFACTURER_CODE Hjpk, PLUGIN_CODE Cnpg) is set
-// in plugin/CMakeLists.txt, pinned there permanently, and is not repeated here. The remaining
-// dsp wiring (PluckExciter, StringNetwork, PickupTap, ...) lands incrementally starting P1.2 --
-// see docs/plan.md sections 1.4 and 2.
+// cnpg_plugin's top-level juce::AudioProcessor. Owns the frozen bus layout, the APVTS-backed state
+// (Task P1.1), and -- from Task P1.9 -- the whole hard-wired P1 instrument chain. The P0.4
+// walking-skeleton sine tone is gone: processBlock now renders real plucked-string audio driven by
+// host MIDI. Plugin identity (PRODUCT_NAME, COMPANY_NAME, PLUGIN_MANUFACTURER_CODE Hjpk,
+// PLUGIN_CODE Cnpg) is set in plugin/CMakeLists.txt, pinned there permanently, and is not repeated
+// here.
+//
+// -----------------------------------------------------------------------------------------------
+// The locked chain (docs/plan.md sections 2.11 and 2.13).
+// -----------------------------------------------------------------------------------------------
+//
+//   host MIDI -> MidiConverter -> NoteAllocator -> BlockEventQueue
+//             -> StringNetwork -> PickupTap -> Oversampler(TriodeStage, bypassable)
+//             -> CabFilter (bypassable) -> OutputGain -> SoftClipLimiter -> mono duplicated to the
+//                stereo bus
+//
+// The safety clip is LAST by design, so "rendered peak <= ceilingDb" is enforceable regardless of
+// what any stage ahead of it does. The order is hard-wired rather than routed: cnpg::dsp::ModuleGraph
+// exists and is tested (tests/dsp/ModuleGraphTests.cpp proves routing this exact chain through it is
+// sample-identical to these direct calls), but runtime routing does not turn on until P4.
+
 class PluginProcessor final : public juce::AudioProcessor {
   public:
     PluginProcessor();
@@ -69,6 +92,11 @@ class PluginProcessor final : public juce::AudioProcessor {
     static constexpr int kCnpgStateVersion = 1;
 
   private:
+    // One chunk of at most preparedBlockSize_ samples through the whole chain, writing
+    // `numSamples` samples into `output`. See processBlock() for why the chunking exists.
+    void renderChunk(const cnpg::params::Snapshot& snapshot, const cnpg::dsp::RawMidiEvent* events, int numEvents,
+                     float* output, int numSamples) noexcept;
+
     // Initialized in the constructor's member-initializer list (PluginProcessor.cpp), matching
     // this class's existing convention of keeping juce::AudioProcessor base-class construction
     // arguments there rather than as an in-class default member initializer.
@@ -81,16 +109,28 @@ class PluginProcessor final : public juce::AudioProcessor {
     // acceptance criteria) -- no getRawParameterValue() string lookups on the audio thread.
     cnpg::params::RawParameterPointers rawParams_;
 
-    // First real dsp/ module wired into processBlock (docs/plan.md Task P1.1): the P0
-    // walking-skeleton sine-tone proof (docs/plan.md Task P0.4 step 3, still a continuous
-    // 440 Hz tone at -18 dBFS peak before this gain stage) is now gain-staged through it, driven
-    // by the APVTS outputGainDb parameter every block. The remaining P1 chain (PluckExciter,
-    // StringNetwork, PickupTap, TriodeStage, CabFilter, SoftClipLimiter) lands starting P1.2 and
-    // eventually replaces the sine tone entirely (docs/plan.md Task P1.9).
+    // The chain, in signal order. Every one of these is prepared in prepareToPlay() and driven
+    // from the once-per-block APVTS snapshot in processBlock().
+    cnpg::dsp::NoteAllocator noteAllocator_;
+    cnpg::dsp::StringNetwork<float> stringNetwork_;
+    cnpg::dsp::PickupTap pickupTap_;
+    cnpg::dsp::Oversampler oversampler_;
+    cnpg::dsp::TriodeStage triode_;
+    cnpg::dsp::CabFilter cabFilter_;
     cnpg::dsp::OutputGain outputGain_;
+    cnpg::dsp::SoftClipLimiter limiter_;
+
+    // Realtime scratch, all sized on the message thread in prepareToPlay().
+    cnpg::dsp::RawMidiEvent rawMidiEvents_[cnpg::midi::kMaxEventsPerBlock]{};
+    cnpg::dsp::BlockEventQueue noteEvents_;
 
     double currentSampleRate_ = 44100.0;
-    double sinePhase_ = 0.0;
+    int preparedBlockSize_ = 0;
+
+    // Global pitch bend in semitones, held across blocks: the MIDI pitch wheel is a latched
+    // controller, not an event the string consumes, so its last value has to survive until the
+    // host sends another one. Not an APVTS parameter by design (see StringNetworkParams).
+    float pitchBendSemitones_ = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };
