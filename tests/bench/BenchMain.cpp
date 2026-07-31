@@ -12,8 +12,8 @@
 // Assembles the exact hard-wired P1 chain plugin/src/PluginProcessor.cpp wires, at the plugin's
 // own shipped defaults (plugin/src/Parameters.cpp -- the one place a dsp/ param struct's own
 // default differs from what ships is TriodeStageParams::outputTrimDb, which the plugin sets to
-// cnpg::dsp::kUnityGainOutputTrimDb; BenchChain::setDefaults() below matches that, exactly as
-// tests/dsp/MonitoringChainTests.cpp's ChainHarness does):
+// cnpg::dsp::kUnityGainOutputTrimDb; makeDefaultSnapshot() below matches that, exactly as
+// tests/dsp/MonitoringChainTests.cpp's ChainHarness::setDefaults() does):
 //
 //   StringNetwork -> PickupTap -> Oversampler(TriodeStage, bypassable) -> CabFilter (bypassable)
 //                 -> OutputGain -> SoftClipLimiter
@@ -25,14 +25,41 @@
 // from any RNG or the wall clock. That is what makes two runs of the same binary against the same
 // CLI comparable sample-for-sample, not merely close in their timing summary.
 //
-// Every process() call is timed individually with a steady high-resolution clock, under the same
+// Every block is timed as a whole with a steady high-resolution clock, under the same
 // ScopedFtzDazGuard RAII the plugin's processBlock() engages, matching the convention
-// tests/dsp/DenormalTests.cpp already established for per-block timing in this repo. The first
-// second of (block) time is excluded from the reported statistics as a warmup window -- letting
-// caches, the branch predictor and (on a laptop) any DVFS ramp settle before the numbers that get
-// written into docs/bench/p1-baseline.md are sampled -- but every block, warmup included, is still
-// rendered and still feeds the deterministic note-stream timeline, so excluding it from the stats
-// never perturbs what gets played.
+// tests/dsp/DenormalTests.cpp already established for per-block timing in this repo. "As a whole"
+// is load-bearing: PluginProcessor::renderChunk() unconditionally re-applies a freshly-read
+// parameter snapshot to all six of StringNetwork/PickupTap/TriodeStage/CabFilter/OutputGain/
+// SoftClipLimiter via setParams() BEFORE every process() call, every block, regardless of whether
+// any value actually changed (docs/plan.md Task P1.1's once-per-block-snapshot design reads the
+// APVTS atomics unconditionally) -- so that cascade is a real, unavoidable per-block cost in
+// production and BenchChain::processBlock() below reproduces it exactly, inside the timed region,
+// rather than applying params once outside the loop the way an early draft of this file did. Some
+// of those six calls are cheap (CabFilter's is a single bool store) but several are not:
+// PickupTap::setParams() recomputes a biquad's coefficients via sin()/cos() every call, and
+// PickupTap/TriodeStage/OutputGain/SoftClipLimiter each convert a dB parameter through
+// std::pow(10, x/20); StringNetwork::setParams() loops all kMaxStrings (8) rail slots --
+// regardless of how many strings are actually active -- recomputing each one's target frequency
+// via std::exp2() (dsp/src/StringNetwork.cpp's midiNoteToHz()). Excluding this cascade from the
+// timed region would structurally UNDER-report every number below, and would make it impossible
+// for p99/max to ever show the "event bursts, smoother retargeting" spike class docs/plan.md
+// section 4.7 names as the reason those two columns are reported at all -- every block would cost
+// exactly the same regardless of what happened in it.
+//
+// The parameter values themselves are constant across the whole render (cnpg_bench has no
+// automation lane; see makeDefaultSnapshot() below) -- only the six setParams() CALLS repeat every
+// block, exactly mirroring "every block, changed or not" rather than modelling automation cnpg_bench
+// does not yet generate. Re-applying an unchanged target is provably a per-block no-op for the
+// rendered SAMPLES (every setParams() implementation in dsp/ only recomputes a target a smoother
+// then ramps toward -- ramping toward a target you are already sitting on moves nothing), which is
+// why `audioHash` (see below) does not depend on whether this cascade runs; it is exclusively a
+// per-block CPU cost, and that cost is exactly what this tool exists to measure.
+//
+// The first second of (block) time is excluded from the reported statistics as a warmup window --
+// letting caches, the branch predictor and (on a laptop) any DVFS ramp settle before the numbers
+// that get written into docs/bench/p1-baseline.md are sampled -- but every block, warmup included,
+// is still rendered (setParams cascade and all) and still feeds the deterministic note-stream
+// timeline, so excluding it from the stats never perturbs what gets played.
 //
 // -----------------------------------------------------------------------------------------------
 // CLI (locked; P2.1 extends the --config table only -- see kNamedConfigs below).
@@ -53,13 +80,19 @@
 //
 // A human-readable report (median/p99/max block time, in both raw microseconds and as a percent
 // of one core via blockTime/(blockSize/sampleRate), per docs/plan.md section 4.7's formula) to
-// stdout, followed by one compact JSON line carrying the same numbers plus what this binary can
-// portably self-report (compiler, optimization mode, git commit baked in at configure time -- see
-// tests/bench/CMakeLists.txt) for docs/plan.md section 4.7's "every run emits JSON" intent. CPU
-// model and Windows power plan are NOT self-reported here (no WinAPI dependency was worth adding
-// to an otherwise OS-agnostic dsp/-only executable for two fields that a human has to read off the
-// dev machine once per baseline anyway) -- they are recorded by hand in docs/bench/p1-baseline.md
-// instead, exactly where docs/plan.md's own acceptance criterion asks for "dev-machine spec".
+// stdout, followed by one compact JSON line carrying the same numbers plus the full machine-spec
+// schema docs/plan.md section 4.7 locks: "CPU model and core count, Windows power plan, compiler
+// and version, build type and flags, git commit". CPU model is read from the registry on Windows
+// (`HARDWARE\DESCRIPTION\System\CentralProcessor\0\ProcessorNameString`) and from /proc/cpuinfo's
+// "model name" line elsewhere; core count is std::thread::hardware_concurrency() (logical, i.e.
+// SMT/hyperthread-inclusive -- reported as "logicalCoreCount", not "cores", so the field name does
+// not overclaim); the active power plan is read via a one-shot `powercfg /getactivescheme` on
+// Windows (n/a elsewhere) -- see windowsPowerPlanGuid() below for why only the GUID is parsed out,
+// not the (locale-dependent) friendly name; build type and flags are baked in at configure time
+// (tests/bench/CMakeLists.txt) since neither is portably introspectable from inside a running
+// process. Every one of these lookups runs once, outside the timed render loop, so none of them
+// perturbs a block-time measurement; a failed lookup degrades to "unknown" (or "n/a" where the
+// concept itself does not apply, e.g. Windows power plan on Linux) rather than aborting the run.
 
 #include "cnpg/dsp/CabFilter.h"
 #include "cnpg/dsp/Common.h"
@@ -83,10 +116,37 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+// NOMINMAX: without it, <windows.h> #defines min/max as function-like macros that silently
+// swallow every std::min/std::max call in the rest of this file (a textual substitution, not a
+// name lookup, so it is not scoped by namespace and breaks even fully-qualified std::min calls).
+// WIN32_LEAN_AND_MEAN keeps the include itself cheap -- this file only needs RegGetValueA and
+// _popen/_pclose, none of which live in the headers it excludes.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#if defined(_MSC_VER)
+#pragma comment(lib, "advapi32.lib") // RegGetValueA, for the CPU-model registry read below
+#endif
+#else
+#include <fstream> // /proc/cpuinfo parsing in cpuModel() below
+#endif
 
 #ifndef CNPG_BENCH_GIT_COMMIT
 #define CNPG_BENCH_GIT_COMMIT "unknown" // safety net if a non-CMake build forgets to define this
+#endif
+#ifndef CNPG_BENCH_BUILD_TYPE
+#define CNPG_BENCH_BUILD_TYPE "unknown" // safety net; see tests/bench/CMakeLists.txt
+#endif
+#ifndef CNPG_BENCH_BUILD_FLAGS
+#define CNPG_BENCH_BUILD_FLAGS "unknown" // safety net; see tests/bench/CMakeLists.txt
 #endif
 
 #define CNPG_BENCH_STRINGIZE_IMPL(x) #x
@@ -95,6 +155,40 @@
 using namespace cnpg::dsp;
 
 namespace {
+
+// -------------------------------------------------------------------------------------------
+// The per-block parameter snapshot BenchChain::processBlock() re-applies every block, standing in
+// for plugin/src/Parameters.h's cnpg::params::Snapshot (which cannot be included here -- it is
+// built over juce::AudioProcessorValueTreeState, and cnpg_bench links cnpg_dsp only). Built once
+// by makeDefaultSnapshot() and held constant for the whole render: cnpg_bench has no automation
+// lane yet, so there is nothing to vary it against, but see the file-level comment for why the six
+// setParams() CALLS still repeat every block regardless.
+// -------------------------------------------------------------------------------------------
+struct DefaultSnapshot {
+    StringNetworkParams network;
+    PickupTapParams pickup;
+    TriodeStageParams triode;
+    CabFilterParams cab;
+    OutputGainParams outputGain;
+    SoftClipLimiterParams limiter;
+};
+
+// The SHIPPED defaults (matching tests/dsp/MonitoringChainTests.cpp's ChainHarness::setDefaults()
+// and plugin/src/Parameters.cpp's APVTS defaults) -- see the one place a dsp/ param struct's own
+// default differs from what ships: TriodeStageParams::outputTrimDb defaults to 0 dB ("a trim's
+// natural default is no trim", TriodeStage.h), while the plugin's APVTS default -- and this
+// snapshot -- set it to kUnityGainOutputTrimDb.
+DefaultSnapshot makeDefaultSnapshot() {
+    DefaultSnapshot snapshot;
+    snapshot.network = StringNetworkParams{};
+    snapshot.pickup = PickupTapParams{};
+    snapshot.triode = TriodeStageParams{};
+    snapshot.triode.outputTrimDb = kUnityGainOutputTrimDb;
+    snapshot.cab = CabFilterParams{};
+    snapshot.outputGain = OutputGainParams{};
+    snapshot.limiter = SoftClipLimiterParams{};
+    return snapshot;
+}
 
 // -------------------------------------------------------------------------------------------
 // The chain: StringNetwork -> PickupTap -> Oversampler(TriodeStage) -> CabFilter -> OutputGain
@@ -130,21 +224,6 @@ struct BenchChain {
         mono.assign(static_cast<std::size_t>(blockSize), 0.0f);
     }
 
-    // The SHIPPED defaults -- see the file-level comment for why the triode's output trim is the
-    // one field that is not simply <Module>Params{}.
-    void setDefaults() {
-        network.setParams(StringNetworkParams{});
-        pickup.setParams(PickupTapParams{});
-
-        TriodeStageParams triodeParams;
-        triodeParams.outputTrimDb = kUnityGainOutputTrimDb;
-        triode.setParams(triodeParams);
-
-        cab.setParams(CabFilterParams{});
-        outputGain.setParams(OutputGainParams{});
-        limiter.setParams(SoftClipLimiterParams{});
-    }
-
     void reset() noexcept {
         network.reset();
         pickup.reset();
@@ -155,7 +234,17 @@ struct BenchChain {
         limiter.reset();
     }
 
-    void processBlock(BlockEventQueue& events, int numSamples) noexcept {
+    // Mirrors PluginProcessor::renderChunk() exactly: the six setParams() calls run first, EVERY
+    // block, then the six process() calls -- see the file-level comment for why the cascade
+    // belongs here (inside what the caller times) rather than run once before the render loop.
+    void processBlock(const DefaultSnapshot& snapshot, BlockEventQueue& events, int numSamples) noexcept {
+        network.setParams(snapshot.network);
+        pickup.setParams(snapshot.pickup);
+        triode.setParams(snapshot.triode);
+        cab.setParams(snapshot.cab);
+        outputGain.setParams(snapshot.outputGain);
+        limiter.setParams(snapshot.limiter);
+
         network.process(events, numSamples);
         pickup.process(network.tapBuffers(), mono.data(), numSamples);
         oversampler.processWrapped(
@@ -432,6 +521,97 @@ const char* compilerName() noexcept {
 #endif
 }
 
+// -------------------------------------------------------------------------------------------
+// Environment (docs/plan.md section 4.7's locked JSON schema: "CPU model and core count, Windows
+// power plan, compiler and version, build type and flags, git commit"). Every lookup below runs
+// exactly once, from main(), outside the timed render loop.
+// -------------------------------------------------------------------------------------------
+
+// Replaces '"', '\\' and any control character with '_' so a runtime-sourced string (the only
+// untrusted-shape strings here: cpuModel() reads the registry / /proc/cpuinfo) can never produce
+// invalid JSON when dropped into this file's hand-written printf format strings.
+std::string sanitizeForJson(std::string s) {
+    for (char& c : s) {
+        if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20)
+            c = '_';
+    }
+    return s;
+}
+
+std::string cpuModel() {
+#if defined(_WIN32)
+    char buffer[256] = {};
+    DWORD bufferSize = sizeof(buffer);
+    const LONG result = RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                                     "ProcessorNameString", RRF_RT_REG_SZ, nullptr, buffer, &bufferSize);
+    if (result != ERROR_SUCCESS)
+        return "unknown";
+    std::string name(buffer);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\0'))
+        name.pop_back();
+    return name.empty() ? "unknown" : sanitizeForJson(name);
+#else
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    if (!cpuinfo.is_open())
+        return "unknown";
+    std::string line;
+    while (std::getline(cpuinfo, line)) {
+        if (line.rfind("model name", 0) != 0)
+            continue;
+        const auto colon = line.find(':');
+        if (colon == std::string::npos)
+            break;
+        std::string name = line.substr(colon + 1);
+        const auto firstNonSpace = name.find_first_not_of(' ');
+        return firstNonSpace == std::string::npos ? "unknown" : sanitizeForJson(name.substr(firstNonSpace));
+    }
+    return "unknown";
+#endif
+}
+
+// std::thread::hardware_concurrency() reports LOGICAL processors (SMT/hyperthread siblings
+// included), not physical cores -- named accordingly below rather than as "core count" so the
+// field never overclaims what it actually measured.
+unsigned int logicalCoreCount() noexcept { return std::thread::hardware_concurrency(); }
+
+// Windows-only: the active power plan, read via a one-shot `powercfg /getactivescheme` spawn.
+// Only the plan's GUID is extracted (not the friendly name after it in parentheses): powercfg's
+// surrounding text is localized -- this dev machine's own output is Korean, e.g.
+// "...GUID: e9a42b02-d5df-448d-aa00-03f14749eb61  (<localized plan name>)" -- but the GUID itself
+// is not, so scanning for the fixed 8-4-4-4-12 hex shape anywhere in the output is the one locale-independent
+// way to parse this reliably. The human-readable plan name still belongs in
+// docs/bench/p1-baseline.md (recorded by hand, where it already is), not in this JSON line.
+std::string windowsPowerPlanGuid() {
+#if defined(_WIN32)
+    std::FILE* pipe = _popen("powercfg /getactivescheme", "r");
+    if (pipe == nullptr)
+        return "unknown";
+
+    std::string output;
+    char buf[256];
+    while (std::fgets(buf, sizeof(buf), pipe) != nullptr)
+        output += buf;
+    _pclose(pipe);
+
+    const auto isHex = [](char c) noexcept {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    };
+    for (std::size_t i = 0; i + 36 <= output.size(); ++i) {
+        bool matches = true;
+        for (int j = 0; j < 36 && matches; ++j) {
+            const char c = output[i + static_cast<std::size_t>(j)];
+            const bool wantDash = (j == 8 || j == 13 || j == 18 || j == 23);
+            matches = wantDash ? (c == '-') : isHex(c);
+        }
+        if (matches)
+            return output.substr(i, 36);
+    }
+    return "unknown";
+#else
+    return "n/a";
+#endif
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -484,8 +664,11 @@ int main(int argc, char** argv) {
 
     BenchChain chain;
     chain.prepare(args.sampleRate, args.blockSize, args.strings, args.oversample);
-    chain.setDefaults();
     chain.reset();
+
+    // Built once; re-applied to every module every block from inside the timed region (see the
+    // file-level comment and BenchChain::processBlock()).
+    const DefaultSnapshot snapshot = makeDefaultSnapshot();
 
     NoteStreamGenerator generator(args.strings, args.sampleRate);
 
@@ -521,7 +704,7 @@ int main(int argc, char** argv) {
         const auto start = std::chrono::steady_clock::now();
         {
             const ScopedFtzDazGuard ftzDazGuard; // exactly the guard the plugin's processBlock() engages
-            chain.processBlock(events, numSamples);
+            chain.processBlock(snapshot, events, numSamples);
         }
         const auto elapsed = std::chrono::steady_clock::now() - start;
         const double micros =
@@ -563,6 +746,11 @@ int main(int argc, char** argv) {
 
     const int factor = chain.oversampler.factor();
 
+    // Every lookup below runs once, here, outside the timed loop above.
+    const std::string cpuModelStr = cpuModel();
+    const unsigned int coreCount = logicalCoreCount();
+    const std::string powerPlanGuid = windowsPowerPlanGuid();
+
     std::printf("cnpg_bench -- P1 monitoring chain, deterministic corpus-derived workload\n");
     std::printf("  strings=%d samplerate=%.0f blocksize=%d oversample=%d(requested %d) seconds=%.1f\n", args.strings,
                 args.sampleRate, args.blockSize, factor, args.oversample, args.seconds);
@@ -576,21 +764,22 @@ int main(int argc, char** argv) {
     std::printf("  median block time: %10.3f us = %6.3f%% CPU\n", medianMicros, toCpuPercent(medianMicros));
     std::printf("  p99    block time: %10.3f us = %6.3f%% CPU\n", p99Micros, toCpuPercent(p99Micros));
     std::printf("  max    block time: %10.3f us = %6.3f%% CPU\n", maxMicros, toCpuPercent(maxMicros));
+    std::printf("  environment: cpu=\"%s\" logicalCores=%u powerPlanGuid=%s compiler=\"%s\" buildType=%s "
+                "gitCommit=%s\n",
+                cpuModelStr.c_str(), coreCount, powerPlanGuid.c_str(), compilerName(), CNPG_BENCH_BUILD_TYPE,
+                CNPG_BENCH_GIT_COMMIT);
 
     std::printf("{\"strings\":%d,\"sampleRate\":%.0f,\"blockSize\":%d,\"oversampleFactor\":%d,"
                 "\"secondsRequested\":%.1f,\"blocksTotal\":%d,\"blocksMeasured\":%d,\"warmupBlocksExcluded\":%d,"
                 "\"nonFiniteSamples\":%lld,\"audioHash\":\"%016llx\",\"medianBlockTimeUs\":%.3f,"
                 "\"p99BlockTimeUs\":%.3f,\"maxBlockTimeUs\":%.3f,\"medianCpuPercent\":%.3f,\"p99CpuPercent\":%.3f,"
-                "\"maxCpuPercent\":%.3f,\"compiler\":\"%s\",\"ndebug\":%s,\"gitCommit\":\"%s\"}\n",
+                "\"maxCpuPercent\":%.3f,\"cpuModel\":\"%s\",\"logicalCoreCount\":%u,\"powerPlanGuid\":\"%s\","
+                "\"compiler\":\"%s\",\"buildType\":\"%s\",\"buildFlags\":\"%s\",\"gitCommit\":\"%s\"}\n",
                 args.strings, args.sampleRate, args.blockSize, factor, args.seconds,
                 static_cast<int>(blockMicros.size()), static_cast<int>(stable.size()), static_cast<int>(warmupCount),
                 nonFiniteSamples, static_cast<unsigned long long>(audioHash), medianMicros, p99Micros, maxMicros,
-                toCpuPercent(medianMicros), toCpuPercent(p99Micros), toCpuPercent(maxMicros), compilerName(),
-#if defined(NDEBUG)
-                "true",
-#else
-                "false",
-#endif
+                toCpuPercent(medianMicros), toCpuPercent(p99Micros), toCpuPercent(maxMicros), cpuModelStr.c_str(),
+                coreCount, powerPlanGuid.c_str(), compilerName(), CNPG_BENCH_BUILD_TYPE, CNPG_BENCH_BUILD_FLAGS,
                 CNPG_BENCH_GIT_COMMIT);
 
     return 0;

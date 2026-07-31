@@ -34,6 +34,37 @@ if(GIT_FOUND)
     endif()
 endif()
 
+# Build type and build flags, baked in at configure time for the JSON report's "build type AND
+# flags" field (docs/plan.md section 4.7's locked schema). CMAKE_BUILD_TYPE is NOT reliable here:
+# the windows-msvc-release preset uses the multi-config Visual Studio generator, where the actual
+# config is chosen at BUILD time (`cmake --build build --config Release`), not configure time, so
+# CMAKE_BUILD_TYPE stays empty for that preset the whole way through. The `$<CONFIG>` generator
+# expression is what resolves correctly for both the multi-config VS generator and the
+# single-config Ninja generator linux-dsp-only uses (CMAKE_BUILD_TYPE=Release set explicitly
+# there) -- CMake substitutes it per build, not per configure, so this stays correct across
+# `cmake --build build --config Release` and `cmake --build build --config Debug` from the SAME
+# configure.
+#
+# The flags string mirrors cnpg_set_warnings() (cmake/CompilerWarnings.cmake) exactly -- it has to
+# be kept in sync with that function by hand, since a plain string here cannot introspect what a
+# function call elsewhere actually applied; there is no single generator expression that reads
+# back another target's already-applied compile options portably across the VS and Ninja
+# generators this project's two presets use.
+if(MSVC)
+    set(CNPG_BENCH_BUILD_FLAGS_BASE "/permissive- /W4 /Zc:__cplusplus /utf-8 /EHsc")
+    set(CNPG_BENCH_BUILD_FLAGS_WERROR "/WX")
+else()
+    set(CNPG_BENCH_BUILD_FLAGS_BASE "-Wall -Wextra -Wpedantic -Wshadow -Wconversion")
+    set(CNPG_BENCH_BUILD_FLAGS_WERROR "-Werror")
+endif()
+if(CNPG_WARNINGS_AS_ERRORS)
+    set(CNPG_BENCH_BUILD_FLAGS "${CNPG_BENCH_BUILD_FLAGS_BASE} ${CNPG_BENCH_BUILD_FLAGS_WERROR}")
+else()
+    set(CNPG_BENCH_BUILD_FLAGS "${CNPG_BENCH_BUILD_FLAGS_BASE}")
+endif()
+
 target_compile_definitions(cnpg_bench PRIVATE
     CNPG_BENCH_GIT_COMMIT="${CNPG_BENCH_GIT_COMMIT}"
+    CNPG_BENCH_BUILD_TYPE="$<CONFIG>"
+    CNPG_BENCH_BUILD_FLAGS="${CNPG_BENCH_BUILD_FLAGS}"
 )
