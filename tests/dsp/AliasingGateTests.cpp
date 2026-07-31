@@ -285,6 +285,17 @@ TEST_CASE("ALIASING: triode folded components under -60 dBc", "[aliasing]") {
                 const std::string row = formatRow("OS", factor, latency, tone, drive, m, gated);
                 std::cout << row << "\n";
 
+                // Guards against a VACUOUS pass. A gate whose only assertion is "the worst thing I
+                // found is quiet enough" also passes when the harness found nothing at all, so every
+                // row must first prove it measured something: fold predictions were enumerated and
+                // classified, a real level came back for the worst of them, and the measurement's own
+                // noise floor sits far enough below the limit that aliasing could not be hiding in it.
+                INFO(row);
+                REQUIRE(m.numFolds > 0);
+                REQUIRE(m.numHarmonics > 0);
+                REQUIRE(m.worstFoldedDbc > -300.0);
+                REQUIRE(m.noiseFloorDbc < kGateDbc - 20.0);
+
                 if (gated && m.worstFoldedDbc > worstGatedDbc) {
                     worstGatedDbc = m.worstFoldedDbc;
                     worstGatedRow = row;
@@ -299,6 +310,7 @@ TEST_CASE("ALIASING: triode folded components under -60 dBc", "[aliasing]") {
               << worstGatedRow << "\n";
 
     // The gate itself: default factor, both tones, both gated drive settings.
+    REQUIRE(worstGatedDbc > -300.0); // four gated rows really did run
     CHECK(worstGatedDbc <= kGateDbc);
 }
 
