@@ -6,11 +6,13 @@
 # in P2.
 
 add_executable(cnpg_tests
+    dsp/AliasingGateTests.cpp
     dsp/DenormalTests.cpp
     dsp/EventQueueTests.cpp
     dsp/MidiTranslationTests.cpp
     dsp/NoteAllocatorTests.cpp
     dsp/OutputGainTests.cpp
+    dsp/OversamplerTests.cpp
     dsp/ParamStructsTests.cpp
     dsp/PickupTapTests.cpp
     dsp/PitchBendClickTests.cpp
