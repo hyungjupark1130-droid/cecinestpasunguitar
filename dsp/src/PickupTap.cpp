@@ -38,18 +38,25 @@ PickupTap::Coeffs PickupTap::computeCoeffs(float resonanceHz, float q, double sa
     const float safeHz = clampFinite(resonanceHz, kMinResonanceHz, std::max(kMinResonanceHz, maxHz));
     const float safeQ = clampFinite(q, kMinQ, kMaxQ);
 
-    // RBJ-style constant 0 dB peak-gain bandpass (Audio EQ Cookbook conventions): a pole pair
-    // placed from (safeHz, safeQ), with zeros at DC and Nyquist. |H(e^{j*w0})| == 1 exactly for
-    // every q > 0, so the resonance sits at resonanceHz regardless of loading -- see the header
-    // comment for why the alternative (a resonant lowpass) was rejected.
+    // RBJ-style constant SKIRT-gain bandpass (Audio EQ Cookbook conventions -- peak gain == q, not
+    // a fixed 0 dB): the bilinear discretization of the displacement->EMF transfer function
+    // s*w0^2/(s^2+(w0/Q)s+w0^2), a pole pair placed from (safeHz, safeQ) with the numerator's DC
+    // zero doing the differentiation the magnetic transducer itself performs -- see the header
+    // comment. The CONSTANT-PEAK-GAIN variant (b0 = alpha/a0) was tried first and rejected: its
+    // numerator scales with alpha = sin(w0)/(2*safeQ), so the whole low/mid register would have
+    // scaled as 1/(q*resonanceHz) -- tens of dB across the user-facing q/resonanceHz range, which
+    // both parameters are -- contradicting the -18 dBFS nominal structure. b0 = sin(w0)/2/a0 has
+    // no q or resonanceHz dependence beyond w0 itself, so peak gain is q by construction (as the
+    // physical transfer function's own numerator magnitude at resonance requires) and nothing else
+    // moves with loading.
     const double w0 = kTwoPi * static_cast<double>(safeHz) / rate;
     const double alpha = std::sin(w0) / (2.0 * static_cast<double>(safeQ));
     const double a0 = 1.0 + alpha;
 
     Coeffs c;
-    c.b0 = alpha / a0;
+    c.b0 = std::sin(w0) / 2.0 / a0;
     c.b1 = 0.0;
-    c.b2 = -alpha / a0;
+    c.b2 = -c.b0;
     c.a1 = (-2.0 * std::cos(w0)) / a0;
     c.a2 = (1.0 - alpha) / a0;
     return c;
@@ -134,7 +141,13 @@ void PickupTap::runBlock(const Sample* in, Sample* out, int numSamples) noexcept
 }
 
 void PickupTap::process(const StringTapBuffers<Sample>& taps, Sample* out, int numSamples) noexcept {
-    const int count = std::clamp(numSamples, 0, maxBlockSize_);
+    // Bounded by taps.numSamples() as well as maxBlockSize_: taps' own fill can be shorter than
+    // either (a short last block, or a network prepared with a smaller maxBlockSize than this
+    // PickupTap's own), and each string's channel() is only valid for taps.numSamples() samples --
+    // reading further walks into the next string's stride, or past StringNetwork's whole tap
+    // storage once every string's slot is exhausted. Samples beyond count are left untouched in
+    // `out`, matching the rest of this module's [0, count) convention.
+    const int count = std::clamp(numSamples, 0, std::min(maxBlockSize_, taps.numSamples()));
     if (count <= 0)
         return;
 

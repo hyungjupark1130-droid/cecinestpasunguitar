@@ -33,10 +33,12 @@ constexpr double kTwoPi = 6.283185307179586476925286766559;
 
 // ---------------------------------------------------------------------------------------------
 // Reference RLC-biquad math -- independently re-derived from docs/plan.md section 2.8 (the RBJ
-// constant-0-dB-peak-gain bandpass PickupTap.cpp's computeCoeffs() implements), NOT shared code
-// with dsp/src/PickupTap.cpp. This is the "analytic RLC magnitude response" the acceptance
-// criteria names: a closed-form evaluation of the z-domain transfer function, independent of
-// running any samples through a filter.
+// constant-SKIRT-gain bandpass PickupTap.cpp's computeCoeffs() implements -- the bilinear
+// discretization of the displacement->EMF transfer function s*w0^2/(s^2+(w0/Q)s+w0^2); see
+// PickupTap.h for why the transducer's own differentiation makes this the physically correct
+// topology, peak gain == q by construction), NOT shared code with dsp/src/PickupTap.cpp. This is
+// the "analytic RLC magnitude response" the acceptance criteria names: a closed-form evaluation
+// of the z-domain transfer function, independent of running any samples through a filter.
 // ---------------------------------------------------------------------------------------------
 
 struct RefCoeffs {
@@ -47,7 +49,8 @@ RefCoeffs referenceCoeffs(double resonanceHz, double q, double sampleRate) {
     const double w0 = kTwoPi * resonanceHz / sampleRate;
     const double alpha = std::sin(w0) / (2.0 * q);
     const double a0 = 1.0 + alpha;
-    return RefCoeffs{alpha / a0, 0.0, -alpha / a0, (-2.0 * std::cos(w0)) / a0, (1.0 - alpha) / a0};
+    const double b0 = std::sin(w0) / 2.0 / a0;
+    return RefCoeffs{b0, 0.0, -b0, (-2.0 * std::cos(w0)) / a0, (1.0 - alpha) / a0};
 }
 
 double referenceMagnitude(const RefCoeffs& c, double testHz, double sampleRate) {
@@ -288,6 +291,73 @@ TEST_CASE("CONTRACT: PickupTap sums only active strings; an untriggered string c
         REQUIRE(twoStringOut.size() == oneStringOut.size());
         for (std::size_t i = 0; i < twoStringOut.size(); ++i)
             REQUIRE(twoStringOut[i] == oneStringOut[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// process() never reads/writes past what taps actually holds
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: PickupTap process clamps to taps.numSamples(), not just its own maxBlockSize", "[contract]") {
+    // A StringNetwork's tap buffers are only valid for taps.numSamples() samples per string (a
+    // short last block, or -- as exercised here -- a network prepared with a smaller maxBlockSize
+    // than this PickupTap's own leaves taps.numSamples() < the caller's requested numSamples).
+    // Reading past that walks into the next string's stride, or past the whole tap storage once
+    // every string's slot is exhausted: process() must clamp against BOTH taps.numSamples() and
+    // its own maxBlockSize_, not just the latter.
+    constexpr int kNetworkBlock = 32;
+    constexpr int kTapMaxBlock = 128; // 4x the network's block: the mismatch this test exercises
+    // Highest supported note (shortest loop, ~10.5 samples at 44.1 kHz per WaveguideString.h) so
+    // the excitation has unambiguously reached the default pickup tap well inside a 32-sample
+    // window at every rate this loops over -- this test is about the clamp, not about timing a
+    // pluck-to-tap arrival.
+    constexpr int kMidiNote = 108;
+    constexpr Sample kSentinel = 12345.0f;
+
+    for (double sampleRate : {44100.0, 48000.0, 96000.0}) {
+        StringNetwork<float> network;
+        network.prepare(sampleRate, kNetworkBlock, FractionalDelayKind::Lagrange3);
+        network.setNumStrings(1);
+        StringNetworkParams netParams;
+        network.setParams(netParams);
+        network.reset();
+        BlockEventQueue events;
+        events.push(noteOn(0, kMidiNote, 0));
+        network.process(events, kNetworkBlock); // a full block: taps.numSamples() == kNetworkBlock
+        REQUIRE(network.tapBuffers().numSamples() == kNetworkBlock);
+
+        PickupTap tap;
+        tap.prepare(sampleRate, kTapMaxBlock);
+        tap.setParams(makeParams(2500.0f, 2.0f, 0.0f));
+        tap.reset();
+
+        std::vector<Sample> out(static_cast<std::size_t>(kTapMaxBlock), kSentinel);
+        // Deliberately over-requests: kTapMaxBlock (128) exceeds taps.numSamples() (32).
+        tap.process(network.tapBuffers(), out.data(), kTapMaxBlock);
+
+        // Untouched beyond the valid window -- proves process() did not read (or write) past
+        // taps.numSamples() samples per string.
+        for (int n = kNetworkBlock; n < kTapMaxBlock; ++n) {
+            INFO("rate " << sampleRate << " sample " << n);
+            REQUIRE(out[static_cast<std::size_t>(n)] == kSentinel);
+        }
+
+        // The valid portion is still computed correctly: bit-identical to a fresh PickupTap fed
+        // the SAME taps with a correctly-sized request.
+        PickupTap reference;
+        reference.prepare(sampleRate, kTapMaxBlock);
+        reference.setParams(makeParams(2500.0f, 2.0f, 0.0f));
+        reference.reset();
+        std::vector<Sample> expected(static_cast<std::size_t>(kNetworkBlock), 0.0f);
+        reference.process(network.tapBuffers(), expected.data(), kNetworkBlock);
+
+        bool sounded = false;
+        for (int n = 0; n < kNetworkBlock; ++n) {
+            REQUIRE(std::isfinite(out[static_cast<std::size_t>(n)]));
+            REQUIRE(out[static_cast<std::size_t>(n)] == expected[static_cast<std::size_t>(n)]);
+            sounded |= (out[static_cast<std::size_t>(n)] != 0.0f);
+        }
+        REQUIRE(sounded);
     }
 }
 

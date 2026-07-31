@@ -14,16 +14,41 @@
 // nonlinearity is deliberately absent -- it is P4's. Block domain, NOT templated: it consumes
 // only the float/Sample realtime tap instantiation. Zero JUCE includes.
 //
-// RLC model. The coil's inductance (L), its parasitic capacitance (C), and the pot/cable/amp
-// loading (R) form a resonant tank; resonanceHz and q place a complex pole pair for that tank
-// (w0 = 2*pi*resonanceHz/sampleRate; pole radius set from q), realized as an RBJ-style constant
-// 0 dB peak-gain bandpass biquad. A resonant LOWPASS -- the topology "voltage across the load"
-// suggests at first glance -- is deliberately NOT used: that damping convention only produces a
-// magnitude peak once q exceeds 1/sqrt(2) =~ 0.707, so the acceptance sweep's q = 0.7 case (a
-// heavily loaded pickup, just under that boundary) would have no resonance left to measure. The
-// bandpass realization peaks at exactly resonanceHz for every q > 0 -- what the q in {0.7, 2, 6}
-// acceptance sweep needs -- while remaining a legitimate driven-RLC-tank reading of the same two
-// physical parameters.
+// RLC model -- why a BANDPASS, and why that is not a modelling shortcut.
+//
+// taps.channel(i) carries the string's DISPLACEMENT, not velocity: WaveguideString.h's rails
+// "carry the travelling-wave components of the string's displacement" and injectAt() "adds
+// excitation into the string's displacement"; PluckExciter's burst is explicitly a displacement
+// burst (PluckExciter.h). A magnetic pickup does not sense displacement -- by Faraday's law its
+// induced EMF is proportional to the rate of change of flux, i.e. d(displacement)/dt. The
+// transducer itself is a DIFFERENTIATOR, sitting in series before the coil's own R/L/C resonance
+// ever enters the picture.
+//
+// So the full displacement -> pickup-output transfer function is (rate of change) x (loaded RLC
+// tank response): s * w0^2 / (s^2 + (w0/Q)s + w0^2). That is a single DC zero (the
+// differentiation) times a loaded pole pair -- algebraically a 2nd-order BANDPASS, exactly. The
+// RBJ constant-skirt-gain bandpass biquad below is the bilinear discretization of precisely that
+// analog prototype, with resonanceHz/q placing the pole pair as (w0, Q). The biquad's -6 dB/octave
+// low-frequency skirt is therefore not an approximation error or a deliberate voicing tilt to
+// paper over -- it IS the transducer's own differentiation, physically required, and belongs in
+// the P1 signal path exactly as much as the resonant peak does.
+//
+// A resonant LOWPASS -- the shape "voltage across the load" suggests if the differentiation step
+// is missed -- was tried first and is wrong on two independent counts, not one. (1) A damped
+// 2-pole lowpass only produces a magnitude peak once q exceeds 1/sqrt(2) =~ 0.70711, so q = 0.7
+// (the acceptance sweep's own lowest case) has no resonance to measure at all. (2) Even where a
+// lowpass peak DOES exist, it sits at w0*sqrt(1 - 1/(2*Q^2)), not at w0: at q = 2 that is 6.5%
+// below resonanceHz -- 6.5x past the +/-1% acceptance gate -- so the lowpass is structurally
+// incompatible with the peak-frequency acceptance criterion at every q in the sweep, not only the
+// q = 0.7 edge case. The bandpass's peak sits at exactly resonanceHz for every q > 0 (a property of
+// that specific pole/zero placement, not a coincidence of q = 0.7 alone), which is what the
+// q in {0.7, 2, 6} acceptance sweep actually needs.
+//
+// One further consequence of getting the transducer physics right rather than picking whichever
+// topology passes the tests: any future revisit of this transducer (P4's magnetic-nonlinearity
+// work is the one task that touches it again) must keep this bandpass shape, not "simplify" it
+// back to a lowpass -- doing so would make the instrument 6 dB/octave too dark, silently, since
+// nothing else in the P1-P3 chain would catch a tonal-balance regression like that.
 //
 // Smoothing. Coefficients and the post-filter output-gain trim are both smoothed with a
 // per-block linear ramp, the convention OutputGain uses for its own gain: setParams() only
@@ -65,7 +90,11 @@ class PickupTap {
 
     // Realtime-safe; never allocates. Sums taps.channel(i) for every string reporting
     // taps.isActive(i) into an internal mono scratch buffer, then runs that sum through the same
-    // stage processMono() runs. Clamped to [0, maxBlockSize].
+    // stage processMono() runs. Clamped to [0, min(maxBlockSize, taps.numSamples())] -- a caller
+    // asking for more samples than taps actually holds (a short last block, or a StringNetwork
+    // prepared with a smaller maxBlockSize than this PickupTap's own) gets exactly
+    // taps.numSamples() written; samples in `out` beyond that are left untouched rather than read
+    // past each string's valid stride.
     void process(const StringTapBuffers<Sample>& taps, Sample* out, int numSamples) noexcept;
 
     // Test-only seam. docs/plan.md section 2.8 locks process(taps, out, numSamples) as the real
