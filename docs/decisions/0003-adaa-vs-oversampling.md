@@ -43,9 +43,36 @@ Exactly `docs/plan.md` section 4.4, implemented in `tests/dsp/AliasingGateTests.
   Blackman-Harris main-lobe width — the smallest radius at which a harmonic's own main lobe cannot
   be misreported as a fold). No amplitude-based early stop on the enumeration: enumerating *more*
   folds than necessary can only make the gate stricter.
-- `worst dBc` is the strongest classified fold relative to the strongest classified harmonic. The
-  measurement noise floor (median bin magnitude, 100 Hz–20 kHz, same reference) is reported beside
-  every row so no number can be mistaken for the harness running out of dynamic range.
+- `worst dBc` is the strongest classified fold relative to the strongest classified harmonic.
+
+**Local leakage floor, and floor-limited rows.** Excluding a harmonic's *main lobe* (the
+coincidence radius) does nothing about its *skirt*: a Blackman-Harris window leaks around −125 dBc
+some 80 analysis bins from a peak and around −146 dBc a thousand bins out, both orders of magnitude
+above any global-median noise estimate of this spectrum. A fold prediction landing near a strong
+line therefore reads the **window**, not the device — reproducibly, since a pure sine with no
+nonlinearity reproduces such a reading to a fraction of a dB. Every row consequently carries a
+**local floor**: the level the *same* readout operator reports at nearby positions whose entire
+readout window is clear of every predicted line (harmonics and folds alike), taken as a median —
+the matched null distribution for the statistic, not an approximation of one. A reading within 6 dB
+of its local floor is marked **FL (floor-limited)**: an upper bound on the device, never a
+measurement of it. Each row also reports the worst fold that *does* stand clear of its own floor.
+
+The **gate compares the raw reading** against −60 dBc, unchanged and deliberately. Leakage can only
+inflate a reading, never deflate one, so a floor-limited row is a conservative pass. None of the
+floor-limited rows is anywhere near the limit, and the binding row is not floor-limited: it stands
+112 dB above its own local floor.
+
+**Why this gate cannot pass vacuously.** "The worst thing I found is quiet enough" also passes when
+nothing was found, and counting predicted frequencies does not fix that — the prediction lists are
+built from `f0` and the factor, never from the signal, so those counts read the same whatever the
+device does. The invariant that actually binds is **H2/H3**, reported on every row: the margin by
+which the device's own second and third harmonics clear that same local floor. No nonlinearity, no
+harmonics, no pass. `tests/dsp/AliasingGateTests.cpp` carries the standing red-verification as a
+CI-run negative control — the identity map substituted for `TriodeStage::process` through the same
+wrapper, which lands at **−0.01 dB** of headroom while still reporting 40 folds, a finite worst-fold
+reading of −149.52 dBc, and an 89.5 dB "pass" against the −60 dBc limit. The shipped stage clears
+the same invariant by **115.8 to 121.7 dB** on every row of the tables below, so the 20 dB threshold
+sits in the middle of a 116 dB gap rather than being fitted to either side.
 
 Three drive conditions. Two are **gated**, exactly as locked: *nominal* (default
 `TriodeStageParams::drive` = 0.5, −18 dBFS peak input — the per-string nominal of `docs/plan.md`
@@ -61,29 +88,42 @@ a decision this document is allowed to make.
 Worst folded component, dBc relative to the strongest harmonic. Dev machine, Windows 11 / MSVC /
 Release. `cnpg_tests "[aliasing]"`.
 
-| factor | latency | tone | drive | worst dBc | at Hz | noise floor dBc | folds | status |
-|---|---|---|---|---|---|---|---|---|
-| 2 | 3 | 1244.5 | nominal | −145.32 | 1418.0 | −178.83 | 135 | **GATED** |
-| 2 | 3 | 1244.5 | max | −88.82 | 21330.0 | −178.36 | 135 | **GATED** |
-| 2 | 3 | 1244.5 | headroom | −61.14 | 21330.0 | −172.07 | 135 | report |
-| 2 | 3 | 4186.0 | nominal | −149.24 | 3908.0 | −176.43 | 40 | **GATED** |
-| 2 | 3 | 4186.0 | max | **−64.93** | 16466.0 | −175.55 | 40 | **GATED** |
-| 2 | 3 | 4186.0 | headroom | −42.13 | 20652.0 | −172.62 | 40 | report |
-| 4 | 4 | 1244.5 | nominal | −124.93 | 1229.5 | −178.19 | 289 | report |
-| 4 | 4 | 1244.5 | max | −113.47 | 21503.5 | −177.89 | 289 | report |
-| 4 | 4 | 1244.5 | headroom | −75.94 | 21503.5 | −173.22 | 289 | report |
-| 4 | 4 | 4186.0 | nominal | −149.51 | 3908.0 | −178.52 | 86 | report |
-| 4 | 4 | 4186.0 | max | −77.50 | 20374.0 | −177.80 | 86 | report |
-| 4 | 4 | 4186.0 | headroom | −54.56 | 16188.0 | −173.25 | 86 | report |
-| 8 | 4 | 1244.5 | nominal | −124.93 | 1259.5 | −177.93 | 598 | report |
-| 8 | 4 | 1244.5 | max | −124.93 | 1259.5 | −177.75 | 598 | report |
-| 8 | 4 | 1244.5 | headroom | −88.08 | 23095.0 | −173.98 | 598 | report |
-| 8 | 4 | 4186.0 | nominal | −121.11 | 4194.0 | −179.96 | 178 | report |
-| 8 | 4 | 4186.0 | max | −102.48 | 19818.0 | −179.16 | 178 | report |
-| 8 | 4 | 4186.0 | headroom | −68.42 | 3074.0 | −174.35 | 178 | report |
+**FL** marks a floor-limited reading — quoted as an upper bound, not as a device measurement.
+
+| factor | lat | tone | drive | worst dBc | | local floor | at Hz | worst resolved dBc | at Hz | H2/H3 | folds | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2 | 3 | 1244.5 | nominal | ≤ −145.32 | **FL** | −145.46 | 1418.0 | −151.66 | 2662.5 | 116.9 | 135 | **GATED** |
+| 2 | 3 | 1244.5 | max | −88.82 | | −179.71 | 21330.0 | −88.82 | 21330.0 | 121.1 | 135 | **GATED** |
+| 2 | 3 | 1244.5 | headroom | −61.14 | | −177.35 | 21330.0 | −61.14 | 21330.0 | 120.5 | 135 | report |
+| 2 | 3 | 4186.0 | nominal | ≤ −149.24 | **FL** | −149.56 | 3908.0 | −153.47 | 8650.0 | 121.0 | 40 | **GATED** |
+| 2 | 3 | 4186.0 | max | **−64.93** | | −176.93 | 16466.0 | **−64.93** | 16466.0 | 121.1 | 40 | **GATED** |
+| 2 | 3 | 4186.0 | headroom | −42.13 | | −161.56 | 20652.0 | −42.13 | 20652.0 | 121.0 | 40 | report |
+| 4 | 4 | 1244.5 | nominal | ≤ −124.93 | **FL** | −126.01 | 1229.5 | −155.59 | 23992.5 | 116.3 | 289 | report |
+| 4 | 4 | 1244.5 | max | −113.47 | | −178.91 | 21503.5 | −113.47 | 21503.5 | 121.1 | 289 | report |
+| 4 | 4 | 1244.5 | headroom | −75.94 | | −177.64 | 21503.5 | −75.94 | 21503.5 | 120.6 | 289 | report |
+| 4 | 4 | 4186.0 | nominal | ≤ −149.51 | **FL** | −149.46 | 3908.0 | −152.07 | 11446.0 | 120.4 | 86 | report |
+| 4 | 4 | 4186.0 | max | −77.50 | | −181.97 | 20374.0 | −77.50 | 20374.0 | 121.0 | 86 | report |
+| 4 | 4 | 4186.0 | headroom | −54.56 | | −171.36 | 16188.0 | −54.56 | 16188.0 | 120.9 | 86 | report |
+| 8 | 4 | 1244.5 | nominal | ≤ −124.93 | **FL** | −125.96 | 1259.5 | *none* | — | 115.8 | 598 | report |
+| 8 | 4 | 1244.5 | max | ≤ −124.93 | **FL** | −125.96 | 1259.5 | −134.42 | 23819.0 | 121.1 | 598 | report |
+| 8 | 4 | 1244.5 | headroom | −88.08 | | −179.47 | 23095.0 | −88.08 | 23095.0 | 120.7 | 598 | report |
+| 8 | 4 | 4186.0 | nominal | ≤ −121.11 | **FL** | −123.50 | 4194.0 | −152.41 | 5298.0 | 120.4 | 178 | report |
+| 8 | 4 | 4186.0 | max | −102.48 | | −183.14 | 19818.0 | −102.48 | 19818.0 | 121.7 | 178 | report |
+| 8 | 4 | 4186.0 | headroom | −68.42 | | −160.79 | 3074.0 | −68.42 | 3074.0 | 121.3 | 178 | report |
 
 **Gate verdict: PASS.** Worst gated row −64.93 dBc ≤ −60 dBc. Factors 4 and 8 are report-only per
 the plan and are never asserted.
+
+**Reading the floor-limited rows.** Seven of the eighteen rows — every *nominal*-drive row, plus
+8×/1244.5 at max drive — are floor-limited, and their `worst dBc` figures are therefore upper
+bounds set by the analysis window rather than measurements of the oversampler. Two of them are
+gated rows (2×, nominal drive, both tones); both pass by more than 85 dB regardless. The 8×/1244.5
+pair is the clearest tell: it reports the *identical* −124.93 dBc at nominal **and** at max drive, a
+number that does not move when the drive is raised, because it is not a nonlinear product at all.
+The binding row is unaffected — 2×/4186/max sits 112 dB above its local floor and is a genuine
+device measurement, as are every *max* and *headroom* row at 2× and 4×. **No verdict in this
+document changes.** What changes is that floor-limited readings are now labelled instead of
+published as device measurements.
 
 ### Where the binding folds come from — and what would *not* have fixed them
 
@@ -127,20 +167,25 @@ as P1.4's fractional-delay spike). No spike branch was created; nothing to merge
 
 ### 2a. Aliasing — same stimulus, same classifier
 
-| path | tone | drive | worst dBc | at Hz | status |
-|---|---|---|---|---|---|
-| naive (no antialiasing) | 1244.5 | nominal | −145.64 | 1418.0 | reference |
-| naive | 1244.5 | max | −64.96 | 23110.0 | reference |
-| naive | 1244.5 | headroom | −42.74 | 23110.0 | reference |
-| naive | 4186.0 | nominal | −127.66 | 22884.0 | reference |
-| naive | 4186.0 | max | −46.59 | 22884.0 | reference |
-| naive | 4186.0 | headroom | −20.04 | 18698.0 | reference |
-| ADAA1 | 1244.5 | nominal | −145.72 | 1418.0 | gated-equivalent |
-| ADAA1 | 1244.5 | max | −69.89 | 23110.0 | gated-equivalent |
-| ADAA1 | 1244.5 | headroom | −47.00 | 23110.0 | report |
-| ADAA1 | 4186.0 | nominal | −133.85 | 22884.0 | gated-equivalent |
-| ADAA1 | 4186.0 | max | **−64.30** | 22884.0 | gated-equivalent |
-| ADAA1 | 4186.0 | headroom | −26.46 | 18698.0 | report |
+| path | tone | drive | worst dBc | | local floor | at Hz | worst resolved dBc | at Hz | H2/H3 |
+|---|---|---|---|---|---|---|---|---|---|
+| naive (no antialiasing) | 1244.5 | nominal | ≤ −145.64 | **FL** | −145.67 | 1418.0 | −149.12 | 535.5 | 116.2 |
+| naive | 1244.5 | max | −64.96 | | −181.70 | 23110.0 | −64.96 | 23110.0 | 121.0 |
+| naive | 1244.5 | headroom | −42.74 | | −163.57 | 23110.0 | −42.74 | 23110.0 | 120.5 |
+| naive | 4186.0 | nominal | −127.66 | | −184.88 | 22884.0 | −127.66 | 22884.0 | 120.6 |
+| naive | 4186.0 | max | −46.59 | | −167.74 | 22884.0 | −46.59 | 22884.0 | 121.0 |
+| naive | 4186.0 | headroom | −20.04 | | −141.05 | 18698.0 | −20.04 | 18698.0 | 120.8 |
+| ADAA1 | 1244.5 | nominal | ≤ −145.72 | **FL** | −145.67 | 1418.0 | −160.74 | 16887.5 | 116.2 |
+| ADAA1 | 1244.5 | max | −69.89 | | −182.35 | 23110.0 | −69.89 | 23110.0 | 121.0 |
+| ADAA1 | 1244.5 | headroom | −47.00 | | −168.22 | 23110.0 | −47.00 | 23110.0 | 121.0 |
+| ADAA1 | 4186.0 | nominal | −133.85 | | −182.65 | 22884.0 | −133.85 | 22884.0 | 120.2 |
+| ADAA1 | 4186.0 | max | **−64.30** | | −179.12 | 22884.0 | **−64.30** | 22884.0 | 121.0 |
+| ADAA1 | 4186.0 | headroom | −26.46 | | −147.40 | 18698.0 | −26.46 | 18698.0 | 121.0 |
+
+Only the two 1244.5 Hz nominal-drive rows are floor-limited here, and neither carries any weight in
+the comparison. **Every row the decision below rests on — both `max` rows and both `headroom` rows,
+for both paths — is resolved well above its own local floor**, so the head-to-head is between two
+device measurements, not between two readings of the window.
 
 Head to head on the four gated combinations: **oversampling 2× worst −64.93 dBc, ADAA1 worst
 −64.30 dBc.** Both would pass the gate; oversampling is 0.63 dB better. On the report-only headroom

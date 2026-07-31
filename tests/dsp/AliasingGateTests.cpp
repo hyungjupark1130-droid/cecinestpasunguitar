@@ -55,6 +55,45 @@ using cnpg::dsp::TriodeStageParams;
 //     smallest radius at which a harmonic's own main lobe can no longer be misread as a fold. The
 //     plan's "+/-2 bins" is a peak-matching tolerance for an unknown peak; using it as a
 //     coincidence radius for this window would report harmonic energy as aliasing.
+//
+// -------------------------------------------------------------------------------------------
+// The local leakage floor, and why the coincidence radius is not enough on its own.
+// -------------------------------------------------------------------------------------------
+//
+// Excluding a harmonic's MAIN LOBE does nothing about its SKIRT. A Blackman-Harris window leaks
+// roughly -125 dBc some 80 analysis bins from a peak and roughly -146 dBc a thousand bins out --
+// both orders of magnitude above any global-median noise estimate of this spectrum. So a fold
+// prediction that happens to land in the neighbourhood of a strong line reads the WINDOW rather
+// than the device, and does so reproducibly: a pure sine with no nonlinearity at all reproduces
+// such a reading to within a fraction of a dB. Two tells in the raw tables: a "worst folded
+// component" that does not move when the drive is raised, and one that matches the pure-sine
+// control.
+//
+// Every reading therefore carries a LOCAL floor -- the level this exact readout reports at nearby
+// frequencies where no line is predicted. `localFloorMagnitude` slides the same
+// max-over-readout-radius operator across a neighbourhood of the target, keeps only the positions
+// whose entire readout window is clear of every predicted line (harmonics AND folds), and takes the
+// median of those. That is the matched null distribution for this statistic, not an approximation
+// of one. A reading within `kFloorResolutionDb` of its local floor is FLOOR-LIMITED: an upper bound
+// on the device, never a measurement of it, and it is printed with an `FL` marker instead of being
+// quoted. Each row additionally reports the worst fold that does stand clear of its own floor.
+//
+// The GATE still compares the raw reading against -60 dBc, unchanged. That stays correct precisely
+// because leakage can only inflate a reading and never deflate one, so a floor-limited row is a
+// conservative pass, not a hidden failure.
+//
+// -------------------------------------------------------------------------------------------
+// Why this case cannot pass vacuously.
+// -------------------------------------------------------------------------------------------
+//
+// "The worst thing I found is quiet enough" also passes when nothing was found. Counting predicted
+// frequencies does not fix that -- the prediction lists are built from f0 and the factor, never
+// from the signal, so those counts are the same whatever the device does. The invariant that
+// actually binds is the DEVICE's own second and third harmonics standing clear of the local floor
+// by `kMinHarmonicHeadroomDb`: no nonlinearity, no harmonics, no pass. "ALIASING: engagement
+// invariant rejects a linear device (negative control)" at the bottom of this file is the standing
+// red-verification -- it swaps TriodeStage for the identity map and shows that invariant, and only
+// that invariant, going red while everything else still looks healthy.
 // -------------------------------------------------------------------------------------------
 
 namespace {
@@ -75,6 +114,35 @@ constexpr double kGateDbc = -60.0;
 constexpr double kNominalPeak = 0.12589254117941673;
 constexpr double kHeadroomPeak = 0.7943282347242815;
 
+// Spectrum geometry. tests/support/SpectralAnalysis.cpp zero-pads x4, so one ANALYSIS bin spans
+// four FFT bins; every radius below is expressed in FFT bins so the readout used for a reading and
+// the readout used for its floor are literally the same operator.
+constexpr double kAnalysisBinHz = kHostRate / static_cast<double>(kAnalysisLength);
+constexpr std::ptrdiff_t kZeroPadFactor = 4;
+constexpr std::ptrdiff_t kReadoutRadiusBins = 1 * kZeroPadFactor;     // +/-1 analysis bin
+constexpr std::ptrdiff_t kCoincidenceRadiusBins = 8 * kZeroPadFactor; // +/-1 BH main-lobe width
+constexpr double kCoincidenceRadiusHz = 8.0 * kAnalysisBinHz;
+
+// Local-floor estimation. The neighbourhood starts at +/-64 analysis bins (~11.7 Hz) and widens
+// x4 twice if the predicted-line mask leaves too few clear positions to take a stable median over.
+constexpr std::ptrdiff_t kFloorHalfWidthBins = 256;
+constexpr std::size_t kMinFloorSamples = 64;
+
+// A reading this close to its own local floor is reported as floor-limited rather than quoted.
+constexpr double kFloorResolutionDb = 6.0;
+
+// The engagement invariant (see the file-level comment). H2 and H3 must clear their own local
+// floors by this much for a row's aliasing reading to be evidence about the device at all.
+// Measured: the shipped stage clears it by 115.8 to 121.7 dB on every row of the table, and the
+// identity map lands at -0.01 dB (its "harmonics" ARE the floor). The threshold sits ~96 dB under
+// the tightest real row and 20 dB over the negative control, so no plausible value in between
+// changes any verdict -- 20 dB is chosen as a round number in the middle of a 116 dB gap, not
+// fitted to either side.
+constexpr double kMinHarmonicHeadroomDb = 20.0;
+
+// Which nonlinearity the harness wraps. `Identity` exists only for the negative control.
+enum class DeviceUnderTest { Triode, Identity };
+
 struct DriveCondition {
     const char* name;
     float drive;
@@ -91,7 +159,8 @@ const DriveCondition kDriveConditions[] = {
 // Renders a steady sine through Oversampler(TriodeStage) and returns `kAnalysisLength` settled
 // samples as float64. The warm-up is discarded on a block boundary so the capture never straddles
 // a partially settled filter state.
-std::vector<double> renderOversampled(double freqHz, double amplitude, float drive, int factor) {
+std::vector<double> renderOversampled(double freqHz, double amplitude, float drive, int factor,
+                                      DeviceUnderTest device = DeviceUnderTest::Triode) {
     Oversampler os;
     os.prepare(kHostRate, kBlockSize, factor);
 
@@ -116,8 +185,10 @@ std::vector<double> renderOversampled(double freqHz, double amplitude, float dri
         for (int i = 0; i < kBlockSize; ++i)
             in[static_cast<std::size_t>(i)] =
                 static_cast<Sample>(amplitude * std::sin(omega * static_cast<double>(offset + i)));
-        os.processWrapped(in.data(), out.data(), kBlockSize,
-                          [&triode](Sample* buffer, int count) { triode.process(buffer, buffer, count); });
+        os.processWrapped(in.data(), out.data(), kBlockSize, [&](Sample* buffer, int count) {
+            if (device == DeviceUnderTest::Triode)
+                triode.process(buffer, buffer, count);
+        });
         if (offset >= kWarmupSamples) {
             for (int i = 0; i < kBlockSize && captured.size() < kAnalysisLength; ++i)
                 captured.push_back(static_cast<double>(out[static_cast<std::size_t>(i)]));
@@ -127,42 +198,100 @@ std::vector<double> renderOversampled(double freqHz, double amplitude, float dri
 }
 
 struct AliasingMeasurement {
+    // Conservative upper bound on the worst fold. This is what the gate compares, and it may be
+    // floor-limited (leakage can only inflate it, so a floor-limited row is a conservative pass).
     double worstFoldedDbc = -300.0;
     double worstFoldedHz = 0.0;
+    double worstFoldedFloorDbc = -300.0; // local leakage floor at that same frequency
+    bool worstFoldedFloorLimited = false;
+    // Worst fold that stands clear of its OWN local floor -- i.e. the strongest thing here that is
+    // genuinely a measurement of the device. -300 means "nothing resolved above the window".
+    double worstResolvedDbc = -300.0;
+    double worstResolvedHz = 0.0;
+    // min over H2, H3 of (level - local floor). The engagement invariant.
+    double harmonicHeadroomDb = -300.0;
     double strongestHarmonicHz = 0.0;
-    double noiseFloorDbc = -300.0;
-    int numHarmonics = 0;
     int numFolds = 0;
 };
 
-double peakMagnitudeAround(const cnpg::test::Spectrum& spectrum, double hz, double radiusHz) {
-    if (spectrum.fftSize == 0 || spectrum.magnitudeSquared.empty())
-        return 0.0;
+std::ptrdiff_t binOf(const cnpg::test::Spectrum& spectrum, double hz) {
+    return static_cast<std::ptrdiff_t>(std::llround(spectrum.hzToBin(hz)));
+}
+
+// THE readout: max magnitude over +/-kReadoutRadiusBins FFT bins. Used both for predicted lines and,
+// unchanged, for the local floor -- so a floor is always the level this same operator reports where
+// nothing is predicted, and the two are directly comparable.
+double readoutAtBin(const cnpg::test::Spectrum& spectrum, std::ptrdiff_t centre) {
     const auto lastBin = static_cast<std::ptrdiff_t>(spectrum.magnitudeSquared.size()) - 1;
-    auto lo = static_cast<std::ptrdiff_t>(std::floor(spectrum.hzToBin(hz - radiusHz)));
-    auto hi = static_cast<std::ptrdiff_t>(std::ceil(spectrum.hzToBin(hz + radiusHz)));
-    lo = std::max<std::ptrdiff_t>(lo, 0);
-    hi = std::min<std::ptrdiff_t>(hi, lastBin);
+    const std::ptrdiff_t lo = std::max<std::ptrdiff_t>(centre - kReadoutRadiusBins, 0);
+    const std::ptrdiff_t hi = std::min<std::ptrdiff_t>(centre + kReadoutRadiusBins, lastBin);
     double best = 0.0;
     for (std::ptrdiff_t k = lo; k <= hi; ++k)
         best = std::max(best, spectrum.magnitudeSquared[static_cast<std::size_t>(k)]);
     return std::sqrt(best);
 }
 
-// Median bin magnitude between 100 Hz and 20 kHz: peaks are sparse enough that the median is the
-// measurement's own noise floor. Reported alongside every row so a "-95 dBc worst fold" can be read
-// as a real measurement rather than as the harness running out of dynamic range.
-double medianMagnitude(const cnpg::test::Spectrum& spectrum) {
-    if (spectrum.fftSize == 0)
+double peakMagnitudeAround(const cnpg::test::Spectrum& spectrum, double hz) {
+    if (spectrum.fftSize == 0 || spectrum.magnitudeSquared.empty())
         return 0.0;
-    const auto lo = static_cast<std::size_t>(spectrum.hzToBin(100.0));
-    const auto hi = std::min(static_cast<std::size_t>(spectrum.hzToBin(20000.0)), spectrum.magnitudeSquared.size() - 1);
-    if (hi <= lo)
+    return readoutAtBin(spectrum, binOf(spectrum, hz));
+}
+
+// Marks +/-kCoincidenceRadiusBins (one Blackman-Harris main-lobe width) around every predicted line,
+// harmonic and fold alike, so no local floor can be contaminated by the very peak it is the floor
+// for -- nor by any other predicted product sitting nearby.
+std::vector<char> buildLineMask(const cnpg::test::Spectrum& spectrum, const std::vector<double>& lines) {
+    std::vector<char> masked(spectrum.magnitudeSquared.size(), static_cast<char>(0));
+    if (masked.empty())
+        return masked;
+    const auto lastBin = static_cast<std::ptrdiff_t>(masked.size()) - 1;
+    for (double hz : lines) {
+        const std::ptrdiff_t centre = binOf(spectrum, hz);
+        const std::ptrdiff_t lo = std::max<std::ptrdiff_t>(centre - kCoincidenceRadiusBins, 0);
+        const std::ptrdiff_t hi = std::min<std::ptrdiff_t>(centre + kCoincidenceRadiusBins, lastBin);
+        for (std::ptrdiff_t k = lo; k <= hi; ++k)
+            masked[static_cast<std::size_t>(k)] = static_cast<char>(1);
+    }
+    return masked;
+}
+
+// The local leakage floor at `hz`: median of the SAME readout evaluated at every nearby position
+// whose whole readout window is clear of predicted lines. Returns 0 if the neighbourhood never
+// yields enough clear positions even after widening (callers then treat the reading as unresolved
+// rather than silently trusting it).
+double localFloorMagnitude(const cnpg::test::Spectrum& spectrum, const std::vector<char>& masked, double hz) {
+    if (spectrum.fftSize == 0 || spectrum.magnitudeSquared.empty())
         return 0.0;
-    std::vector<double> values(spectrum.magnitudeSquared.begin() + static_cast<std::ptrdiff_t>(lo),
-                               spectrum.magnitudeSquared.begin() + static_cast<std::ptrdiff_t>(hi));
-    const auto mid = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
-    std::nth_element(values.begin(), mid, values.end());
+    const auto lastBin = static_cast<std::ptrdiff_t>(spectrum.magnitudeSquared.size()) - 1;
+    const std::ptrdiff_t centre = binOf(spectrum, hz);
+
+    std::vector<double> readouts;
+    readouts.reserve(static_cast<std::size_t>(2 * (kFloorHalfWidthBins << 4) + 1));
+    for (int widen = 0; widen < 3; ++widen) {
+        const std::ptrdiff_t halfWidth = kFloorHalfWidthBins << (2 * widen);
+        readouts.clear();
+        const std::ptrdiff_t lo = std::max<std::ptrdiff_t>(centre - halfWidth, kReadoutRadiusBins);
+        const std::ptrdiff_t hi = std::min<std::ptrdiff_t>(centre + halfWidth, lastBin - kReadoutRadiusBins);
+        for (std::ptrdiff_t c = lo; c <= hi; ++c) {
+            bool clear = true;
+            double best = 0.0;
+            for (std::ptrdiff_t k = c - kReadoutRadiusBins; k <= c + kReadoutRadiusBins; ++k) {
+                if (masked[static_cast<std::size_t>(k)] != 0) {
+                    clear = false;
+                    break;
+                }
+                best = std::max(best, spectrum.magnitudeSquared[static_cast<std::size_t>(k)]);
+            }
+            if (clear)
+                readouts.push_back(best);
+        }
+        if (readouts.size() >= kMinFloorSamples)
+            break;
+    }
+    if (readouts.size() < kMinFloorSamples)
+        return 0.0;
+    const auto mid = readouts.begin() + static_cast<std::ptrdiff_t>(readouts.size() / 2);
+    std::nth_element(readouts.begin(), mid, readouts.end());
     return std::sqrt(*mid);
 }
 
@@ -182,9 +311,6 @@ AliasingMeasurement measureAliasing(const std::vector<double>& signal, double f0
         centred[i] = signal[i] - mean;
 
     const cnpg::test::Spectrum spectrum = cnpg::test::computeSpectrum(centred, kHostRate, kAnalysisLength);
-    const double analysisBinHz = kHostRate / static_cast<double>(kAnalysisLength);
-    const double readoutRadiusHz = 1.0 * analysisBinHz;
-    const double coincidenceRadiusHz = 8.0 * analysisBinHz;
 
     // Enumerate every predicted harmonic out to 4 x the oversampled Nyquist, per docs/plan.md
     // section 4.4. No amplitude-based early stop: the harness has no analytic prediction of the
@@ -204,28 +330,49 @@ AliasingMeasurement measureAliasing(const std::vector<double>& signal, double f0
         const double folded = std::fabs(raw - std::round(raw / kHostRate) * kHostRate);
         // A fold sitting on DC is not measurable under a windowed FFT; everything else in the band
         // counts, right up to Nyquist.
-        if (folded > coincidenceRadiusHz && folded < kNyquist)
+        if (folded > kCoincidenceRadiusHz && folded < kNyquist)
             foldHz.push_back(folded);
     }
 
+    // Every predicted line masked before any floor is estimated.
+    std::vector<double> allLines = harmonicHz;
+    allLines.insert(allLines.end(), foldHz.begin(), foldHz.end());
+    const std::vector<char> masked = buildLineMask(spectrum, allLines);
+
     double strongestHarmonic = 0.0;
     for (double hz : harmonicHz) {
-        const double magnitude = peakMagnitudeAround(spectrum, hz, readoutRadiusHz);
+        const double magnitude = peakMagnitudeAround(spectrum, hz);
         if (magnitude > strongestHarmonic) {
             strongestHarmonic = magnitude;
             result.strongestHarmonicHz = hz;
         }
     }
-    result.numHarmonics = static_cast<int>(harmonicHz.size());
     if (!(strongestHarmonic > 0.0))
         return result;
 
+    // Engagement: how far the device's own 2nd and 3rd harmonics stand above the window's local
+    // leakage. A linear device has none, so this collapses to ~0 dB -- which is the whole point.
+    double headroom = 1e300;
+    for (int k : {2, 3}) {
+        const double hz = static_cast<double>(k) * f0;
+        if (hz >= kNyquist)
+            continue;
+        const double level = peakMagnitudeAround(spectrum, hz);
+        const double floorMagnitude = localFloorMagnitude(spectrum, masked, hz);
+        const double db = (level > 0.0 && floorMagnitude > 0.0) ? 20.0 * std::log10(level / floorMagnitude) : -300.0;
+        headroom = std::min(headroom, db);
+    }
+    result.harmonicHeadroomDb = (headroom < 1e299) ? headroom : -300.0;
+
     double worstFold = 0.0;
+    double worstFoldFloor = 0.0;
+    double worstResolved = 0.0;
+    const double resolutionRatio = std::pow(10.0, kFloorResolutionDb / 20.0);
     int counted = 0;
     for (double hz : foldHz) {
         bool coincides = false;
         for (double h : harmonicHz) {
-            if (std::fabs(hz - h) <= coincidenceRadiusHz) {
+            if (std::fabs(hz - h) <= kCoincidenceRadiusHz) {
                 coincides = true;
                 break;
             }
@@ -233,16 +380,27 @@ AliasingMeasurement measureAliasing(const std::vector<double>& signal, double f0
         if (coincides)
             continue;
         ++counted;
-        const double magnitude = peakMagnitudeAround(spectrum, hz, readoutRadiusHz);
+        const double magnitude = peakMagnitudeAround(spectrum, hz);
+        const double floorMagnitude = localFloorMagnitude(spectrum, masked, hz);
         if (magnitude > worstFold) {
             worstFold = magnitude;
+            worstFoldFloor = floorMagnitude;
             result.worstFoldedHz = hz;
+        }
+        // Resolved = genuinely above this frequency's own leakage, so a device measurement rather
+        // than a reading of the analysis window.
+        if (floorMagnitude > 0.0 && magnitude > floorMagnitude * resolutionRatio && magnitude > worstResolved) {
+            worstResolved = magnitude;
+            result.worstResolvedHz = hz;
         }
     }
     result.numFolds = counted;
     result.worstFoldedDbc = (worstFold > 0.0) ? 20.0 * std::log10(worstFold / strongestHarmonic) : -300.0;
-    const double floorMagnitude = medianMagnitude(spectrum);
-    result.noiseFloorDbc = (floorMagnitude > 0.0) ? 20.0 * std::log10(floorMagnitude / strongestHarmonic) : -300.0;
+    result.worstFoldedFloorDbc =
+        (worstFoldFloor > 0.0) ? 20.0 * std::log10(worstFoldFloor / strongestHarmonic) : -300.0;
+    result.worstFoldedFloorLimited =
+        (worstFoldFloor > 0.0) && (result.worstFoldedDbc <= result.worstFoldedFloorDbc + kFloorResolutionDb);
+    result.worstResolvedDbc = (worstResolved > 0.0) ? 20.0 * std::log10(worstResolved / strongestHarmonic) : -300.0;
     return result;
 }
 
@@ -250,16 +408,27 @@ AliasingMeasurement measureAliasing(const std::vector<double>& signal, double f0
 // (docs/plan.md section 4.4, "Non-default factors are report-only, never gated").
 std::string formatRow(const char* path, int factor, int latency, double toneHz, const DriveCondition& drive,
                       const AliasingMeasurement& m, bool gated) {
-    char line[256];
-    std::snprintf(line, sizeof(line), "  %-8s %5d %8d %10.1f %-9s %11.2f %11.1f %10.2f %7d %s", path, factor, latency,
-                  toneHz, drive.name, m.worstFoldedDbc, m.worstFoldedHz, m.noiseFloorDbc, m.numFolds,
+    char resolved[48];
+    if (m.worstResolvedDbc > -300.0)
+        std::snprintf(resolved, sizeof(resolved), "%9.2f @%8.1f", m.worstResolvedDbc, m.worstResolvedHz);
+    else
+        std::snprintf(resolved, sizeof(resolved), "%9s %9s", "none", "");
+
+    char line[320];
+    std::snprintf(line, sizeof(line), "  %-8s %3d %3d %8.1f %-8s %9.2f %-2s %9.2f %9.1f  %s %7.1f %5d %s", path, factor,
+                  latency, toneHz, drive.name, m.worstFoldedDbc, m.worstFoldedFloorLimited ? "FL" : "  ",
+                  m.worstFoldedFloorDbc, m.worstFoldedHz, resolved, m.harmonicHeadroomDb, m.numFolds,
                   gated ? "GATED" : "report");
     return std::string(line);
 }
 
 void printHeader() {
-    std::cout << "  path     factor  latency       tone drive           worst dBc    at Hz     noise "
-                 "floor   folds status\n";
+    std::cout << "  path     fac lat     tone drive     worst dBc FL     floor     at Hz   worst resolved "
+                 "dBc @    Hz  H2/H3 folds status\n"
+                 "  (FL = floor-limited: the reading sits within "
+              << kFloorResolutionDb
+              << " dB of the local window leakage and is an UPPER BOUND, not a measurement.\n"
+                 "   H2/H3 = dB by which the device's own 2nd/3rd harmonics clear that same local floor.)\n";
 }
 
 } // namespace
@@ -285,16 +454,18 @@ TEST_CASE("ALIASING: triode folded components under -60 dBc", "[aliasing]") {
                 const std::string row = formatRow("OS", factor, latency, tone, drive, m, gated);
                 std::cout << row << "\n";
 
-                // Guards against a VACUOUS pass. A gate whose only assertion is "the worst thing I
-                // found is quiet enough" also passes when the harness found nothing at all, so every
-                // row must first prove it measured something: fold predictions were enumerated and
-                // classified, a real level came back for the worst of them, and the measurement's own
-                // noise floor sits far enough below the limit that aliasing could not be hiding in it.
                 INFO(row);
+                // STRUCTURAL only -- these catch a truncated or silent render, nothing more. They
+                // are deliberately NOT presented as evidence: numFolds counts PREDICTED frequencies
+                // derived from f0 and the factor, so it reads the same whatever the device does.
                 REQUIRE(m.numFolds > 0);
-                REQUIRE(m.numHarmonics > 0);
                 REQUIRE(m.worstFoldedDbc > -300.0);
-                REQUIRE(m.noiseFloorDbc < kGateDbc - 20.0);
+
+                // EVIDENTIARY, and the invariant that actually makes this gate non-vacuous: the
+                // device's own 2nd and 3rd harmonics must stand clear of the local window leakage.
+                // Only a real nonlinearity can satisfy it. "ALIASING: engagement invariant rejects a
+                // linear device (negative control)" below is the standing red-verification.
+                REQUIRE(m.harmonicHeadroomDb >= kMinHarmonicHeadroomDb);
 
                 if (gated && m.worstFoldedDbc > worstGatedDbc) {
                     worstGatedDbc = m.worstFoldedDbc;
@@ -312,6 +483,49 @@ TEST_CASE("ALIASING: triode folded components under -60 dBc", "[aliasing]") {
     // The gate itself: default factor, both tones, both gated drive settings.
     REQUIRE(worstGatedDbc > -300.0); // four gated rows really did run
     CHECK(worstGatedDbc <= kGateDbc);
+}
+
+TEST_CASE("ALIASING: engagement invariant rejects a linear device (negative control)", "[aliasing]") {
+    // Standing red-verification for the gate above. Substituting the identity map for
+    // TriodeStage::process leaves the harness structurally intact -- same prediction lists, same
+    // fold count, same finite worst-fold reading -- so every counting-style invariant still passes
+    // and the gate's own -60 dBc comparison reports a comfortable PASS while measuring nothing but
+    // the analysis window. Exactly one invariant notices, and this case pins that.
+    //
+    // If the first CHECK below ever goes the other way, the gate above has stopped being evidence
+    // about the device and this file needs rereading before its numbers are quoted anywhere.
+    const std::vector<double> linear =
+        renderOversampled(kToneHigh, kNominalPeak, 1.0f, Oversampler::kDefaultFactor, DeviceUnderTest::Identity);
+    const AliasingMeasurement m = measureAliasing(linear, kToneHigh, Oversampler::kDefaultFactor);
+
+    Oversampler probe;
+    probe.prepare(kHostRate, kBlockSize, Oversampler::kDefaultFactor);
+
+    std::cout << "[aliasing] negative control -- identity nonlinearity through the same wrapper:\n";
+    printHeader();
+    const std::string row = formatRow("identity", Oversampler::kDefaultFactor, probe.latencySamples(), kToneHigh,
+                                      kDriveConditions[1], m, false);
+    std::cout << row << "\n";
+    INFO(row);
+
+    // THE point: a linear device generates no harmonics, so H2/H3 sit on the leakage floor and the
+    // gate's evidentiary invariant fails.
+    CHECK(m.harmonicHeadroomDb < kMinHarmonicHeadroomDb);
+
+    // ... while everything a counting-style invariant can see still looks perfectly healthy. These
+    // three CHECKs are the vacuous pass itself, pinned so it cannot quietly come back.
+    CHECK(m.numFolds > 0);
+    CHECK(m.worstFoldedDbc > -300.0);
+    CHECK(m.worstFoldedDbc <= kGateDbc);
+
+    // And the reading it would have published is floor-limited, i.e. a measurement of the window.
+    CHECK(m.worstFoldedFloorLimited);
+    CHECK(m.worstResolvedDbc == -300.0); // nothing at all resolved above the leakage
+
+    std::cout << "[aliasing] negative control: H2/H3 headroom " << m.harmonicHeadroomDb
+              << " dB (gate requires >= " << kMinHarmonicHeadroomDb << " dB), worst folded reading " << m.worstFoldedDbc
+              << " dBc -- floor-limited, and " << (kGateDbc - m.worstFoldedDbc)
+              << " dB inside the -60 dBc limit it would have 'passed'.\n";
 }
 
 // -------------------------------------------------------------------------------------------
