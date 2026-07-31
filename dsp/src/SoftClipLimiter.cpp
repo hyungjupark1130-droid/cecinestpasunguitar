@@ -44,8 +44,9 @@ float SoftClipLimiter::clipOne(Sample x, float ceilingLinear) noexcept {
     const double magnitude = std::fabs(static_cast<double>(x));
     const double kneeMagnitude = kKneeStart * ceiling;
 
-    // Below the knee the stage is the IDENTITY, returned bit-exactly -- not multiplied by a unity
-    // gain, not round-tripped through a division by the ceiling. See the header's property 1.
+    // Below the knee the stage is the IDENTITY: the input sample itself, so "unchanged" is a
+    // structural property of this branch rather than something the arithmetic happens to round
+    // back to. See the header's property 1.
     if (magnitude <= kneeMagnitude)
         return x;
 
