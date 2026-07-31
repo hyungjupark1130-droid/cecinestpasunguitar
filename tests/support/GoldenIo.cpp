@@ -172,7 +172,10 @@ bool readGoldenSidecar(const std::filesystem::path& path, GoldenSidecar& out) {
 
 void writeGoldenSidecar(const std::filesystem::path& path, const GoldenSidecar& sidecar) {
     std::filesystem::create_directories(path.parent_path());
-    std::ofstream file(path, std::ios::trunc);
+    // std::ios::binary so the sidecar is byte-identical on every platform: .gitattributes
+    // normalizes the repo to LF, and a text-mode stream on Windows would write CRLF into the
+    // working copy on every regeneration.
+    std::ofstream file(path, std::ios::trunc | std::ios::binary);
     file << "{\n";
     file << "  \"schemaVersion\": " << sidecar.schemaVersion << ",\n";
     file << "  \"generatorCommit\": \"" << sidecar.generatorCommit << "\",\n";
