@@ -214,6 +214,19 @@ template <typename SampleT> class WaveguideString {
 
     FractionalDelayKind fractionalDelayKind() const noexcept { return kind_; }
 
+    // Integer part of each rail read, i.e. the LIVE RAIL WINDOW every position-mapped access must
+    // stay inside. Slots at delays 1..railBase() are still travelling; Lagrange3's four
+    // interpolator taps additionally keep railBase()+1..railBase()+3 live, while Thiran1's rail is
+    // consumed at railBase() and nothing past it is ever read again. injectAt / readTapAt /
+    // readJunctionInputs / writeJunctionOutputs must address only that window -- addressing past it
+    // silently discards signal, which is exactly the defect fixed in P1.4 (see positionSpan_
+    // below). "CONTRACT: WaveguideString injections stay inside the live rail window" asserts it.
+    int railBase() const noexcept { return railBase_; }
+
+    // Rail contents at delay d >= 1 (d == 1 is the sample written one tick ago); `upRail` selects
+    // the nut -> bridge rail. Diagnostics/tests only -- the loop never reads the rails this way.
+    SampleT railSampleAtDelay(bool upRail, int delaySamples) const noexcept;
+
     // Discrete Lyapunov storage function -- see the file header. NOT realtime-safe: the first
     // call after a coefficient change may run a closed-form spectral factorization. Test and
     // diagnostic use only (docs/plan.md section 4.2).

@@ -214,6 +214,72 @@ TEST_CASE("CONTRACT: WaveguideString stays finite under a continuous bend fuzz",
 }
 
 // ---------------------------------------------------------------------------------------------
+// rail-slot addressing: the invariant the P1.4 defect broke
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: WaveguideString injections stay inside the live rail window", "[contract]") {
+    // Direct regression guard for the defect fixed in ed3a79f: the position -> delay map ran over
+    // realizedRailSpan_ for BOTH fractional-delay kinds, so Thiran1 -- whose allpass sits outside
+    // the rail, leaving the rail consumed at railBase() -- addressed slots the read had already
+    // passed. At MIDI 108 / 44.1 kHz (the shortest rail the design supports: railBase() is 2) the
+    // entire dn-rail half of a p = 0.28 pluck landed at delays 3-4 and was silently discarded.
+    //
+    // Nothing gated that on Linux: [tuning] measures loop length (position-independent), [energy]
+    // runs at MIDI 45, and the only test that would have caught the waveform change is layer (b)
+    // of [regression], which is MSVC-only. This case asserts the addressing invariant itself, on
+    // every platform, at the worst-case note for both kinds.
+    //
+    // The invariant is exact, not approximate: injectAt() splits the excitation evenly between the
+    // two rails and deposits each half across two adjacent slots with amplitude-complementary
+    // weights (g1 + g2 = 1), so a rail that keeps everything it was handed sums to exactly 0.5
+    // over its live window, and the window's far side holds nothing at all.
+    constexpr double kSampleRate = 44100.0;
+    constexpr int kMidiNote = cnpg::dsp::kMaxMidiNote; // 108 -- shortest loop, so the tightest rail
+    constexpr float kPositions[5] = {0.0f, 0.28f, 0.5f, 0.87f, 1.0f};
+
+    for (FractionalDelayKind kind : kKinds) {
+        for (float position : kPositions) {
+            WaveguideString<double> string;
+            configure(string, kSampleRate, kind, midiToHz(kMidiNote));
+
+            string.injectAt(position, 1.0);
+
+            // Lagrange3's interpolator IS the rail read, so its four taps keep railBase()+1..+3
+            // live; Thiran1's allpass sits outside the rail, which is therefore consumed at
+            // railBase().
+            const int base = string.railBase();
+            const int window = base + (kind == FractionalDelayKind::Lagrange3 ? 3 : 0);
+            REQUIRE(base >= 1);
+
+            double upInWindow = 0.0;
+            double dnInWindow = 0.0;
+            for (int d = 1; d <= window; ++d) {
+                upInWindow += string.railSampleAtDelay(true, d);
+                dnInWindow += string.railSampleAtDelay(false, d);
+            }
+
+            double beyondWindow = 0.0;
+            for (int d = window + 1; d <= window + 8; ++d)
+                beyondWindow +=
+                    std::fabs(string.railSampleAtDelay(true, d)) + std::fabs(string.railSampleAtDelay(false, d));
+
+            INFO(kindName(kind) << " MIDI " << kMidiNote << " p " << position << " railBase " << base << " window 1.."
+                                << window << ": up " << upInWindow << ", dn " << dnInWindow << ", beyond "
+                                << beyondWindow);
+            REQUIRE(std::fabs(upInWindow - 0.5) <= 1e-12);
+            REQUIRE(std::fabs(dnInWindow - 0.5) <= 1e-12);
+            REQUIRE(beyondWindow == 0.0);
+
+            // ... and the deposit is recoverable through the public seam, not merely present in
+            // the rails: the tap at the same position re-reads the same slots with the same
+            // weights, giving 0.5*[(1-f)^2 + f^2] >= 0.25 per rail, so >= 0.5 in total. Losing
+            // either rail's half drops it below that bound.
+            REQUIRE(string.readTapAt(position) >= 0.5 - 1e-12);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // tuning solve, seams, and the loss filter's passivity
 // ---------------------------------------------------------------------------------------------
 

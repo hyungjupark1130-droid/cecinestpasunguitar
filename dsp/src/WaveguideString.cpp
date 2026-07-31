@@ -524,6 +524,19 @@ SampleT WaveguideString<SampleT>::railFractionalRead(const std::vector<SampleT>&
     return rail[static_cast<std::size_t>((writeIndex - railBase_ + 2 * size) & mask_)];
 }
 
+template <typename SampleT>
+SampleT WaveguideString<SampleT>::railSampleAtDelay(bool upRail, int delaySamples) const noexcept {
+    const std::vector<SampleT>& rail = upRail ? up_ : dn_;
+    const int size = static_cast<int>(rail.size());
+    // Delays at or past the rail length alias back onto live slots, so they are reported as 0
+    // rather than as whatever the wrap lands on: a caller probing "is anything past the window"
+    // must never be handed a live sample by an out-of-range query.
+    if (size == 0 || delaySamples < 1 || delaySamples >= size)
+        return SampleT(0);
+    const int writeIndex = upRail ? upWrite_ : dnWrite_;
+    return rail[static_cast<std::size_t>((writeIndex - delaySamples + 2 * size) & mask_)];
+}
+
 template <typename SampleT> void WaveguideString<SampleT>::injectAt(float position01, SampleT excitation) noexcept {
     const float p = std::clamp(position01, 0.0f, 1.0f);
     const SampleT half = excitation * SampleT(0.5);
