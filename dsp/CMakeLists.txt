@@ -11,6 +11,7 @@ add_library(cnpg_dsp STATIC
     src/PickupTap.cpp
     src/PluckExciter.cpp
     src/StringNetwork.cpp
+    src/TriodeStage.cpp
     src/WaveguideString.cpp
 )
 

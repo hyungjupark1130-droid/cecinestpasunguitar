@@ -17,6 +17,7 @@ add_executable(cnpg_tests
     dsp/PluckExciterTests.cpp
     dsp/ScopedFtzDazGuardTests.cpp
     dsp/StringNetworkTests.cpp
+    dsp/TriodeStageTests.cpp
     dsp/WaveguideStringTests.cpp
     dsp/WaveguideStringRegressionTests.cpp
     dsp/WaveguideStringTuningTests.cpp
