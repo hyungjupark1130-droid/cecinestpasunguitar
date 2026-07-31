@@ -10,6 +10,7 @@ add_executable(cnpg_tests
     dsp/DenormalTests.cpp
     dsp/EventQueueTests.cpp
     dsp/MidiTranslationTests.cpp
+    dsp/ModuleGraphTests.cpp
     dsp/MonitoringChainTests.cpp
     dsp/NoteAllocatorTests.cpp
     dsp/OutputGainTests.cpp
