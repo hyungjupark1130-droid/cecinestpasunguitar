@@ -217,7 +217,16 @@ void TriodeStage::buildTransferTable() {
         // the effective grid drive -- see TriodeStage.h's "grid-current clamp" section.
         const double vgk = (vgkRaw > 0.0) ? vgkRaw * (koren_.rgi / (koren_.rgi + rs)) : vgkRaw;
         const double vp = solvePlateVoltage(koren_, vgk, q.vp0, q.ip0, rac, vb);
-        raw[static_cast<std::size_t>(i)] = -(vp - q.vp0); // common-cathode stage inverts
+        // (vp - q.vp0) IS the inverted signal already -- do not re-negate it. A common-cathode
+        // stage's own physics already inverts: vin > 0 -> Vgk more positive -> Ip rises -> the
+        // Rac-loaded plate voltage FALLS (vp - vp0 < 0), so a positive grid swing already produces
+        // a negative raw sample here, with no separate negation needed. Re-negating this value (as
+        // an earlier revision did) cancels that physical inversion and also swaps which output half
+        // is the compressed one: with the correct sign below, vin very negative drives the tube
+        // toward cutoff (Ip -> 0, Vp -> Vb, a hard physical ceiling), so (vp - vp0) saturates
+        // POSITIVE on that side -- the real ECC83 common-cathode stage's positive output half is
+        // the one that compresses, not the negative one.
+        raw[static_cast<std::size_t>(i)] = vp - q.vp0;
     }
 
     const std::size_t centerIndex = static_cast<std::size_t>(n - 1) / 2;
@@ -270,7 +279,21 @@ float TriodeStage::interpolate(double fractionalIndex) const noexcept {
 }
 
 Sample TriodeStage::waveshapeOne(Sample x, float driveLinear, float outputLinear) const noexcept {
-    const double vin = static_cast<double>(x) * static_cast<double>(driveLinear) * kGridVoltsPerFullScale;
+    double vin = static_cast<double>(x) * static_cast<double>(driveLinear) * kGridVoltsPerFullScale;
+    // Guard a malformed audio SAMPLE (NaN or +/-Inf, as opposed to a malformed PARAMETER --
+    // setParams()'s clampFinite() already handles those) before it reaches the table-index
+    // arithmetic below. std::clamp does not reject NaN (every NaN comparison is false, so it falls
+    // through to "return v" unclamped), so an un-guarded NaN vin would propagate into
+    // interpolate()'s std::floor -> static_cast<int> of a NaN double -- undefined behavior in C++,
+    // observed on this toolchain to produce an out-of-range table_[] index (a real
+    // out-of-bounds/UB read, not just a wrong sample). TriodeStage is dsp/'s first module that
+    // indexes a lookup table directly off an audio sample (as opposed to an internally-computed,
+    // already-bounded position, the way WaveguideString's railInterpolate() does), so there is no
+    // existing precedent to inherit the guard from. A non-finite sample is treated as silence
+    // (matching clampFinite()'s own non-finite-parameter fallback), reusing the exact-zero path
+    // proven bit-exact above.
+    if (!std::isfinite(vin))
+        vin = 0.0;
     // x == 0 -> vin == 0.0 exactly (0 * finite == 0.0) -> fractionalIndex == centerIndexDouble_
     // exactly (0*invStep_ == 0.0; x + 0.0 == x for finite x) -> interpolate() returns
     // table_[centerIndex] == 0.0f exactly -> the whole expression is exactly 0.0f regardless of

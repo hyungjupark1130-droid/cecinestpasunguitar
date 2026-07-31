@@ -80,15 +80,24 @@
 //      names: a graceful, continuous gain reduction past the knee, not a hard voltage ceiling.
 //      `Rsource` is this module's own implementation choice (not part of the brief's locked
 //      circuit values); see TriodeStage.cpp for the exact value and its rationale.
-//   4. The resulting raw curve is inverted (common-cathode stage: plate voltage falls as grid
-//      voltage rises), has its own value at vin=0 subtracted exactly (task brief step 5's "zero
-//      input -> DC-removed zero output": this is provably 0 by construction here, since vin=0 maps
-//      to exactly the operating point the load line was built through -- the subtraction only
-//      guards residual bisection rounding, forced to an exact 0.0f at that one table node), then
-//      normalized so the curve's own small-signal slope at the origin is unity -- i.e. a small
-//      grid-voltage swing produces an equal-magnitude normalized-output swing. This means `drive`'s
-//      volts-per-full-scale calibration (see below) is the only free gain constant in the whole
-//      chain: the table itself never needs re-tuning if the circuit constants change.
+//   4. The raw table value is (Vp - Vp0) directly, with NO extra negation: a common-cathode
+//      stage's own physics already inverts (vin > 0 -> Vgk more positive -> Ip rises -> the
+//      Rac-loaded plate voltage FALLS, so Vp-Vp0 < 0 for a positive grid swing -- that IS the
+//      inversion, not something a separate sign flip needs to add). This sign convention also
+//      fixes which output half is the compressed one: driving vin very negative pushes the tube
+//      toward cutoff (Ip -> 0), and Vp has a hard physical ceiling at Vb, so Vp-Vp0 saturates
+//      POSITIVE on that side -- matching a real ECC83 common-cathode stage, where it is the
+//      POSITIVE output half (grid-negative swing -> cutoff -> plate voltage rises) that compresses,
+//      not the negative one. The table then has its own value at vin=0 subtracted exactly (task
+//      brief step 5's "zero input -> DC-removed zero output": this is provably 0 by construction
+//      here, since vin=0 maps to exactly the operating point the load line was built through -- the
+//      subtraction only guards residual bisection rounding, forced to an exact 0.0f at that one
+//      table node), then normalized so the curve's own small-signal slope at the origin is unity
+//      (in magnitude; the sign above is preserved, since normalization divides by |slope|) -- i.e.
+//      a small grid-voltage swing produces an equal-magnitude, opposite-sign normalized-output
+//      swing. This means `drive`'s volts-per-full-scale calibration (see below) is the only free
+//      gain constant in the whole chain: the table itself never needs re-tuning if the circuit
+//      constants change.
 // Interpolation is cubic (Catmull-Rom, uniform knot spacing) over this fixed table, evaluated in
 // double and rounded to float on output; the fractional table index is computed so that an exact
 // vin == 0.0 always lands on an exact integer node (0 * anything finite == 0.0 in IEEE-754,
@@ -186,7 +195,9 @@ class TriodeStage {
 
     // Static waveshaping; caller wraps this in Oversampler::processWrapped at the chosen factor
     // (P1.8). Realtime-safe; never allocates. Valid for numSamples in [1, maxBlockSize]; clamps
-    // internally like every other module in this repo.
+    // internally like every other module in this repo. A non-finite input sample (NaN or +/-Inf)
+    // is treated as silence rather than reaching the table-index arithmetic (see waveshapeOne() in
+    // TriodeStage.cpp) -- output stays finite and in-bounds regardless of what the host hands in.
     void process(const Sample* in, Sample* out, int numSamples) noexcept;
 
     // Offline table-loading contract (signature locked now; tables produced by a future C++

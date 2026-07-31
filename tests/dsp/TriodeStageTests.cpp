@@ -30,6 +30,16 @@ void processChunked(TriodeStage& stage, const Sample* in, Sample* out, int total
     }
 }
 
+// A single-sample constant-input probe: with the stage already settled (setParams + reset()), the
+// waveshaper is memoryless, so any sample of a constant-x buffer reads the same value -- this is
+// just the cleanest way to read one point off the static curve through the public API.
+float settledOutput(TriodeStage& stage, float x) {
+    const std::array<Sample, 1> in{x};
+    std::array<Sample, 1> out{0.0f};
+    stage.process(in.data(), out.data(), 1);
+    return out[0];
+}
+
 // Peak spectral magnitude within a few bins of `hz`, tolerant of the peak not landing exactly on
 // a bin centre. Not shared code with tests/support/SpectralAnalysis.cpp's own findPeakHz -- this
 // is a plain magnitude readout (no parabolic refinement needed here, only a comparable relative
@@ -468,4 +478,120 @@ TEST_CASE("CONTRACT: TriodeStage process allocates nothing", "[contract]") {
         stage.process(in.data(), out.data(), kMaxBlock);
     }
     REQUIRE(cnpg::test::allocationCount() == 0);
+}
+
+// -------------------------------------------------------------------------------------------
+// physical fidelity: sign, asymmetry direction, and which half compresses (review finding 1/2)
+// -------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: TriodeStage inverts sign in the small-signal linear region", "[contract]") {
+    // A common-cathode stage's own physics already inverts: grid voltage up -> plate current up
+    // -> plate voltage down. A small positive grid-referred input must therefore produce a small
+    // NEGATIVE output, and a small negative input a small POSITIVE output, at every drive level.
+    for (float drive : {0.25f, 0.5f, 1.0f}) {
+        TriodeStage stage;
+        stage.prepare(44100.0, 256);
+        TriodeStageParams p;
+        p.drive = drive;
+        stage.setParams(p);
+        stage.reset();
+
+        const float outPos = settledOutput(stage, 0.05f);
+        const float outNeg = settledOutput(stage, -0.05f);
+        INFO("drive " << drive << " outPos " << outPos << " outNeg " << outNeg);
+        REQUIRE(outPos < 0.0f);
+        REQUIRE(outNeg > 0.0f);
+    }
+}
+
+TEST_CASE("CONTRACT: TriodeStage compresses the positive output half, not the negative one", "[contract]") {
+    // docs/plan.md Task P1.7 review finding 1 (PHYSICAL FIDELITY GOVERNS): a real ECC83
+    // common-cathode stage compresses the POSITIVE output half (grid-negative swing -> cutoff ->
+    // plate voltage rises toward its Vb ceiling), not the negative one. Measured empirically
+    // (drive 0.5: ratio ~0.90; drive 1.0: ratio ~0.85 -- see the task report for the full probe
+    // table) and pinned here with a safety margin at two drive levels.
+    for (float drive : {0.5f, 1.0f}) {
+        TriodeStage stage;
+        stage.prepare(44100.0, 256);
+        TriodeStageParams p;
+        p.drive = drive;
+        stage.setParams(p);
+        stage.reset();
+
+        constexpr float x = 0.5f;
+        const float outPos = settledOutput(stage, x);
+        const float outNeg = settledOutput(stage, -x);
+        const float ratio = std::fabs(outNeg) / std::fabs(outPos);
+        INFO("drive " << drive << " outPos " << outPos << " outNeg " << outNeg << " ratio " << ratio);
+        REQUIRE(ratio < 0.95f); // the negative-input (positive-output) side is the compressed one
+    }
+}
+
+TEST_CASE("CONTRACT: TriodeStage's cutoff clip plateau sits on the negative-input side", "[contract]") {
+    // Driving the grid deep negative reaches plate-current cutoff (Ip -> 0), a hard physical
+    // ceiling on Vp (Vp -> Vb): the output should plateau (stop growing) as input keeps decreasing
+    // past that point. The symmetric positive-input excursion has no equivalent hard ceiling in
+    // this range (the grid-conduction clamp only slows growth, a linear attenuation -- see
+    // buildTransferTable() in TriodeStage.cpp) and should still be visibly growing over the same
+    // input range.
+    TriodeStage stage;
+    stage.prepare(44100.0, 256);
+    TriodeStageParams p;
+    p.drive = 1.0f;
+    stage.setParams(p);
+    stage.reset();
+
+    const float negAtHalf = settledOutput(stage, -0.5f);
+    const float negAtTwo = settledOutput(stage, -2.0f);
+    const float posAtHalf = settledOutput(stage, 0.5f);
+    const float posAtTwo = settledOutput(stage, 2.0f);
+
+    INFO("negAtHalf " << negAtHalf << " negAtTwo " << negAtTwo << " posAtHalf " << posAtHalf << " posAtTwo "
+                      << posAtTwo);
+    REQUIRE(std::fabs(negAtTwo - negAtHalf) < 0.005f); // plateaued: essentially no further growth
+    REQUIRE(std::fabs(posAtTwo - posAtHalf) > 0.1f);   // NOT plateaued: still growing substantially
+}
+
+// -------------------------------------------------------------------------------------------
+// NaN/Inf AUDIO SAMPLES (not parameters -- see the "parameter extremes" case above for that)
+// -------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: TriodeStage process stays finite and in-bounds when fed NaN/Inf audio samples", "[contract]") {
+    // docs/plan.md Task P1.7 review finding 3: a NaN/Inf SAMPLE reaching the table-index
+    // arithmetic unguarded is undefined behavior (std::clamp does not reject NaN; flooring and
+    // casting a NaN double to int is UB, observed on this toolchain to yield an out-of-range
+    // index) -- TriodeStage is dsp/'s first module that indexes a lookup table directly off an
+    // audio sample. waveshapeOne() guards vin with std::isfinite before it reaches interpolate();
+    // this pins that a malformed sample produces finite, in-bounds output, and is treated
+    // identically to a silent (0.0f) sample at that position.
+    TriodeStage stage;
+    stage.prepare(44100.0, 256);
+    stage.setParams(TriodeStageParams{});
+    stage.reset();
+
+    const std::vector<Sample> in{std::numeric_limits<Sample>::quiet_NaN(), std::numeric_limits<Sample>::infinity(),
+                                 -std::numeric_limits<Sample>::infinity(), 0.3f,
+                                 std::numeric_limits<Sample>::quiet_NaN(), -0.3f,
+                                 std::numeric_limits<Sample>::infinity(),  0.0f};
+    const int n = static_cast<int>(in.size());
+    std::vector<Sample> out(static_cast<std::size_t>(n), 0.0f);
+    stage.process(in.data(), out.data(), n);
+
+    for (int i = 0; i < n; ++i) {
+        INFO("i " << i << " in " << in[static_cast<std::size_t>(i)]);
+        REQUIRE(std::isfinite(out[static_cast<std::size_t>(i)]));
+    }
+
+    // A NaN/Inf sample is treated as silence: bit-identical to the same request with those slots
+    // replaced by 0.0f.
+    const std::vector<Sample> sanitizedIn{0.0f, 0.0f, 0.0f, 0.3f, 0.0f, -0.3f, 0.0f, 0.0f};
+    TriodeStage reference;
+    reference.prepare(44100.0, 256);
+    reference.setParams(TriodeStageParams{});
+    reference.reset();
+    std::vector<Sample> sanitizedOut(static_cast<std::size_t>(n), 0.0f);
+    reference.process(sanitizedIn.data(), sanitizedOut.data(), n);
+
+    for (int i = 0; i < n; ++i)
+        REQUIRE(out[static_cast<std::size_t>(i)] == sanitizedOut[static_cast<std::size_t>(i)]);
 }
