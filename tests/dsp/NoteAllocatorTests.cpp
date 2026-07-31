@@ -83,6 +83,42 @@ TEST_CASE("NoteAllocator: monophonic last-note priority steals the string; the d
     REQUIRE(outEvents.empty());
 }
 
+TEST_CASE("NoteAllocator: emitted events carry kUnspecifiedNoteParam for pluck position and hardness", "[contract]") {
+    // Plain MIDI note-on carries neither a pluck position nor a hardness, so the allocator says so
+    // explicitly instead of inventing a plausible-looking 0.5: StringNetwork then resolves both
+    // against PluckExciterParams::defaultPosition/defaultHardness (docs/plan.md section 2.3, "used
+    // when the note event carries no explicit position"), which is the ONLY thing that makes the
+    // APVTS Exciter Position and Exciter Hardness knobs audible in P1.
+    //
+    // Asserted here rather than left to StringNetwork's own resolution tests, because those pass
+    // whatever the allocator emits: reverting these two fields to a literal 0.5 would silence both
+    // knobs for the whole phase without turning a single other assertion red.
+    const float unspecified = cnpg::dsp::kUnspecifiedNoteParam;
+
+    // The precedence in StringNetwork::resolveNoteParam is "an in-range event value wins", so the
+    // sentinel MUST sit outside 0..1 or the fallback can never fire and the check above inverts
+    // silently.
+    REQUIRE_FALSE((unspecified >= 0.0f && unspecified <= 1.0f));
+
+    NoteAllocator allocator;
+    allocator.prepare(1);
+
+    const RawMidiEvent events[] = {noteOn(0, 60, 100), noteOff(20, 60)};
+    BlockEventQueue outEvents;
+    allocator.allocate(events, 2, outEvents);
+    REQUIRE(outEvents.size() == 2);
+
+    REQUIRE(outEvents.peek()->type == NoteEventType::NoteOn);
+    REQUIRE(outEvents.peek()->pluckPosition == unspecified);
+    REQUIRE(outEvents.peek()->hardness == unspecified);
+    outEvents.pop();
+
+    // A NoteOff excites nothing, so both fields are equally unspecified there.
+    REQUIRE(outEvents.peek()->type == NoteEventType::NoteOff);
+    REQUIRE(outEvents.peek()->pluckPosition == unspecified);
+    REQUIRE(outEvents.peek()->hardness == unspecified);
+}
+
 TEST_CASE("NoteAllocator: velocity maps data2 0..127 onto 0..1", "[contract]") {
     NoteAllocator allocator;
     allocator.prepare(1);
