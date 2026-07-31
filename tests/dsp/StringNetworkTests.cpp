@@ -461,9 +461,9 @@ TEST_CASE("CONTRACT: StringNetwork NoteOff runs a fast release and then clears t
     BlockEventQueue release;
     release.push(noteOff(0, kMidiNote));
 
-    // kReleaseSeconds is -60 dB; the state clear follows at the -100 dB floor. 250 ms covers both
-    // with margin at any of the supported rates.
-    const int blocks = static_cast<int>(0.25 * kRate / kBlock);
+    // The release time constant is 40 ms, so -60 dB lands at 276 ms and the -100 dB clear-out
+    // floor at 460 ms. 700 ms covers both with margin at any of the supported rates.
+    const int blocks = static_cast<int>(0.7 * kRate / kBlock);
     const std::vector<float> tail = renderTap(network, release, blocks);
 
     const std::vector<float> lastBlock(tail.end() - kBlock, tail.end());
@@ -706,6 +706,18 @@ TEST_CASE("CONTRACT: StringNetwork drives the bridge port but keeps P1's interna
     REQUIRE(port.lossBypassed);
     network.setLosslessTestMode(false);
     REQUIRE_FALSE(port.lossBypassed);
+
+    // The other half of the P1 boundary argument: discarding the trivial termination's reflection
+    // discards nothing, because it IS the reflection WaveguideString::tick() applies internally
+    // (-1 per port, no port seeing any other). Asserted on the shipping termination directly.
+    cnpg::dsp::RigidBridgeTermination<float> rigid;
+    rigid.prepare(kRate, kBlock, 3, nullptr);
+    const float incident[3] = {0.25f, -1.5f, 7.0f};
+    float outgoing[3] = {0.0f, 0.0f, 0.0f};
+    rigid.scatter(incident, outgoing, 3);
+    for (int port0 = 0; port0 < 3; ++port0)
+        REQUIRE(outgoing[port0] == -incident[port0]);
+    REQUIRE(rigid.bridgeOutput() == 0.0f);
 }
 
 TEST_CASE("CONTRACT: StringNetwork's P1 bridge output is identically zero", "[contract]") {

@@ -39,9 +39,9 @@
 //     full Physical (damper choke -> retune ramp -> re-excite) and Synth (<= 5 ms fade) semantics
 //     complete in Task P2.6, which is also where the fade that belongs in front of that
 //     re-initialization lands -- both modes need DamperJunction, which is P2.2.
-//   - NoteOff. A fixed fast release (kReleaseSeconds to -60 dB) on the string's tap contribution,
-//     followed by a state clear once it is inaudible. It is an envelope, not physics: the real
-//     felt damper is DamperJunction (P2.2), and damperPosition01/`damper` are stored for it.
+//   - NoteOff. A fixed fast release on the string's tap contribution, followed by a state clear
+//     once it is inaudible. It is an envelope, not physics: the real felt damper is
+//     DamperJunction (P2.2), and damperPosition01/`damper` are stored for it.
 //   - Bridge. The port is driven every sample (it sees the strings' outgoing waves and publishes
 //     bridgeOutput()), but its reflected waves are NOT fed back into the strings in P1 -- see
 //     setBridgePort() for why that is a deliberate P1 boundary rather than an omission.
@@ -141,9 +141,11 @@ template <typename SampleT> class StringNetwork {
     // BridgeJunction's work (see WaveguideString::railAcceptFromBridge). Doing it now would move
     // every note off pitch by that sample -- at MIDI 108 / 44.1 kHz, one sample of a 10.5-sample
     // loop, which is ~160 cents. With P1's rigid termination the reflection the strings apply
-    // internally is bit-identical to what the port returns anyway ("CONTRACT: StringNetwork's P1
-    // bridge port reflects exactly what the strings apply internally" asserts that), so nothing
-    // audible is being dropped; P2.4 flips the feedback on together with the loop-length term.
+    // internally is bit-identical to what the port returns anyway -- "CONTRACT: StringNetwork
+    // drives the bridge port but keeps P1's internal termination" asserts both halves of that: the
+    // rigid termination's scatter() is exactly -incident, and attaching a port that reflects
+    // nonsense does not move one output sample. So nothing audible is being dropped; P2.4 turns
+    // the feedback on together with the loop-length term that pays for it.
     void setBridgePort(IBridgePort<SampleT>& port) noexcept;
 
     // Per-block entry point. Realtime-safe: never allocates, locks, throws or performs I/O.
@@ -161,8 +163,10 @@ template <typename SampleT> class StringNetwork {
     const SampleT* bridgeOutputBuffer() const noexcept { return bridgeBuffer_.data(); }
 
     // P4 feedback-bus seam, declared now and implemented in P4: the power-amp output re-excites
-    // the strings, the block delay being physically the speaker-to-string air path. Stores the
-    // request and nothing audible -- calling it may not perturb a single output sample in P1.
+    // the strings, the block delay being physically the speaker-to-string air path. A no-op in P1
+    // -- calling it may not perturb one output sample ("CONTRACT: StringNetwork injectFeedback is
+    // audibly inert in P1"). It deliberately records nothing either: state nothing can observe is
+    // state that reads as live and guards nothing, and P4 brings its own.
     void injectFeedback(const SampleT* buffer, int numSamples, float airDelayMs, float gain) noexcept;
 
     // Energy-test hooks (tiers 2 and 3). Forwards to every string and to the attached port,
@@ -180,13 +184,13 @@ template <typename SampleT> class StringNetwork {
   private:
     void handleEvent(const NoteEvent& event) noexcept;
     void applyStringParams(int stringIndex) noexcept;
-    float resolveNoteParam(float eventValue, float exciterDefault) const noexcept;
 
-    // P1 fixed fast release, standing in for DamperJunction (P2.2): -60 dB over this long,
-    // applied to the string's tap contribution, after which the string's state is cleared. Sits
-    // inside the 20..100 ms felt-time-constant window P2.2 validates, so the P1 placeholder and
-    // the real damper are in the same perceptual ballpark.
-    static constexpr double kReleaseSeconds = 0.06;
+    // P1 fixed fast release, standing in for DamperJunction (P2.2): a one-pole decay applied to
+    // the string's tap contribution, after which the string's state is cleared. The time constant
+    // is stated as a TIME CONSTANT, and set to the centre of the 20..100 ms felt-time-constant
+    // window DamperJunction validates in P2.2, so replacing this envelope with the real damper is
+    // not also a change of speed. It reaches -60 dB in 276 ms and the clear-out floor in 460 ms.
+    static constexpr double kReleaseTimeConstantSeconds = 0.040;
     static constexpr float kReleaseFloor = 1.0e-5f; // -100 dB: below this the tail is cleared
 
     // Per-sample smoothing time for pickupPosition01, matching WaveguideString's own smoothers.
@@ -224,10 +228,6 @@ template <typename SampleT> class StringNetwork {
 
     RigidBridgeTermination<SampleT> internalPort_; // the P1 termination; see setBridgePort()
     IBridgePort<SampleT>* port_ = nullptr;
-
-    // P4 seam state: recorded by injectFeedback so the call is observable, never audible.
-    float feedbackAirDelayMs_ = 0.0f;
-    float feedbackGain_ = 0.0f;
 };
 
 extern template class StringNetwork<float>;  // realtime path

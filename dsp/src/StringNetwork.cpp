@@ -8,15 +8,20 @@ namespace cnpg::dsp {
 
 namespace {
 
-// -60 dB expressed as the number of time constants of a one-pole decay, so kReleaseSeconds is
-// read as "time to inaudibility" rather than as a time constant.
-constexpr double kMinus60dBTimeConstants = 6.907755278982137; // ln(1000)
-
 constexpr double kCentsPerSemitone = 100.0;
 
 double clampd(double v, double lo, double hi) noexcept { return v < lo ? lo : (v > hi ? hi : v); }
 
 float clampf(float v, float lo, float hi) noexcept { return v < lo ? lo : (v > hi ? hi : v); }
+
+// docs/plan.md section 2.3: the exciter defaults are "used when the note event carries no explicit
+// position". An in-range event value is per-note data and wins; anything else --
+// kUnspecifiedNoteParam, or a NaN from a malformed caller -- falls back to the parameter.
+float resolveNoteParam(float eventValue, float exciterDefault) noexcept {
+    if (eventValue >= 0.0f && eventValue <= 1.0f)
+        return eventValue;
+    return clampf(exciterDefault, 0.0f, 1.0f);
+}
 
 // Equal temperament, A4 = 440 Hz -- the same expression the [tuning] and [regression] harnesses
 // use, so a note rendered through the network lands on exactly the frequency they measure.
@@ -70,7 +75,7 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
     bridgeBuffer_.assign(static_cast<std::size_t>(maxBlockSize_), SampleT(0));
 
     positionSmoothingCoeff_ = 1.0 - std::exp(-1.0 / (kPositionSmoothingSeconds * sampleRate_));
-    releaseCoeff_ = static_cast<float>(std::exp(-kMinus60dBTimeConstants / (kReleaseSeconds * sampleRate_)));
+    releaseCoeff_ = static_cast<float>(std::exp(-1.0 / (kReleaseTimeConstantSeconds * sampleRate_)));
 
     if (port_ == nullptr)
         port_ = &internalPort_;
@@ -84,11 +89,14 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::reset() noexcept {
+    // reset() before prepare() must stay inert rather than index empty vectors: the module
+    // lifecycle allows it (docs/plan.md section 2.1) and prepare() itself calls reset() last.
+    const bool prepared = !strings_.empty();
     for (int s = 0; s < kMaxStrings; ++s) {
-        if (!strings_.empty())
+        if (prepared) {
             strings_[static_cast<std::size_t>(s)].reset();
-        if (!exciters_.empty())
             exciters_[static_cast<std::size_t>(s)].reset();
+        }
         sounding_[static_cast<std::size_t>(s)] = false;
         releasing_[static_cast<std::size_t>(s)] = false;
         releaseGain_[static_cast<std::size_t>(s)] = 1.0f;
@@ -145,16 +153,6 @@ template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int s
 // ------------------------------------------------------------------------------------------
 // event consumption
 // ------------------------------------------------------------------------------------------
-
-template <typename SampleT>
-float StringNetwork<SampleT>::resolveNoteParam(float eventValue, float exciterDefault) const noexcept {
-    // docs/plan.md section 2.3: the exciter defaults are "used when the note event carries no
-    // explicit position". An in-range event value is per-note data and wins; anything else --
-    // kUnspecifiedNoteParam, or a NaN from a malformed caller -- falls back to the parameter.
-    if (eventValue >= 0.0f && eventValue <= 1.0f)
-        return eventValue;
-    return clampf(exciterDefault, 0.0f, 1.0f);
-}
 
 template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteEvent& event) noexcept {
     const int stringIndex = static_cast<int>(event.stringIndex);
@@ -295,12 +293,11 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
 template <typename SampleT>
 void StringNetwork<SampleT>::injectFeedback(const SampleT* buffer, int numSamples, float airDelayMs,
                                             float gain) noexcept {
-    // P4 seam: the request is recorded so a caller can see it arrived, and nothing else happens.
-    // Implemented for real in P4, where the speaker-to-string air path becomes the block delay.
+    // P4 seam: nothing happens, and nothing is recorded either -- see the declaration.
     (void)buffer;
     (void)numSamples;
-    feedbackAirDelayMs_ = airDelayMs;
-    feedbackGain_ = gain;
+    (void)airDelayMs;
+    (void)gain;
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::setLosslessTestMode(bool lossless) noexcept {
