@@ -30,6 +30,44 @@ plan, build type, and build flags -- previously only compiler/commit were self-r
 compensated for the gap, which was fine for a one-off baseline but not for CI artifacts staying
 attributable when runners change silently).
 
+**Rendered audio also changed, intentionally, as a side effect of this fix.** The single-string
+60 s `audioHash` moved from `5289fa6fa7d22045` (pre-fix) to `1c479bbaf4164075` (post-fix) for the
+identical `--strings 1 --seconds 60` command -- a second round of review caught an initial,
+inaccurate claim in this document that the hash was unchanged. Root cause, verified against
+`dsp/src/TriodeStage.cpp`: the pre-fix bench called `chain.setDefaults()` (applying the shipped
+snapshot's `setParams()` to all six modules) and only then `chain.reset()`, before the render loop
+started -- so `TriodeStage`'s output-trim ramp was already collapsed onto its shipped target
+(`kUnityGainOutputTrimDb`, ~-13.98 dB) before block 0 rendered a single sample. The fix removed
+that pre-loop `setDefaults()` call (the six `setParams()` calls now live inside the render loop
+instead, per the fix above); `chain.reset()` alone has nothing to collapse yet, because
+`TriodeStage::prepare()` itself already calls `setParams(TriodeStageParams{})` (the struct's own
+default, 0 dB) followed by its own `reset()` -- so `chain.reset()` is a no-op on a module that has
+never seen the real snapshot. The very first `processBlock()` call in the render loop is therefore
+the first time `triode.setParams(snapshot.triode)` ever runs, retargeting from the settled 0 dB
+default to -13.98 dB; that block's `process()` call ramps the output-trim gain linearly across its
+samples rather than starting already at target (the documented `TriodeStage`/`OutputGain`
+per-block-ramp convention). Because `NoteStreamGenerator` phase-staggers string 0 at offset 0, its
+very first pluck lands at absolute sample 0 -- inside exactly that ramping block -- so real audio
+passes through the transient. The transient itself only affects block 0's own samples directly
+(every later block's `setParams()` retargets to the identical already-reached value, so
+`current == target` immediately from block 1 onward), but `CabFilter` downstream is a stateful
+IIR biquad: the slightly different signal shape it sees during block 0 leaves its `x1_`/`x2_`/
+`y1_`/`y2_` memory in a slightly different state than the presettled render would have, and that
+difference decays but never exactly reaches zero for the rest of the render -- which is why the
+*entire* 60 s `audioHash` differs, not just block 0's contribution to it.
+
+This is not a bug to reconcile: it is production's real cold-start behavior, and the post-fix bench
+is *more* faithful to it than the pre-fix version was. `PluginProcessor::prepareToPlay()` never
+calls `reset()` on any module after `prepare()` either -- every module settles at its own struct
+default during `prepare()`, and the very first host `processBlock()`/`renderChunk()` call is what
+first retargets every parameter to its real (APVTS) value, through the identical
+setParams()-then-process() ordering this bench now uses. The pre-fix bench's explicit
+`setDefaults()` + `reset()` presettle, in this one specific respect, was an idealization a real host
+never gets. What determinism actually guarantees, and what changed: run-to-run reproducibility of
+the *post-fix* binary is proven (two independent 60 s runs both print `1c479bbaf4164075`, see
+Determinism below); pre-fix vs. post-fix audio is intentionally, explicably different, not a
+regression.
+
 ## What was measured
 
 The locked P1 chain (`StringNetwork -> PickupTap -> Oversampler(TriodeStage) -> CabFilter ->
@@ -104,17 +142,20 @@ measurement). Two independent 60 s runs of the single-string configuration:
 | 1 | `1c479bbaf4164075` | 22125 | 0 | 7.000 | 18.800 |
 | 2 | `1c479bbaf4164075` | 22125 | 0 | 7.000 | 14.100 |
 
-`audioHash` is bit-identical across both runs -- **unchanged** by the setParams-cascade fix, as
-expected: the six parameter values are constant across the whole render (`makeDefaultSnapshot()`
-never varies), and re-applying an unchanged target to an already-settled smoother is a per-block
-no-op for the rendered samples (every `setParams()` in dsp/ only recomputes a target a smoother
-then ramps toward; ramping toward a target you are already sitting on moves nothing). Re-applying
-the cascade every block is exclusively a per-block CPU cost, never an audio one, which this
-determinism check confirms empirically rather than merely by construction: the deterministic note
-stream plus the RNG-free, wall-clock-free dsp/ chain (`PluckExciter`'s own noise-burst PRNG
-reseeds to a fixed constant on every `prepare()`/`reset()`, per `PluckExciter.h`) is what makes
-`audioHash` reproducible, and it stayed reproducible before and after this fix. Only the timing
-columns differ, by ordinary wall-clock jitter.
+`audioHash` is bit-identical across both post-fix runs -- this is what "deterministic" actually
+means here and is the claim this check is built to prove: **run-to-run** reproducibility of one
+build against one CLI, not cross-build stability. (An earlier revision of this document conflated
+the two and incorrectly stated the hash was "unchanged... before and after this fix"; it is not --
+see the Revision note above for the verified reason why, and for why that difference is expected,
+correct behavior rather than a regression.) What *is* still true, and is the real reason
+`audioHash` reproduces run to run at all: the six parameter values are constant across the whole
+render (`makeDefaultSnapshot()` never varies) and the deterministic, RNG-free, wall-clock-free note
+stream and dsp/ chain (`PluckExciter`'s own noise-burst PRNG reseeds to a fixed constant on every
+`prepare()`/`reset()`, per `PluckExciter.h`) mean the same sequence of `setParams()`/`process()`
+calls, applied to the same starting state, always produces the same output -- which is exactly what
+these two runs (same binary, same CLI, same starting state) confirm empirically rather than merely
+by construction. Only the timing columns differ between the two runs, by ordinary wall-clock
+jitter.
 
 ## Sample JSON line (single-string, 60 s)
 
