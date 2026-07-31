@@ -156,6 +156,16 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     if (numOutputChannels <= 0 || numSamples <= 0)
         return;
 
+    // Never prepared (JUCE guarantees prepareToPlay first, so this is a host-contract violation
+    // rather than an expected state): emit silence. It is a guard against a HANG, not merely
+    // against bad audio -- the chunk loop below advances by preparedBlockSize_ samples, so a zero
+    // would leave chunkStart where it was and spin forever on the audio thread.
+    if (preparedBlockSize_ <= 0) {
+        for (int channel = 0; channel < numOutputChannels; ++channel)
+            buffer.clear(channel, 0, numSamples);
+        return;
+    }
+
     // juce::MidiBuffer -> cnpg::dsp::RawMidiEvent tuples, in the buffer's own (sample-offset
     // non-decreasing) order. No interpretation happens here -- that is NoteAllocator's and
     // MidiTranslation's job (docs/plan.md section 2.14).

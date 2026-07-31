@@ -38,12 +38,17 @@
 //
 // where k = kKneeStart. Three properties this specific arrangement has, all load-bearing:
 //
-//   1. BELOW THE KNEE IT IS THE IDENTITY, BIT-EXACTLY -- `out[n] = in[n]`, not `in[n] * 1.0f` and
-//      not `C * (x/C)`. A safety clip that is engaged 100% of the time at nominal levels (the
-//      -18 dBFS per-string nominal sits ~24 dB below a -0.3 dBFS ceiling's knee) would be a
-//      permanent, unmeasurable colouration on everything upstream. This one is provably absent
-//      until the signal actually approaches the ceiling, which is also what makes
-//      "no colouration below the knee" a testable claim rather than a hope.
+//   1. BELOW THE KNEE IT IS THE IDENTITY, BIT-EXACTLY -- the branch returns the input sample
+//      itself, so the property is structural rather than a consequence of some arithmetic
+//      happening to round back to the same float. (It would: computing `C * (x/C)` in double and
+//      narrowing does recover x bit-exactly, because double carries 29 more mantissa bits than
+//      float. The point is not that the alternative is inaccurate -- it is that "unchanged" should
+//      not depend on a rounding argument.) A safety clip that is engaged 100% of the time at
+//      nominal levels (the -18 dBFS per-string nominal sits ~24 dB below a -0.3 dBFS ceiling's
+//      knee) would be a permanent, unmeasurable colouration on everything upstream. This one is
+//      provably absent until the signal actually approaches the ceiling, which makes "no
+//      colouration below the knee" a testable claim rather than a hope -- and the test is sharp
+//      enough to catch a 0.0087 dB one (verified by mutation).
 //   2. C1-CONTINUOUS AT THE KNEE. tanh(0) = 0 puts the curve at exactly k*C where the identity
 //      leaves it, and d/du[(1-k) tanh((u-k)/(1-k))] = sech^2(0) = 1 at u = k matches the identity's
 //      own unit slope. So there is no slope discontinuity at the knee to radiate a harmonic edge.
