@@ -23,6 +23,8 @@ add_executable(cnpg_tests
     dsp/MidiTranslationTests.cpp
     dsp/ModuleGraphTests.cpp
     dsp/MonitoringChainTests.cpp
+    dsp/MovingJunctionEnergyTests.cpp
+    dsp/MovingPositionClickTests.cpp
     dsp/NoteAllocatorTests.cpp
     dsp/OutputGainTests.cpp
     dsp/OversamplerTests.cpp
