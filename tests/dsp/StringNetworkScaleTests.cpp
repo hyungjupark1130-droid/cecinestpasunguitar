@@ -685,3 +685,149 @@ TEST_CASE("CONTRACT: StringNetwork drops a SILENT string from the trip count imm
     for (std::size_t i = 0; i < revived.size(); ++i)
         REQUIRE(revived[i] == reference[i]);
 }
+
+TEST_CASE("CONTRACT: StringNetwork re-increasing the count mid-ramp-out does not jump the tap", "[contract]") {
+    // "Outside the count" does not imply "carries no state". A reduction deliberately leaves its
+    // removed strings RINGING for the length of their enable ramp -- that deferral is the whole
+    // reason the trip count lags -- so an increase arriving INSIDE that window readmits strings
+    // that are still sounding, and their position smoothers must not be snapped onto the target.
+    // Snapping one jumps the tap read by however far the smoother still had to glide, on a string
+    // with a live waveform under the tap: a discontinuity in readTapAt(), and the exact defect
+    // class the smoother exists to prevent.
+    //
+    // The timing here is load-bearing, and was got wrong once while writing this: the enable ramp
+    // is 10 ms, which at 48 kHz is 480 samples, so a re-increase four 128-sample blocks later (512
+    // samples) lands AFTER the ramp has completed and cleared the strings -- at which point
+    // snapping is correct, and this test would have passed against the defect it exists to catch.
+    // Two blocks (256 samples) is inside the window, and the assertions below pin that rather than
+    // assuming it.
+    constexpr int kStrings = 5;
+    constexpr int kRingBlocks = 400;    // ~1.07 s of ringing before anything moves
+    constexpr int kReduceBlock = 402;   // pickup retargeted at 400, count cut at 402
+    constexpr int kReIncreaseBlock = 2; // 256 samples later: inside the 480-sample enable ramp
+    constexpr int kTailBlocks = 200;
+    constexpr double kPreSeconds = 0.25;
+    constexpr double kPostSeconds = 0.06;
+
+    // The pickup is swept across the same window on purpose: with a stationary pickup the snap is
+    // a no-op and none of this would discriminate.
+    auto configureSwept = [](StringNetwork<float>& network) {
+        StringNetworkParams params = defaultParams();
+        params.stringMaterial.lossGainLow = 1.0f;  // sustain, so the click metric's denominator
+        params.stringMaterial.lossGainHigh = 1.0f; // describes the signal at the change
+        params.pickupPosition01 = 0.2f;
+        configure(network, params, kStrings);
+        return params;
+    };
+
+    auto pluckAll = [](BlockEventQueue& events) {
+        for (int s = 0; s < kStrings; ++s)
+            events.push(noteOn(0, 40 + 3 * s, s));
+    };
+
+    // ---- the direct observation: does the readmitted string's tap read jump? ------------------
+    {
+        StringNetwork<float> network;
+        StringNetworkParams params = configureSwept(network);
+        BlockEventQueue events;
+        pluckAll(events);
+
+        for (int b = 0; b < kReduceBlock; ++b) {
+            if (b == kRingBlocks) {
+                params.pickupPosition01 = 0.9f; // start the glide
+                network.setParams(params);
+            }
+            network.process(events, kBlock);
+        }
+        network.setNumStrings(2);
+        for (int b = 0; b < kReIncreaseBlock; ++b)
+            network.process(events, kBlock);
+
+        // The scenario is live, asserted rather than assumed: the removed strings are still in the
+        // trip count, still ringing, and the position smoother is genuinely mid-glide.
+        REQUIRE(network.tapBuffers().numStrings() == kStrings);
+        REQUIRE(network.tapBuffers().isActive(kStrings - 1));
+        const float glidingBefore = network.tapPosition01(0, 0);
+        REQUIRE(glidingBefore > 0.2f);
+        REQUIRE(glidingBefore < 0.9f);
+        REQUIRE(network.tapPosition01(kStrings - 1, 0) == glidingBefore);
+
+        network.setNumStrings(kStrings);
+
+        // THE assertion. A readmitted string that is still ringing keeps tracking the smoother it
+        // was already tracking; it does not teleport to the target. Removing the !stringHasState
+        // guard in StringNetwork::setNumStrings() makes this read 0.9 against a 0.715 neighbour.
+        REQUIRE(network.tapPosition01(0, 0) == glidingBefore);
+        for (int s = 2; s < kStrings; ++s) {
+            INFO("readmitted string " << s);
+            REQUIRE(network.tapPosition01(s, 0) == glidingBefore);
+        }
+    }
+
+    // ---- and the same thing heard: the click metric across the whole churn -------------------
+    auto render = [&](bool changeTheCount) {
+        StringNetwork<float> network;
+        StringNetworkParams params = configureSwept(network);
+        BlockEventQueue events;
+        pluckAll(events);
+
+        std::vector<float> out;
+        const int totalBlocks = kRingBlocks + kTailBlocks;
+        out.reserve(static_cast<std::size_t>(totalBlocks) * static_cast<std::size_t>(kBlock));
+        for (int b = 0; b < totalBlocks; ++b) {
+            if (b == kRingBlocks) {
+                params.pickupPosition01 = 0.9f;
+                network.setParams(params);
+            }
+            if (changeTheCount && b == kReduceBlock)
+                network.setNumStrings(2);
+            if (changeTheCount && b == kReduceBlock + kReIncreaseBlock)
+                network.setNumStrings(kStrings);
+
+            network.process(events, kBlock);
+            for (int n = 0; n < kBlock; ++n)
+                out.push_back(sumActiveTaps(network, n));
+        }
+        return out;
+    };
+
+    const std::vector<float> churned = render(true);
+    const std::vector<float> reference = render(false);
+    REQUIRE(churned.size() == reference.size());
+
+    const auto changeSample =
+        static_cast<std::size_t>(kReduceBlock + kReIncreaseBlock) * static_cast<std::size_t>(kBlock);
+    const auto spanBegin = changeSample - static_cast<std::size_t>(kPreSeconds * kRate);
+    const auto spanEnd = changeSample + static_cast<std::size_t>(kPostSeconds * kRate);
+
+    REQUIRE(peakOf(reference, spanBegin, changeSample) > 0.001f);
+    REQUIRE(peakOf(churned, spanEnd, churned.size()) > 0.001f); // still sounding afterwards
+
+    const cnpg::test::ClickMeasurement referenceMeasurement =
+        cnpg::test::measureClick(reference, kRate, spanBegin, spanEnd);
+    const cnpg::test::ClickMeasurement churnedMeasurement =
+        cnpg::test::measureClick(churned, kRate, spanBegin, spanEnd);
+    const double excessDb = cnpg::test::clickExcessDb(churnedMeasurement, referenceMeasurement);
+
+    // The churn takes real level out (three of five strings ramp down and part-way back), so this
+    // is one of the level-reducing cases the plain criterion is documented as blind to. Both
+    // readings are taken, each render's peak normalised by the motion of its OWN settled signal
+    // after the change -- see tests/support/ClickMetric.h.
+    const cnpg::test::ClickMeasurement churnedResidual =
+        cnpg::test::measureClick(churned, kRate, spanEnd, churned.size());
+    const cnpg::test::ClickMeasurement referenceResidual =
+        cnpg::test::measureClick(reference, kRate, spanEnd, reference.size());
+    const double residualExcessDb = cnpg::test::clickExcessAgainstResidualDb(churnedMeasurement, churnedResidual,
+                                                                             referenceMeasurement, referenceResidual);
+
+    std::cout << "[contract] count-churn-under-moving-pickup click metric: excess " << excessDb
+              << " dB, residual-normalised " << residualExcessDb << " dB (limit " << cnpg::test::kClickMetricToleranceDb
+              << " dB)\n";
+
+    REQUIRE(referenceMeasurement.metric(referenceMeasurement) > 0.0);
+    INFO("excess " << excessDb << " dB, residual-normalised " << residualExcessDb << " dB");
+    REQUIRE(excessDb <= cnpg::test::kClickMetricToleranceDb);
+    REQUIRE(residualExcessDb <= cnpg::test::kClickMetricToleranceDb);
+    REQUIRE(churnedMeasurement.nonFiniteSamples == 0);
+    REQUIRE(churnedMeasurement.subnormalSamples == 0);
+}

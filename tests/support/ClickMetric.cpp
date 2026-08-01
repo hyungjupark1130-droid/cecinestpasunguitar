@@ -89,4 +89,20 @@ double clickExcessDb(const ClickMeasurement& test, const ClickMeasurement& refer
     return 20.0 * std::log10(testMetric / referenceMetric);
 }
 
+double clickExcessAgainstResidualDb(const ClickMeasurement& test, const ClickMeasurement& testResidual,
+                                    const ClickMeasurement& reference, const ClickMeasurement& referenceResidual) {
+    // The one difference from clickExcessDb: each render's peak is measured against the motion of
+    // what REMAINS of THAT render after the change, so the denominators no longer cancel -- which
+    // is the entire point (see the header) -- while a level change both renders share still does.
+    const double referenceMetric = reference.metric(referenceResidual);
+    if (!(referenceMetric > 0.0) || !std::isfinite(referenceMetric))
+        return std::numeric_limits<double>::infinity();
+    const double testMetric = test.metric(testResidual);
+    if (!std::isfinite(testMetric))
+        return std::numeric_limits<double>::infinity(); // residual is silence: nothing to be loud against
+    if (!(testMetric > 0.0))
+        return -std::numeric_limits<double>::infinity();
+    return 20.0 * std::log10(testMetric / referenceMetric);
+}
+
 } // namespace cnpg::test

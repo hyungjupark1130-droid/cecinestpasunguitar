@@ -140,13 +140,23 @@ template <typename SampleT> void StringNetwork<SampleT>::setNumStrings(int count
     numStrings_ = clamped;
 
     if (clamped > previous) {
-        // Immediate. A string that was outside the count carries no state (a reduction cleared it
-        // when its ramp completed, and prepare()/reset() cleared it before that), so snapping its
-        // enable gain cannot produce a discontinuity: it is 0 * silence against 1 * silence.
-        // Ramping instead would fade in the attack of a note plucked on it in this same block.
+        // Immediate: the readmitted strings rejoin the loop on the next block.
         loopStrings_ = std::max(loopStrings_, clamped);
+
+        // Their POSITION smoothers are snapped only if the string is genuinely silent. "Outside the
+        // count" does not imply "carries no state": a reduction leaves its removed strings ringing
+        // for the length of their enable ramp -- that deferral is the entire reason
+        // updateLoopStringCount() exists -- so an increase arriving inside that window readmits
+        // strings that are still sounding. Snapping one of those would jump its tap read by however
+        // far the position smoother still had to glide, on a string with a live waveform under the
+        // tap: a genuine discontinuity in readTapAt(), and the exact defect class the smoother is
+        // there to prevent. A silent string has no such waveform, and snapping it is what stops a
+        // note plucked on it from gliding in from wherever the count last left the pickup.
+        //
+        // Same predicate, same reason, as the enable-gain snap in refreshEnableTargets() below.
         for (int s = previous; s < clamped; ++s)
-            snapTapPositions(s);
+            if (!stringHasState(s))
+                snapTapPositions(s);
     }
 
     refreshEnableTargets();
@@ -413,6 +423,24 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             // idle string's rails are zero, so ticking it would compute zeros -- and re-solve its
             // loop length while doing it. Skipping is bit-identical, and it is what keeps eight
             // preallocated strings from costing eight strings' CPU when two are being played.
+            //
+            // ---- PRECONDITION, and the task that invalidates it -------------------------------
+            // This predicate is complete ONLY because nothing outside this loop can put energy into
+            // a string's rails. Today that holds: injectFeedback() is a documented no-op until P4,
+            // and railAcceptFromBridge() is declared but never called -- the port is driven, its
+            // reflected waves are discarded (see setBridgePort()).
+            //
+            // Task P2.4 ENDS THAT. Wiring the port's reflected waves back into the strings is
+            // exactly what makes body coupling bidirectional, and bidirectional coupling means a
+            // string that is not sounding can receive energy through the bridge from one that is.
+            // That is not an edge case -- it IS sympathetic resonance, the whole point of the
+            // feature. On that day this predicate silently kills it: the string receiving bridge
+            // energy reports no state, gets skipped, is never ticked, and the energy vanishes with
+            // no test failing and no sound to notice, because the "before" is also silence.
+            //
+            // So P2.4 must extend `live` to include pending incident energy at the bridge port
+            // (and P4 the same for injectFeedback), not merely remember to. Written here rather
+            // than only in a plan document because here is where it breaks.
             const bool muted = (gain == 0.0f && gainTarget == 0.0f);
             const bool live = !muted && (sounding_[index] || releasing_[index] || exciters[index].isActive());
             if (!live) {

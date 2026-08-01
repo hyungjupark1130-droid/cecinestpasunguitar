@@ -58,6 +58,42 @@
 // control so the gate can never quietly go vacuous.
 //
 // -----------------------------------------------------------------------------------------------
+// WHAT READING (b) COSTS: the metric is NOT scale-invariant, and here is its blind spot
+// -----------------------------------------------------------------------------------------------
+//
+// Both renders sharing one denominator means the denominator CANCELS out of the criterion:
+//
+//     clickExcessDb(test, reference) == 20*log10(test.peak|dx| / reference.peak|dx|)
+//
+// The criterion is therefore a comparison of ABSOLUTE peak first differences. That is the right
+// question for a state change that leaves the level roughly alone, and it is why the mute case
+// stopped producing a false failure. It also has a specific, nameable blind spot, which every
+// caller must weigh before leaning on this number alone:
+//
+//   A state change that BOTH reduces the level AND inserts a discontinuity can pass.
+//
+// A step worth half of a signal that the same change made 10 dB quieter is small in absolute |dx|
+// -- it can sit comfortably under the reference's peak -- while being plainly audible as a click,
+// because what a listener hears it against is the quiet signal that remains, not the loud one that
+// used to be there. Note that most of what is left of P2 is a level-reducing change: P2.2's damper
+// engagement, P2.6's <= 5 ms Synth fade, P2.4's coupling. This is not a hypothetical.
+//
+// Its sensitivity floor is worth stating in the same breath, since it is measurable rather than
+// notional. On the P2.1 enable case the hard-cut negative control fails by 8.29 dB against a 3 dB
+// limit, i.e. it clears the bar by 5.29 dB -- so a cut taken at roughly 55% of the sample value
+// (20*log10(0.55) = -5.2 dB) would have passed. The gate catches a full-amplitude discontinuity
+// comfortably and a small one not at all.
+//
+// THE COMPANION MEASUREMENT. Where a change materially reduces level without silencing the signal,
+// measure clickExcessAgainstResidualDb() as well (below). It normalises the test render's peak by
+// the test render's OWN median over a span AFTER the change -- the ordinary motion of the signal
+// that actually remains -- which is exactly the quantity reading (b) gives up. Use both: reading
+// (b) is the criterion, and the residual reading is what stops it being the only thing anyone
+// looks at. Where the change ends in silence the residual reading is degenerate (its denominator
+// is zero, and it returns infinity), which is the same degeneracy reading (a) has and the reason
+// it is a companion rather than a replacement.
+//
+// -----------------------------------------------------------------------------------------------
 // CHOOSING THE ANALYSED SPAN (the caller's job, and it is load-bearing)
 // -----------------------------------------------------------------------------------------------
 //
@@ -108,9 +144,28 @@ ClickMeasurement measureClick(const float* samples, std::size_t count, double sa
 
 ClickMeasurement measureClick(const std::vector<float>& samples, double sampleRate, std::size_t begin, std::size_t end);
 
-// 20*log10(metric(test) / metric(reference)): how much WORSE the test render is. Positive means
-// worse. The shared denominator cancels, so this is equivalently the growth of the peak |first
-// difference| -- which is the criterion, stated in the units it is gated in.
+// THE CRITERION. 20*log10(metric(test) / metric(reference)): how much WORSE the test render is.
+// Positive means worse. The shared denominator cancels, so this is equivalently the growth of the
+// peak |first difference| -- see "WHAT READING (b) COSTS" above for what that does and does not
+// catch, before gating on it alone.
 double clickExcessDb(const ClickMeasurement& test, const ClickMeasurement& reference);
+
+// THE COMPANION, for a state change that materially reduces level without silencing the signal
+// (P2.2 damper engagement, P2.6's Synth fade, P2.4 coupling). Each render's peak is normalised by
+// the ordinary motion of ITS OWN settled signal after the change -- `testResidual` and
+// `referenceResidual` are measurements of the same two renders over a span that starts once the
+// change has finished. That is the scale reading (b) deliberately gives up, and it is what a
+// listener judges a click against once the change has taken the level down.
+//
+// Symmetric on purpose. Normalising only the test render's peak by its residual, and leaving the
+// reference on its full-span median, was tried first and is wrong: any level change that both
+// renders share -- a pickup sweep, a decaying note -- then lands entirely in the numerator and
+// reads as a click. Each render is judged against itself, and only the two judgements are compared.
+//
+// Returns +infinity when the test residual is silence, which is the degeneracy that makes this a
+// companion to clickExcessDb() and not a replacement for it: a change that ends in silence has no
+// residual to be loud against, and clickExcessDb() is then the only meaningful reading.
+double clickExcessAgainstResidualDb(const ClickMeasurement& test, const ClickMeasurement& testResidual,
+                                    const ClickMeasurement& reference, const ClickMeasurement& referenceResidual);
 
 } // namespace cnpg::test
