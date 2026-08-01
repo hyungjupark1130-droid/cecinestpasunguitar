@@ -1154,6 +1154,7 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
     std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u%s\n", stats.nonFiniteSamples,
                 stats.subnormalSamples, stats.droppedNoteEvents,
                 verifyDeterminism ? " determinism=verified(2 in-process renders bit-identical)" : "");
+    std::fflush(stdout);
 
     if (stats.nonFiniteSamples > 0) {
         std::fprintf(stderr, "cnpg_render: %s produced %lld non-finite sample(s)\n", label.c_str(),
@@ -1218,6 +1219,12 @@ int main(int argc, char** argv) {
 
     std::printf("cnpg_render -- P1 chain, %.0f Hz, %d-sample blocks, git %s\n", args.sampleRate, args.blockSize,
                 CNPG_RENDER_GIT_COMMIT);
+    // stdout is block-buffered when it is a pipe or a file -- which is exactly how the [contract]
+    // test and any CI step capture it -- while stderr is not, so without these flushes a diagnostic
+    // would land in the captured log ABOVE the progress lines that led to it. Flushing at each
+    // point where the next thing written might be an error keeps the two streams interleaved in the
+    // order they actually happened.
+    std::fflush(stdout);
 
     if (!args.midi.empty()) {
         RenderSpec spec;
@@ -1243,6 +1250,7 @@ int main(int argc, char** argv) {
 
     std::printf("  corpus %s (corpusVersion %lld, %d phrase(s))\n", corpusDir.string().c_str(), manifest.corpusVersion,
                 static_cast<int>(manifest.phrases.size()));
+    std::fflush(stdout);
 
     const fs::path outputDir(args.out);
     for (const PhraseEntry& phrase : manifest.phrases) {
