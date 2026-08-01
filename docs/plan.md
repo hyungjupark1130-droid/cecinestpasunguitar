@@ -199,7 +199,7 @@ cecinestpasunguitar/
 │       ├── 0001-pluginval-baseline.md    # pluginval version + command baseline (P0.6)
 │       ├── 0002-fractional-delay.md      # (P1) Lagrange3 vs Thiran1 spike result
 │       ├── 0003-adaa-vs-oversampling.md  # (P1) timeboxed triode antialiasing spike result
-│       └── 0004-p2-bridge-passivity-fallback.md # (P2) bridge passivity outcome or fallback trigger record
+│       └── 0006-p2-bridge-passivity-fallback.md # (P2) bridge passivity outcome or fallback trigger record
 └── .github/
     ├── workflows/
     │   └── ci.yml                  # Two jobs: windows (full) + ubuntu (dsp-only); see §1.5
@@ -1325,7 +1325,7 @@ Manual: in Ableton Live, play and hold a low E, then staccato notes on other str
 ### P2.5 — Bridge passivity fallback protocol (timeboxed) and SympatheticResonatorBus contingency path
 
 **Files:**
-- `docs/decisions/0004-p2-bridge-passivity-fallback.md` (written in all outcomes)
+- `docs/decisions/0006-p2-bridge-passivity-fallback.md` (written in all outcomes)
 - `dsp/include/cnpg/dsp/SympatheticResonatorBus.h`, `dsp/src/SympatheticResonatorBus.cpp` (implemented only if triggered)
 - `tests/dsp/BridgePortContractTests.cpp` (parameterized over `IBridgePort` implementations)
 
@@ -1335,7 +1335,7 @@ Manual: in Ableton Live, play and hold a low E, then staccato notes on other str
 This is a design-for-fallback protocol, not speculative implementation. Timebox: 1–2 calendar weeks of focused effort on making `BridgeJunction` pass the three-tier `[energy]` suite, counted from the first red run of that suite, hard ceiling two calendar weeks. During the timebox, all fixes stay within the positive-real-by-construction framing (discretization method, normalization, coefficient mapping) — no ad-hoc energy clamps in the audio path. Exit criteria (either ends the timebox early): (pass) all P2.4 tier-1/2/3 acceptance boxes green across the full parameter grid at 44.1/48/96 kHz → record the passing construction and discretization choice in the decision doc, close this task; (fail) timebox expires with any tier still red → trigger the fallback. Fallback procedure: (1) create branch `research/bidirectional-bridge` from the failing state, preserving the failing tests and all diagnostic work; bidirectional coupling development continues only on that branch; (2) on `main`, implement `SympatheticResonatorBus` behind the identical `IBridgePort` interface — outgoing waves are pure passive terminations (per-port reflection with |r| ≤ 1) and the incident string energy drives an internal bank of resonators tuned by the same `setAdmittance` surface (`BridgeAdmittanceParams` reused verbatim so the APVTS surface is unchanged); `bridgeOutput()` sums the resonator bank; (3) `StringNetwork::setBridgePort()` is repointed at the bus — `StringNetwork` holds exactly one `IBridgePort&` and must not be able to tell the difference; (4) the bus must pass `BridgePortContractTests` and energy tiers 1–3 (trivially, being unidirectional); the two-string beating and Weinreich boxes of P2.4 are re-scoped on `main` to "sympathetic response present" (string-1 audibility box only) and the bidirectional-only boxes move to the research branch; (5) decision doc records trigger date, failing evidence, and re-entry criteria for merging the research branch back (its energy suite green).
 
 **Acceptance criteria:**
-- [ ] `docs/decisions/0004-p2-bridge-passivity-fallback.md` exists and records either the passing construction (pass path) or the full trigger record and re-scope (fail path); no TBD text.
+- [ ] `docs/decisions/0006-p2-bridge-passivity-fallback.md` exists and records either the passing construction (pass path) or the full trigger record and re-scope (fail path); no TBD text.
 - [ ] `BridgePortContractTests` `[contract]` passes for every `IBridgePort` implementation compiled into `cnpg_tests` (one on the pass path, two on the fail path).
 - [ ] Fail path only: `SympatheticResonatorBus` passes `[energy]` tiers 1–3 and the sympathetic-response box; `research/bidirectional-bridge` branch exists and CI runs its dsp/ tests.
 - [ ] The timebox was respected: repository history shows ≤ 2 calendar weeks between the first red `[energy]` run on `BridgeJunction` and either green tests or the fallback trigger commit.
@@ -1344,7 +1344,7 @@ This is a design-for-fallback protocol, not speculative implementation. Timebox:
 ```
 build\bin\Release\cnpg_tests.exe "BridgePortContract*"
 build\bin\Release\cnpg_tests.exe "[energy]"
-git log --oneline -- docs/decisions/0004-p2-bridge-passivity-fallback.md
+git log --oneline -- docs/decisions/0006-p2-bridge-passivity-fallback.md
 ```
 Review: decision doc read in the P2.9 exit review; on the fail path, confirm in Ableton Live that `main` still produces sympathetic shimmer via the bus.
 
@@ -1513,7 +1513,33 @@ The tier-1 parameter grids below are the canonical definitions, stated here once
 - **Tier 1 — `ENERGY/T1: DamperJunction scattering matrix is passive`.** Instantiates one `DamperJunction` in isolation, losses bypassed. Sweeps the canonical grid: `position01` ∈ {0.0, 0.1, …, 1.0} × engagement ∈ {0, 0.25, 0.5, 0.75, 1} (via `setEngagementImmediate`) × `maxLoss` ∈ {0, 0.5, 1}. For every grid point, `copyScatteringMatrix()` yields the 2×2 S; the test computes its spectral norm in double precision (closed-form 2×2 SVD) and asserts `‖S‖₂ ≤ 1 + 1e-12`. Additionally asserts exact transparency (S = anti-diagonal pass-through) at engagement 0.
 - **Tier 1 — `ENERGY/T1: BridgeJunction scattering matrix is passive`.** Instantiates one `BridgeJunction` for every port count 1..8 with representative impedance sets (equal impedances, and a 4:1 spread). Sweeps `BridgeAdmittanceParams` over the canonical grid: `resonanceHz` ∈ {80, 400, 2000, 8000} × `damping` ∈ {0 (exercises the positive-real clamp), 0.1, 1, 10} × `couplingStrength` ∈ {0, 0.5, 1}. For each point, `copyScatteringMatrix()` with losses bypassed; spectral norm via Jacobi SVD in double; assert `‖S‖₂ ≤ 1 + 1e-12`. The same case runs against `SympatheticResonatorBus` once the fallback exists (identical `IBridgePort` seam, identical assertion).
 - **Tier 2 — `ENERGY/T2: lossless network impulse conserves energy`.** Instantiates a full `StringNetwork` (6 strings, `BridgeJunction` attached via `setBridgePort`), calls `setLosslessTestMode(true)` (which forwards `setLossBypassed`/lossless configuration to strings, dampers, and bridge). Injects a single-sample unit impulse into string 0 via a NoteOn carrying a hardness-1, noise-0 excitation (and a variant that calls `WaveguideString::injectAt` directly on an isolated string). Processes 10 s in 128-sample blocks; after the excitation block, samples `energyEstimate()` (the Lyapunov storage functional defined above) once per block. The case runs the `double` instantiation of the sample-domain classes — the 1e-9 bound is justified only there. Runs at 44.1/48/96 kHz, for both `FractionalDelayKind::Lagrange3` and `FractionalDelayKind::Thiran1`, and in three motion scenarios: static positions, where the test asserts strict per-block non-increase `E[k+1] ≤ E[k] * (1 + 1e-9)`; `damperPosition01` swept 0.1→0.9 over 5 s; and `pickupPosition01` swept likewise (tap reads must never inject energy). The motion scenarios assert bounded growth instead: cumulative `energyEstimate()` never exceeds the post-excitation maximum and per-block growth stays within a stated tolerance derived from the crossfade overlap — the strict non-increase applies to static-position runs only.
+
+> **Amendment (P2.3, 2026-08-01) — the damper-motion scenario as written above is vacuous, and its replacement is stronger.** `setLosslessTestMode(true)` makes `DamperJunction` *transparent* (S becomes the anti-diagonal pass-through), so sweeping `damperPosition01` under lossless mode moves a junction that is doing nothing: the scenario passes identically against an implementation with no crossfade at all. The vacuity is a property of lossless mode, not of the crossfade, and no dual-anchor read/write construction repairs it — depositing a crossfaded difference through the far anchor breaks passivity (an absorbing junction with anti-correlated rails *creates* energy) while still depositing zero under a transparent junction, and re-reading at the far anchor makes the seam an energy transporter, which destroys the bit-exact seam contract P2.2 established. **The shipped scenario instead runs a *dissipative* damper on a *lossless string*.** That is a strictly stronger gate than the text above: the moving seam becomes the only element in the system that can move energy at all, whereas the configuration above buries it behind six strings' worth of loop losses. Passivity of the moving seam is additionally proven structurally rather than only measured — `railDeposit` is the exact transpose of `railInterpolate`, so with `r = g1·r_A + g2·r_B` the deposit-read composition is a contraction at every fade position, given `‖r‖ ≤ g1 + g2 = 1`. That bound **requires the amplitude-complementary linear crossfade law**; under an equal-power law it becomes √2 and the proof does not hold. The locked crossfade law and the passivity proof are the same decision.
 - **Tier 3 — `ENERGY/T3: lossy network only dissipates`.** Same network, lossless mode off, default `StringMaterialParams`, running the shipping `float` (float32) instantiation. Pluck all 6 strings (staggered NoteOns), then after the last excitation sample track the per-block block-RMS envelope of `energyEstimate()` and assert it is monotone decreasing — no block may exceed its predecessor by more than a 1e-6 relative tolerance (absorbing float32 state rounding). The monotonicity assertion applies to `energyEstimate()`, never to the raw bridge output signal: coupled strings beat, and beating is periodic envelope growth, so a companion check on `bridgeOutputBuffer()` instead fits a decay from Schroeder backward integration (or a windowed-max envelope over at least one beat period) and requires the fitted decay slope to be negative after excitation. Repeated with the damper fully engaged (`engage()` on all strings) to confirm accelerated, still-monotone decay.
+
+
+> **Amendment (P2.4, 2026-08-01) — tier 3's monotonicity assertion has a stated dynamic range, because float32 does.**
+> The bound above ("no block may exceed its predecessor by more than a 1e-6 relative tolerance") is written without a
+> floor, and a *relative* tolerance cannot absorb a phenomenon whose cause is *absolute*. Bidirectional coupling (P2.4)
+> gives the decay a tail the uncoupled network never had — once the strings are damped, the bridge resonator keeps
+> re-driving them out of its own residual instead of the silence watchdog clearing them — and run far enough down, the
+> shipping float32 path stops being able to represent its own recursions. There are two floors, at different depths.
+> **Without** the FTZ/DAZ guard the state itself goes subnormal (~1e-44, quantized to multiples of 1.4e-45) and the
+> functional wanders by tens of per cent at total energies of ~1e-87; that configuration ships nowhere, since
+> `ScopedFtzDazGuard` has been the first thing `processBlock` constructs since P1.1, so **every tier-3 render engages
+> it**. **With** the guard, the recursions multiply the state by coefficients as small as ~1e-2, and a product below the
+> smallest *normal* float (1.18e-38) is flushed to zero — which does not merely round the state, it **changes the
+> recursion**: an allpass whose `a·x` term has vanished is no longer an allpass, and the closed-form storage derived for
+> it is no longer its storage. With ~10³ stored values that begins at |x| ~ 1e-36, i.e. a total energy of ~1e-69.
+>
+> **The monotonicity assertion is therefore gated down to an energy of 1e-40 and reported below it** — 29 decades above
+> where the phenomenon begins, and 186–236 dB below the start of every run, with the level of the last gated block
+> printed so the margin is visible rather than asserted. This is a statement about the range over which float32 can be
+> measured, not a tolerance: the *identical* scenario on the `double` instantiation is clean over its whole run (worst
+> growth 0, following the decay to 1.5e-160), which is what says the junction is passive and the float32 reading was
+> arithmetic. `ENERGY/T3: the float32 arithmetic floor is a measurement limit, not a passivity failure` runs all three
+> configurations on every CI run and *requires* the double control to be clean and the float32 runs not to be, so the
+> finding cannot be re-lost.
 
 ## 4.3 Impulse-response regression — `[regression]`
 
@@ -1527,6 +1553,19 @@ Two layers, exactly as locked. Layer (a) survives algorithm swaps; layer (b) fre
 
 - **Layer (a) — `REGRESSION/A: feature invariants`.** Re-renders each scenario and extracts: partial frequencies 1–8 (Blackman-Harris FFT + quadratic peak interpolation, the section-4.5 estimator) — each must lie within ±2 cents of the sidecar reference; per-octave-band T60 from 63 Hz to 8 kHz (band-filtered Schroeder backward integration) — each within ±10% relative; RMS of the first 100 ms within ±1.5 dB of reference. These assertions compare against sidecar *features*, not waveforms, so they survive an interpolator or filter-topology swap.
 - **Layer (b) — `REGRESSION/B: float64 golden exactness`.** Re-renders and compares sample-wise against the `.f64` file with absolute tolerance 1e-7. This is effectively bit-stability of the float32 path and is toolchain-sensitive; goldens are generated on the pinned MSVC toolchain of the dev machine, so layer (b) runs only in the Windows CI job and locally (the Linux job runs layer (a) only — see 4.9).
+
+> **Amendment (P2.4, 2026-08-01) — "two signals per scenario" is captured at two different resolutions, on purpose.**
+> The `bridgeOutputBuffer()` channel above was identically zero through P2.3 (P1's bridge is the rigid termination, so
+> a golden of it would have been 3 s of zeros per scenario) and P2.4 makes it a real signal. It is captured as follows:
+> - **`chord_ir`** — the coupled 6-string scenario P2.4 adds — captures **both channels as full `.f64` goldens**,
+>   because inter-string coupling appears in no other scenario and nothing else in the golden set can gate it.
+> - **`string_ir`** — the five single-string scenarios — captures the tap channel as a `.f64` and the bridge channel in
+>   the **sidecar**, as its layer-(a) features (the eight band T60s and attack RMS) plus an FNV-1a checksum over the
+>   float64 bridge render, asserted in `REGRESSION/A` (the checksum under the same MSVC-only condition as layer (b)).
+>   On a single string the bridge output is one more linear functional of a state the tap channel already pins
+>   sample-exactly at 1e-7, so a second `.f64` set would add ~45 MB of committed binaries per regeneration, for ever, to
+>   gate nothing the tap does not already gate — while the sidecar form gates the decay behaviour a bridge load actually
+>   changes, plus sample-exactness, for a few kB. Sidecar schema v3 carries the new fields.
 
 **Regenerate-goldens workflow.** A scripted CMake target `cnpg_regen_goldens` re-renders every scenario, overwrites `.f64` files, refreshes sidecars, and prints a drift report (max abs sample diff and per-feature deltas versus the previous goldens). Rule: any commit touching `tests/data/golden/` must carry a git trailer line `Regenerate-Goldens: <reason>`, where the reason states (1) which variants/rates changed, (2) the algorithm change motivating regeneration, and (3) that layer-(a) invariants pass on the new renders. `.github/scripts/check-golden-commit.sh` enforces the trailer mechanically in the Windows CI job: if the pushed commit modifies files under `tests/data/golden/` and lacks the `Regenerate-Goldens:` trailer, the job fails.
 
@@ -1548,6 +1587,36 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 - **Estimator (concrete).** Windowed FFT + quadratic (parabolic) interpolation: take 2^18 analysis samples at 44.1/48 kHz (2^19 at 96 kHz, keeping bin spacing ≈ 0.18 Hz), Blackman-Harris window, zero-pad ×4, FFT, locate the fundamental partial's peak bin (search restricted to ±80 cents around the target f0 so dispersion-sharpened upper partials are never picked), then fit a parabola through the log-magnitude of the peak and its neighbors to refine the frequency. Convert to cents against the target.
 - **Accuracy floor vs the 2-cent criterion.** 2 cents at MIDI 21 (27.5 Hz) is 31.8 mHz. Bin spacing 0.183 Hz with ×4 zero-padding and quadratic log-magnitude interpolation on a BH window gives worst-case interpolation bias well under 0.5% of a bin ≈ 0.9 mHz — over 30× below the criterion. This floor is not taken on faith: **`TUNING: estimator self-calibration`** feeds the estimator synthetic exponentially decaying sinusoids (with low-level harmonics added) at known frequencies spanning 27.5 Hz–4186 Hz and requires estimator error ≤ 0.2 cents everywhere — a 10× guard band under the 2-cent gate. The sweep test is invalid (and fails loudly) if self-calibration fails.
 - **Named cases.** `TUNING: P1 analytic compensation sweep` (P1: `setAnalyticTuningCompensation` active) and `TUNING: P2 calibration-table sweep` (P2: table from `cnpg_calibrate` loaded via `loadCalibrationTable`) — the P1 case gates MIDI 33–96 within ±2 cents (MIDI 21–32 and 97–108 report-only); the full 88-note × 3-rate ±2-cent assertion binds only the P2 calibration-table case. A third case, `TUNING: static bend accuracy`, applies constant `pitchBendSemitones` = ±2 on MIDI 40 and requires the settled pitch within ±2 cents of the bent target.
+
+
+> **Amendment (P2.4, 2026-08-01) — the P1 analytic case measures the shipping topology and reports; the ±2-cent
+> assertion binds P2.7, as this section already says.** Through P2.3 the `TUNING:` cases rendered an *isolated*
+> `WaveguideString` rather than the `StringNetwork` topology the recipe above specifies. That was harmless only by
+> accident: `couplingStrength` defaulted to 0.0, where `BridgeJunction` reduces bit-exactly to the rigid termination an
+> isolated string applies internally, so the two topologies were the same object. P2.4's nonzero shipping default
+> (`docs/decisions/0006`) ends the equivalence, and all three named cases now render the shipping topology.
+>
+> **What that measures.** The bridge seam's own one extra sample is *not* the issue — `WaveguideString::setBridgePortDriven`
+> subtracts it from the loop-length solve, measured at 5.6e-6 cents residual against an uncompensated −17.19 cents at
+> MIDI 69 / 44.1 kHz. What remains is the **load's phase response**: a bridge resonance pulls the partials near it,
+> which is physics (the same mechanism that puts dead spots on a real instrument) and not an error. Measured at the
+> shipping admittance: **worst 4.90 cents**, over MIDI 33–96 at all three rates, worst at MIDI 45.
+>
+> The P1 **analytic** compensation is a closed-form solve over the loop's own filters, derived for a rigid termination,
+> and it is exact for one (0.00028 cents). It cannot absorb a load it was derived without. So the P1 cases assert a
+> **documented sanity bound of ±12 cents** — set from the measured worst with ~2.4× headroom, and non-vacuous in both
+> directions (the residual must be > 0.5 cents, or the render has stopped going through the bridge) — and the ±2-cent
+> criterion binds the P2 calibration-table case, exactly as the "Named cases" paragraph above already assigns it.
+> `TUNING: static bend accuracy` additionally keeps a ±2-cent assertion on the bend's own *arithmetic*, as the
+> difference between the bent and unbent residuals, which the bridge load cannot move.
+>
+> **BINDING ENTRY CONDITION ON TASK P2.7.** P2.7 owns the ±2-cent gate over the full 88 notes × 3 rates in the shipping
+> coupled topology. It also inherits a scope question this task surfaced and deliberately did not solve: the residual is
+> a function of three **live APVTS parameters**, not of the MIDI note alone — coupling 0.00/0.35/1.00 → 0.000/−4.855/
+> −14.056 cents; resonance 80/110/180/2000 Hz → +4.461/+0.001/−4.855/−0.527 cents; damping 0.01/0.50/10.0 →
+> −0.188/−4.855/−0.494 cents — **and the sign reverses across resonance**. A calibration table indexed by MIDI note
+> structurally cannot represent that, so P2.7 must either re-scope its mechanism or the parameter surface must change.
+> Measured by `TUNING: the coupled residual is a function of three LIVE parameters`.
 
 ## 4.6 Denormal robustness — `[denormal]`
 

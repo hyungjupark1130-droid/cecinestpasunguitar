@@ -75,6 +75,10 @@ std::string scenarioFileName(int midiNote);
 // .f64 golden.
 std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote);
 
+// The same scenario's BRIDGE channel (bridgeOutputBuffer). Captured into the sidecar as layer-(a)
+// features plus a checksum rather than as a .f64 -- see GoldenSidecar::bridgeFeatures for why.
+std::vector<double> renderStringIrBridge(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote);
+
 // Layer-(a) reference features extracted from a rendered scenario.
 struct StringIrFeatures {
     std::vector<double> partialHz; // partials 1..8; 0.0 for partials above Nyquist

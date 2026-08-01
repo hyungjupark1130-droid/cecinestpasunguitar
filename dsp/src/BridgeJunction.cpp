@@ -176,6 +176,25 @@ template <typename SampleT> void BridgeJunction<SampleT>::advanceSmoothers() noe
         rootZM_ = rootZMTarget_;
         rootZK_ = rootZKTarget_;
         resistance_ = resistanceTarget_;
+        if (rigid_) {
+            // ENTERING THE RIGID BRANCH RELEASES THE STORE, and that is a considered reversal of
+            // what this file said at first. The rigid branch is the Y == 0 limit: v is identically
+            // 0, so the mass state merely alternates sign and the spring state never moves, and the
+            // energy is conserved FOR EVER. Leaving it there is not conservative, it is a leak in
+            // the other direction -- it froze isQuiescent() false permanently, and turning the
+            // coupling back up released the whole store into the strings from zero incident
+            // (measured by review: 0.1864 of storage held unchanged over 500 000 silent samples,
+            // then a peak outgoing wave of 0.0173 out of nothing).
+            //
+            // Zeroing it is NOT a clamp. A clamp is an in-loop limiter that bounds a signal every
+            // sample; this is a one-time state release on a topology change, which is the same
+            // thing clearStringState() does to a ringing string's rails and the same thing the
+            // silence watchdog does when it decides a tail is over. It only ever runs below
+            // kBridgeMinMobilityRatio of full coupling -- 180 dB under the shipping default -- where
+            // the store it releases is whatever the user asked to disconnect.
+            massState_ = 0.0;
+            springState_ = 0.0;
+        }
         return;
     }
     if (rigid_)
@@ -209,10 +228,10 @@ void BridgeJunction<SampleT>::scatter(const SampleT* incident, SampleT* outgoing
     }
 
     if (rigid_) {
-        // v == 0. Every string sees its own wave inverted (the rigid termination) and the two
-        // element states run on with v = 0 substituted into their own recurrences -- mass
-        // sM' = -sM, spring sK' = sK -- which conserves their stored energy exactly rather than
-        // discarding it. Discarding would be passive too, and it would also be a clamp.
+        // v == 0: every string sees its own wave inverted, which IS the rigid termination. The
+        // element states were released on the way into this branch (advanceSmoothers()), so there
+        // is nothing here to conserve or to discard -- they are already 0 and the recurrences below
+        // keep them there.
         for (int port = 0; port < ports; ++port)
             outgoing[port] = -incident[port];
         massState_ = -massState_;
@@ -253,7 +272,9 @@ void BridgeJunction<SampleT>::scatter(const SampleT* incident, SampleT* outgoing
 }
 
 template <typename SampleT> bool BridgeJunction<SampleT>::isQuiescent() const noexcept {
-    return massState_ == 0.0 && springState_ == 0.0;
+    // A THRESHOLD on the stored energy, not an exact-zero test on the states -- see
+    // kBridgeQuiescentEnergy for why the exact test could not become true and what that cost.
+    return storageEnergy() <= kBridgeQuiescentEnergy;
 }
 
 template <typename SampleT> Sample64 BridgeJunction<SampleT>::storageEnergy() const noexcept {

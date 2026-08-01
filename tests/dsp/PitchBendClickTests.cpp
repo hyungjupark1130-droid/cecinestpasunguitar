@@ -139,25 +139,36 @@ TEST_CASE("CONTRACT: StringNetwork static pitch bend lands on the bent target", 
     // the mandated 2^18-sample window starts 0.5 s after the pluck, and at the default material
     // MIDI 40's tail is far too short to fill it. Same code path, same compensation, only a
     // parameter value inside the shipping range.
-    constexpr double kGateCents = 2.0;
+    // The shipping-topology sanity bound, matching tests/dsp/WaveguideStringTuningTests.cpp's
+    // kAnalyticSanityCents and set for the same reason (Task P2.4): the bridge load pulls partials
+    // near its resonance, the +/-2 cent criterion binds Task P2.7's calibration-table case, and this
+    // number exists so a residual that suddenly became enormous still fails something.
+    constexpr double kSanityCents = 12.0;
+    // What this case DOES still gate exactly: the bend's own arithmetic. The bent and unbent renders
+    // must sit within this of each other, because whatever the bridge does to a note it does to both
+    // -- so a bend that landed on the wrong target would show here even though the absolute residual
+    // cannot.
+    constexpr double kBendArithmeticCents = 2.0;
     constexpr std::size_t kAnalysisLength = std::size_t{1} << 18;
     const auto discard = static_cast<std::size_t>(0.5 * kSampleRate);
 
-    for (float bend : {-2.0f, 2.0f}) {
+    std::vector<double> bentCents;
+    for (float bend : {-2.0f, 0.0f, 2.0f}) {
         StringNetworkParams params;
         params.pickupPosition01 = kPickup;
         params.pitchBendSemitones = bend;
         params.stringMaterial.lossGainLow = 1.0f;
         params.stringMaterial.lossGainHigh = 1.0f;
-        // DECOUPLED BRIDGE (Task P2.4). This case is docs/plan.md section 4.5's "TUNING: static bend
-        // accuracy" -- does a constant pitchBendSemitones land the string on the bent target within
-        // +/-2 cents? The BRIDGE LOAD pulls partials near its resonance (measured: worst 4.9 cents
-        // at MIDI 45 with the shipping admittance, see "TUNING: the coupled topology's residual
-        // tuning error" in tests/dsp/BridgePortContractTests.cpp), which would fold a physical
-        // effect into a measurement of the bend parameter's arithmetic and gate the wrong thing.
-        // Section 4.5 assigns the coupled topology's residual to Task P2.7's calibration table;
-        // carry-forward B3 assigns MEASURING it to P2.4, and it is measured -- there, not here.
-        params.bridge.couplingStrength = 0.0f;
+        // THE SHIPPING TOPOLOGY (Task P2.4, corrected at review). This case is one half of
+        // docs/plan.md section 4.5's "TUNING: static bend accuracy", and it renders the shipping
+        // coupled bridge -- params.bridge is left at its struct default.
+        //
+        // It was briefly decoupled here so that a +/-2 cent assertion would keep passing, and that
+        // was the wrong move: editing a test to stop it failing is how an instrument ships flat with
+        // a green board. The bridge load's pull on partials near its resonance is REAL and it is in
+        // the shipping path, so the measurement keeps it and the ASSERTION moves to where section
+        // 4.5 already puts the +/-2 cent criterion -- Task P2.7's calibration-table case. What is
+        // gated here instead is the bend's own arithmetic (see below).
 
         StringNetwork<float> network;
         network.prepare(kSampleRate, kBlockSize, FractionalDelayKind::Lagrange3);
@@ -196,6 +207,24 @@ TEST_CASE("CONTRACT: StringNetwork static pitch bend lands on the bent target", 
         std::cout << "[contract] static bend " << bend << " st through StringNetwork: target " << target
                   << " Hz, measured " << measured << " Hz (" << cents << " cents)\n";
         INFO("bend " << bend << ": " << cents << " cents");
-        REQUIRE(std::fabs(cents) <= kGateCents);
+        REQUIRE(std::fabs(cents) <= kSanityCents);
+        bentCents.push_back(cents);
+    }
+
+    // THE BEND ARITHMETIC, gated exactly. The absolute residual is the bridge load's, and it is the
+    // same load at every bend -- so the DIFFERENCE between a bent render's residual and the unbent
+    // one's is the bend's own contribution, and that is what +/-2 cents still binds here. A bend
+    // that landed a semitone out, or that silently clamped, moves this even though it cannot move
+    // the absolute number out of the sanity bound.
+    REQUIRE(bentCents.size() == 3);
+    const double unbent = bentCents[1];
+    for (std::size_t k = 0; k < bentCents.size(); ++k) {
+        if (k == 1)
+            continue;
+        const double excess = bentCents[k] - unbent;
+        std::cout << "[contract] static bend, arithmetic residual vs the unbent render: " << excess << " cents (limit "
+                  << kBendArithmeticCents << ")\n";
+        INFO("bend index " << k << ": " << bentCents[k] << " cents against unbent " << unbent);
+        REQUIRE(std::fabs(excess) <= kBendArithmeticCents);
     }
 }

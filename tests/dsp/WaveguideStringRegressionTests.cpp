@@ -55,6 +55,9 @@ GoldenSidecar makeSidecar(FractionalDelayKind kind, double sampleRate, int midiN
     sidecar.lengthSamples = static_cast<double>(samples.size());
     sidecar.atol = kStringIrGoldenAtol;
     sidecar.features = features;
+    const std::vector<double> bridge = renderStringIrBridge(kind, sampleRate, midiNote);
+    sidecar.bridgeFeatures = extractChordIrFeatures(bridge, sampleRate); // band T60 + attack RMS only
+    sidecar.bridgeChecksum = checksumF64(bridge);
     return sidecar;
 }
 
@@ -76,6 +79,7 @@ const char* missingGoldenHint() {
 
 TEST_CASE("REGRESSION/A: feature invariants", "[regression]") {
     std::string provenanceHash;
+    int bridgeBandsGated = 0;
     for (FractionalDelayKind kind : kKinds) {
         for (double sampleRate : kStringIrSampleRates) {
             for (int midiNote : kStringIrMidiNotes) {
@@ -146,9 +150,59 @@ TEST_CASE("REGRESSION/A: feature invariants", "[regression]") {
                 INFO("attack RMS reference " << reference.features.attackRmsDbfs << " dBFS measured "
                                              << features.attackRmsDbfs << " dBFS");
                 REQUIRE(std::fabs(features.attackRmsDbfs - reference.features.attackRmsDbfs) <= kAttackRmsDbTolerance);
+
+                // THE BRIDGE CHANNEL (schema v3, Task P2.4). docs/plan.md section 4.3 captures two
+                // signals per scenario; on a single string the second one is recorded as layer-(a)
+                // features plus a checksum instead of a second .f64 -- see GoldenSidecar for the
+                // reasoning and the plan-file amendment. What matters is that it is no longer
+                // recorded as NOTHING: through P2.3 it was identically zero, and P2.4 made it a
+                // signal that nothing was gating.
+                REQUIRE(reference.bridgeChecksum.size() == 16);
+                const std::vector<double> bridge = renderStringIrBridge(kind, sampleRate, midiNote);
+                const StringIrFeatures bridgeFeatures = extractChordIrFeatures(bridge, sampleRate);
+
+                double bridgePeak = 0.0;
+                for (double sample : bridge)
+                    bridgePeak = std::max(bridgePeak, std::fabs(sample));
+                // Non-vacuous: a bridge channel of silence would match a reference of silence on
+                // every line below, which is exactly the state this task took it out of.
+                INFO("bridge peak " << bridgePeak);
+                REQUIRE(bridgePeak > 0.0);
+
+                int gatedBridgeBands = 0;
+                for (std::size_t b = 0; b < bridgeFeatures.bandT60.size(); ++b) {
+                    const double referenceT60 = reference.bridgeFeatures.bandT60[b];
+                    if (referenceT60 <= 0.0) {
+                        REQUIRE(bridgeFeatures.bandT60[b] <= 0.0);
+                        continue;
+                    }
+                    INFO("bridge band " << kStringIrT60Bands[b] << " Hz reference T60 " << referenceT60
+                                        << " s measured " << bridgeFeatures.bandT60[b] << " s");
+                    REQUIRE(bridgeFeatures.bandT60[b] > 0.0);
+                    REQUIRE(std::fabs(bridgeFeatures.bandT60[b] - referenceT60) <=
+                            kT60RelativeTolerance * referenceT60);
+                    ++gatedBridgeBands;
+                }
+                INFO("bridge attack RMS reference " << reference.bridgeFeatures.attackRmsDbfs << " dBFS measured "
+                                                    << bridgeFeatures.attackRmsDbfs << " dBFS");
+                REQUIRE(std::fabs(bridgeFeatures.attackRmsDbfs - reference.bridgeFeatures.attackRmsDbfs) <=
+                        kAttackRmsDbTolerance);
+                bridgeBandsGated += gatedBridgeBands;
+
+                // SAMPLE-EXACTNESS, the part the features cannot give: the checksum moves if any
+                // sample of the bridge render moves. Toolchain-sensitive in exactly the way layer
+                // (b) is, so it runs where layer (b) runs.
+#if defined(_MSC_VER)
+                INFO("bridge checksum reference " << reference.bridgeChecksum << " measured " << checksumF64(bridge));
+                REQUIRE(checksumF64(bridge) == reference.bridgeChecksum);
+#endif
             }
         }
     }
+    std::cout << "[regression] string_ir bridge channel: " << bridgeBandsGated
+              << " band-T60 comparisons gated across 30 scenario/variant/rate combinations, plus attack RMS and a "
+                 "sample-exact checksum (schema v3)\n";
+    REQUIRE(bridgeBandsGated > 30);
 }
 
 // ---------------------------------------------------------------------------------------------

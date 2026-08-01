@@ -180,6 +180,20 @@ inline constexpr float kBridgeMaxMobilityRatio = 0.05f;
 // discontinuity is at a value no listener and no test can reach.
 inline constexpr double kBridgeMinMobilityRatio = 1.0e-9;
 
+// Below this stored energy the junction is treated as quiescent. A THRESHOLD, not an exact-zero
+// test, and the reason is that the states decay GEOMETRICALLY: a `double` reaches exact zero only by
+// underflow, ~700 dB down, which for a lightly-damped bridge mode is minutes of silence. An
+// exact-zero isQuiescent() therefore never became true in practice, which meant
+// StringNetwork::process's `live` predicate never went false again, which meant the idle-string skip
+// never fired again after the first note -- the exact "eight strings tick for ever after one note"
+// outcome the silence watchdog exists to prevent.
+//
+// The value is the bridge-side counterpart of StringNetwork's kSilenceFloor (1e-5, i.e. -100 dBFS on
+// a wave amplitude): a wave of that amplitude carries x^2/2 = 5e-11 of storage in these units, so a
+// junction holding less than that is holding less than the level at which a whole STRING is
+// declared silent and cleared. Judging it is the same class of decision, made at the same level.
+inline constexpr double kBridgeQuiescentEnergy = 5.0e-11;
+
 // Per-sample smoothing time for admittance changes, matching the 8 ms convention WaveguideString,
 // StringNetwork and DamperJunction already use. The smoothed quantities are sqrt(Z_M), sqrt(Z_K)
 // and Z_R, so sigma_total is recomputed from the SAME numbers the reflection uses and the junction
@@ -248,6 +262,12 @@ template <typename SampleT> class BridgeJunction final : public IBridgePort<Samp
     // In double regardless of SampleT. Writes nothing if `rowMajorS` is null or `maxPorts` is
     // smaller than the prepared port count. Not realtime-safe by intent (it is a test hook), though
     // it does in fact allocate nothing.
+    //
+    // NOTE the port count it uses: the PREPARED one (`lastScatterPorts()` reports what scatter() was
+    // last handed, which StringNetwork varies with its trip count). The two agree in every
+    // configuration this is called from -- the tier-1 grid prepares exactly the port count it
+    // sweeps -- and where they would not, the prepared count is the right answer for a matrix
+    // describing the junction rather than one particular block's loop.
     void copyScatteringMatrix(double* rowMajorS, int maxPorts) const;
 
     // ---- diagnostics (tests, and later cnpg_calibrate) -----------------------------------------

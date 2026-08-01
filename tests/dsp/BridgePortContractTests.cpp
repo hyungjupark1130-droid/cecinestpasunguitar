@@ -228,6 +228,124 @@ TEMPLATE_TEST_CASE("CONTRACT: IBridgePort at couplingStrength 0 is exactly the r
     REQUIRE(port.storageEnergy() == 0.0);
 }
 
+TEST_CASE("CONTRACT: BridgeJunction reaches quiescence, and decoupling releases its store", "[contract]") {
+    // THE DEFECT THIS GATES (found at the P2.4 review). isQuiescent() was an exact-zero test on
+    // states that decay GEOMETRICALLY, so in a `double` it could only become true by underflow --
+    // roughly 700 dB down, minutes of silence. Two consequences, both measured before the fix:
+    //
+    //   - StringNetwork's `bridgeMayDrive` never went false, so the idle-string skip never fired
+    //     again after the first note and energyEstimate() sat at 1.16e-05 after 107 SECONDS of
+    //     silence (a control run reached 4.29e-84);
+    //   - and in the RIGID branch it was worse than slow, it was permanent: v is identically 0
+    //     there, so the mass state merely alternates sign and the spring state never moves. Setting
+    //     couplingStrength to 0 after playing froze 0.1864 of storage indefinitely, and turning the
+    //     knob back up released it into the strings out of nothing.
+    //
+    // Both halves are asserted here, and the second one with the knob-turn that made it audible.
+    constexpr int ports = 6;
+    auto port = makePort<JunctionAdapter>(kRate, ports, 0.35f);
+
+    std::array<double, cnpg::dsp::kMaxStrings> incident{};
+    std::array<double, cnpg::dsp::kMaxStrings> outgoing{};
+    for (int n = 0; n < 4096; ++n) {
+        for (int p = 0; p < ports; ++p)
+            incident[static_cast<std::size_t>(p)] = std::sin(0.021 * n + 0.5 * p);
+        port.scatter(incident.data(), outgoing.data(), ports);
+    }
+    const double driven = port.storageEnergy();
+    REQUIRE(driven > 0.0);
+    REQUIRE_FALSE(port.isQuiescent()); // in the state this case claims to test
+
+    // (a) LOADED: silence must actually reach quiescence, in a time a player would call "the note
+    // ended" rather than in a time nobody waits.
+    incident.fill(0.0);
+    int samplesToQuiescence = -1;
+    for (int n = 0; n < static_cast<int>(20.0 * kRate); ++n) {
+        port.scatter(incident.data(), outgoing.data(), ports);
+        if (port.isQuiescent()) {
+            samplesToQuiescence = n;
+            break;
+        }
+    }
+    REQUIRE(samplesToQuiescence >= 0);
+    const double secondsToQuiescence = static_cast<double>(samplesToQuiescence) / kRate;
+    REQUIRE(secondsToQuiescence < 5.0);
+
+    // (b) RIGID: decoupling releases the store rather than freezing it, and the released junction
+    // then produces NOTHING from zero incident -- which is what "fully decoupled" has to mean.
+    auto frozen = makePort<JunctionAdapter>(kRate, ports, 0.35f);
+    for (int n = 0; n < 4096; ++n) {
+        for (int p = 0; p < ports; ++p)
+            incident[static_cast<std::size_t>(p)] = std::sin(0.021 * n + 0.5 * p);
+        frozen.scatter(incident.data(), outgoing.data(), ports);
+    }
+    const double beforeDecoupling = frozen.storageEnergy();
+    REQUIRE(beforeDecoupling > 0.0);
+
+    BridgeAdmittanceParams decoupled;
+    decoupled.couplingStrength = 0.0f;
+    frozen.setAdmittance(decoupled);
+    incident.fill(0.0);
+    // THE TRANSITION SAMPLE IS SEPARATED FROM THE REST DELIBERATELY, because it is a real
+    // discontinuity and pretending otherwise would be the wrong kind of green.
+    //
+    // Discarding a non-zero store cannot be continuous -- the outgoing wave steps from whatever the
+    // bridge was radiating to exactly zero. There is no version of this that is both "the knob
+    // disconnects the body" and "nothing steps". (Nor is the alternative continuous: the true
+    // mu -> 0 LIMIT is an infinitely heavy mass, whose state freezes rather than releasing, which is
+    // the freeze this fix exists to remove. The rigid branch is a DECISION about what the knob
+    // means, not a limit, and it is documented as one.)
+    //
+    // What is gated is that the step is bounded by the junction's own output level and happens ONCE:
+    // below kBridgeMinMobilityRatio, i.e. 1e-9 of full coupling, 180 dB under the shipping default.
+    double transitionPeak = 0.0;
+    frozen.scatter(incident.data(), outgoing.data(), ports);
+    for (int p = 0; p < ports; ++p)
+        transitionPeak = std::max(transitionPeak, std::fabs(outgoing[static_cast<std::size_t>(p)]));
+
+    double peakFromNothing = 0.0;
+    for (int n = 0; n < 200000; ++n) {
+        frozen.scatter(incident.data(), outgoing.data(), ports);
+        for (int p = 0; p < ports; ++p)
+            peakFromNothing = std::max(peakFromNothing, std::fabs(outgoing[static_cast<std::size_t>(p)]));
+    }
+
+    std::cout << "[contract] bridge quiescence: driven store " << driven << " -> quiescent after "
+              << secondsToQuiescence << " s of silence (threshold " << cnpg::dsp::kBridgeQuiescentEnergy
+              << "); decoupling released " << beforeDecoupling << " of store in ONE sample of magnitude "
+              << transitionPeak << ", after which 200 000 silent samples produced a peak outgoing wave of "
+              << peakFromNothing << "\n";
+
+    REQUIRE(frozen.storageEnergy() == 0.0);
+    REQUIRE(frozen.isQuiescent());
+    // Nothing from nothing, for ever, from the sample after the transition.
+    REQUIRE(peakFromNothing == 0.0);
+    // ...and the transition itself is bounded by what the junction was radiating, not by its stored
+    // energy: it is one sample of the signal that was already there, not an impulse.
+    REQUIRE(transitionPeak <= std::sqrt(2.0 * beforeDecoupling));
+
+    // ...and the same thing through the network, which is where it mattered: a network that has been
+    // silent must report a storage functional heading for zero rather than parked above it.
+    StringNetworkParams params;
+    params.bridge.couplingStrength = 0.35f;
+    StringNetwork<float> network;
+    network.prepare(kRate, kBlock, FractionalDelayKind::Lagrange3);
+    network.setNumStrings(6);
+    network.setParams(params);
+    network.reset();
+    BlockEventQueue events;
+    events.push(noteOn(0, 45, 0));
+    for (int b = 0; b < 200; ++b)
+        network.process(events, kBlock);
+    REQUIRE(network.energyEstimate() > 0.0);
+    BlockEventQueue silence;
+    for (int b = 0; b < static_cast<int>(30.0 * kRate / kBlock); ++b)
+        network.process(silence, kBlock);
+    const double afterSilence = network.energyEstimate();
+    std::cout << "[contract] network storage functional after 30 s of silence: " << afterSilence << "\n";
+    REQUIRE(afterSilence < 1.0e-11);
+}
+
 TEST_CASE("CONTRACT: BridgeJunction scatter is realtime-safe under a live parameter stream", "[contract]") {
     auto port = makePort<JunctionAdapter>(kRate, cnpg::dsp::kMaxStrings, 0.35f);
     cnpg::test::resetAllocationCount();
@@ -632,4 +750,106 @@ TEST_CASE("TUNING: the coupled topology's residual tuning error, measured at thr
     // Non-vacuous in the other direction too: if this ever reads exactly 0 the render stopped
     // going through the bridge.
     REQUIRE(worstCents > 0.0);
+}
+
+TEST_CASE("TUNING: the coupled residual is a function of three LIVE parameters", "[tuning]") {
+    // THE DATA TASK P2.7 STARTS FROM, and the reason its scheduled mechanism may not be the right
+    // one (P2.4 review, I1). A calibration table indexed by MIDI note can represent a residual that
+    // is a function of the NOTE. This one is a function of the note AND of three parameters the user
+    // can turn while playing -- and the sign reverses across resonance, so it is not even a matter
+    // of scaling one table. Measured here rather than argued, so P2.7's scope decision is made
+    // against numbers.
+    //
+    // This case does NOT try to solve that. It measures, prints and pins the shape.
+    constexpr int kProbeNote = 45; // where the shipping default's residual is worst
+    constexpr double kProbeRate = 48000.0;
+    constexpr double kRenderSeconds = 5.0;
+
+    auto residualCents = [&](float coupling, float resonanceHz, float damping) {
+        StringNetworkParams params;
+        params.pickupPosition01 = 0.87f;
+        params.stringMaterial.lossGainLow = 1.0f;
+        params.stringMaterial.lossGainHigh = 1.0f;
+        params.exciter.noiseAmount = 0.0f;
+        params.bridge.couplingStrength = coupling;
+        params.bridge.resonanceHz = resonanceHz;
+        params.bridge.damping = damping;
+
+        StringNetwork<float> network;
+        network.prepare(kProbeRate, 512, FractionalDelayKind::Lagrange3);
+        network.setNumStrings(1);
+        network.setParams(params);
+        network.reset();
+        REQUIRE(network.internalBridgeJunction().currentCouplingStrength() == coupling);
+
+        BlockEventQueue events;
+        events.push(noteOn(0, kProbeNote, 0));
+        std::vector<double> tap;
+        const auto total = static_cast<std::size_t>(kRenderSeconds * kProbeRate);
+        tap.reserve(total);
+        while (tap.size() < total) {
+            network.process(events, 512);
+            const float* channel = network.tapBuffers().channel(0, 0);
+            for (int n = 0; n < 512 && tap.size() < total; ++n)
+                tap.push_back(static_cast<double>(channel[n]));
+        }
+        REQUIRE(network.unbridgedTicks() == 0);
+        const auto discard = static_cast<std::size_t>(0.5 * kProbeRate);
+        std::vector<double> analysis(tap.begin() + static_cast<std::ptrdiff_t>(discard), tap.end());
+        const double target = cnpg::test::midiNoteToHz(kProbeNote);
+        const double measured =
+            cnpg::test::findPeakHz(cnpg::test::computeSpectrum(analysis, kProbeRate), target, 120.0);
+        REQUIRE(measured > 0.0);
+        return cnpg::test::centsBetween(measured, target);
+    };
+
+    const auto defaults = StringNetworkParams{}.bridge;
+    std::cout << "[tuning] the coupled residual against each LIVE parameter (MIDI " << kProbeNote << ", " << kProbeRate
+              << " Hz) -- data for Task P2.7:\n";
+
+    std::cout << "  couplingStrength (resonance " << defaults.resonanceHz << ", damping " << defaults.damping << "):";
+    double atZeroCoupling = 0.0;
+    double atFullCoupling = 0.0;
+    for (float coupling : {0.0f, 0.35f, 1.0f}) {
+        const double cents = residualCents(coupling, defaults.resonanceHz, defaults.damping);
+        std::cout << "  " << coupling << " -> " << cents << " cents;";
+        if (coupling == 0.0f)
+            atZeroCoupling = cents;
+        if (coupling == 1.0f)
+            atFullCoupling = cents;
+    }
+    std::cout << "\n";
+
+    std::cout << "  resonanceHz (coupling " << defaults.couplingStrength << ", damping " << defaults.damping << "):";
+    double lowestResonance = 0.0;
+    double highestResonance = 0.0;
+    for (float resonance : {80.0f, 110.0f, 180.0f, 2000.0f}) {
+        const double cents = residualCents(defaults.couplingStrength, resonance, defaults.damping);
+        std::cout << "  " << resonance << " Hz -> " << cents << " cents;";
+        if (resonance == 80.0f)
+            lowestResonance = cents;
+        if (resonance == 2000.0f)
+            highestResonance = cents;
+    }
+    std::cout << "\n";
+
+    std::cout << "  damping (coupling " << defaults.couplingStrength << ", resonance " << defaults.resonanceHz << "):";
+    for (float damping : {0.01f, 0.5f, 10.0f}) {
+        const double cents = residualCents(defaults.couplingStrength, defaults.resonanceHz, damping);
+        std::cout << "  " << damping << " -> " << cents << " cents;";
+    }
+    std::cout << "\n";
+
+    // THE SHAPE, pinned. A note-indexed table can absorb a residual that depends on the note; these
+    // three assertions are the statement that this one does not depend only on the note.
+    REQUIRE(std::fabs(atZeroCoupling) < 0.5); // decoupled: the analytic solve is exact
+    REQUIRE(std::fabs(atFullCoupling) > 2.0 * std::fabs(atZeroCoupling) + 5.0); // and it grows with coupling
+    // ...and the SIGN REVERSES across resonance, which is the part no single correction curve
+    // indexed by note can represent.
+    REQUIRE(lowestResonance * highestResonance < 0.0);
+    std::cout << "  SHAPE: the residual is 0 when decoupled, grows with coupling, and REVERSES SIGN across the "
+                 "resonance sweep ("
+              << lowestResonance << " cents at 80 Hz vs " << highestResonance
+              << " cents at 2000 Hz) -- so it is not a function of the MIDI note alone, which is what a "
+                 "note-indexed calibration table can represent. Task P2.7 scope question, surfaced not solved.\n";
 }

@@ -538,16 +538,32 @@ TEST_CASE("ENERGY/T3: the loop-loss filter's storage weight really is a storage 
     // f(p) = -B^2 p^2 + K p - 1, which has a non-negative branch only when K^2 >= 4 B^2; if that
     // branch is empty, the vertex is still returned and is NOT a storage function, so
     // energyEstimate() stops being a Lyapunov function and tier 3 gates nothing. The closed form is
-    // in dsp/src/WaveguideString.cpp; re-typing it here would prove nothing, so this case instead
-    // checks the DISSIPATION INEQUALITY the weight is supposed to satisfy, directly, over the whole
-    // shipping parameter range:
+    // in dsp/src/WaveguideString.cpp; re-typing it here would prove nothing, so this case checks
+    // the DISSIPATION INEQUALITY the weight is supposed to satisfy, over the whole shipping
+    // parameter range, for the state-space (A, B, C, D) = (a1, a1 b0 + b1, 1, b0) it was derived
+    // for. The coefficients come out of the shipped string via lossStorageProbe(), so this is a
+    // check of what the audio path is actually running.
     //
-    //     p (a1 s + (a1 b0 + b1) x)^2  -  p s^2   <=   x^2 - (s + b0 x)^2
+    // EXACTLY, NOT BY SAMPLING (P2.4 review, M1). The inequality
     //
-    // for the state-space (A, B, C, D) = (a1, a1 b0 + b1, 1, b0) the storage was derived for. The
-    // coefficients come out of the shipped string via lossStorageProbe(), so this is a check of
-    // what the audio path is actually running.
-    double worstViolation = -1.0e300;
+    //     p (a1 s + B x)^2 - p s^2  <=  x^2 - (s + b0 x)^2 ,   B = a1 b0 + b1
+    //
+    // is a homogeneous quadratic form in (s, x), so "holds for all (s, x)" is exactly "the 2x2
+    // matrix is positive semidefinite" -- two scalar conditions, not a vote among probe directions.
+    // The first draft sampled 24 directions, which can only ever say "it did not fail HERE": a form
+    // that is indefinite along a direction between two probes passes it. This is the ONLY gate
+    // covering lossStorage_, so it is worth the three lines. Written out, with
+    // Q = [[q_ss, q_sx], [q_sx, q_xx]] the matrix of (supply - dissipation):
+    //
+    //     q_ss = p (1 - a1^2) - 1
+    //     q_sx = -(p a1 B + b0)
+    //     q_xx = 1 - b0^2 - p B^2
+    //
+    // and PSD <=> q_ss >= 0 and q_xx >= 0 and det Q = q_ss q_xx - q_sx^2 >= 0. Both the determinant
+    // and the smaller eigenvalue are reported, because "the determinant is positive" alone would
+    // also be satisfied by a NEGATIVE definite form.
+    double smallestDeterminant = 1.0e300;
+    double smallestEigenvalue = 1.0e300;
     double worstAt[4] = {0.0, 0.0, 0.0, 0.0};
     int points = 0;
     double smallestWeight = 1.0e300;
@@ -579,39 +595,53 @@ TEST_CASE("ENERGY/T3: the loop-loss filter's storage weight really is a storage 
                     largestWeight = std::max(largestWeight, probe.storageWeight);
 
                     const double bb = probe.a1 * probe.b0 + probe.b1;
-                    double localWorst = -1.0e300;
-                    for (double s : {-1.0, -0.37, 0.0, 0.21, 1.0}) {
-                        for (double x : {-1.0, -0.53, 0.0, 0.11, 1.0}) {
-                            if (s == 0.0 && x == 0.0)
-                                continue; // the trivial point: slack is exactly 0 for ANY weight
-                            const double y = s + probe.b0 * x;
-                            const double next = probe.a1 * s + bb * x;
-                            // supply - dissipation: must be >= 0 for a valid storage.
-                            const double slack =
-                                (x * x - y * y) - (probe.storageWeight * next * next - probe.storageWeight * s * s);
-                            localWorst = std::max(localWorst, -slack);
-                        }
-                    }
-                    if (localWorst > worstViolation) {
-                        worstViolation = localWorst;
+                    const double p = probe.storageWeight;
+                    const double qss = p * (1.0 - probe.a1 * probe.a1) - 1.0;
+                    const double qsx = -(p * probe.a1 * bb + probe.b0);
+                    const double qxx = 1.0 - probe.b0 * probe.b0 - p * bb * bb;
+                    const double determinant = qss * qxx - qsx * qsx;
+                    // Smaller eigenvalue of a symmetric 2x2, in closed form. Reported alongside the
+                    // determinant because a positive determinant is also consistent with a NEGATIVE
+                    // definite form, which would be the exact opposite of a storage function.
+                    const double halfTrace = 0.5 * (qss + qxx);
+                    const double radius = std::sqrt(std::max(0.0, halfTrace * halfTrace - determinant));
+                    const double lambdaMin = halfTrace - radius;
+
+                    INFO("rate " << sampleRate << " lossLow " << knobLow << " lossHigh " << knobHigh << " note "
+                                 << midiNote << ": q = [[" << qss << ", " << qsx << "], [" << qsx << ", " << qxx
+                                 << "]], det " << determinant << ", lambda_min " << lambdaMin);
+                    // POSITIVE SEMIDEFINITE, exactly: both diagonal entries non-negative and the
+                    // determinant non-negative. Equivalent to "the dissipation inequality holds for
+                    // EVERY (s, x)", which is what a storage function has to mean.
+                    REQUIRE(qss >= 0.0);
+                    REQUIRE(qxx >= 0.0);
+                    REQUIRE(determinant >= 0.0);
+                    REQUIRE(lambdaMin >= 0.0);
+                    if (determinant < smallestDeterminant) {
+                        smallestDeterminant = determinant;
                         worstAt[0] = sampleRate;
                         worstAt[1] = static_cast<double>(knobLow);
                         worstAt[2] = static_cast<double>(knobHigh);
                         worstAt[3] = static_cast<double>(midiNote);
                     }
-                    REQUIRE(localWorst <= 1.0e-9);
+                    smallestEigenvalue = std::min(smallestEigenvalue, lambdaMin);
                     ++points;
                 }
             }
         }
     }
 
-    std::cout << "[energy] T3 lossStorageWeight validity (carry-forward B6): the dissipation inequality holds at all "
-              << points << " (rate x lossLow x lossHigh x note) points; worst violation " << worstViolation
-              << " (negative means slack), at " << worstAt[0] << " Hz, knobs " << worstAt[1] << "/" << worstAt[2]
-              << ", MIDI " << worstAt[3] << "; p ranged " << smallestWeight << " .. " << largestWeight << "\n";
+    std::cout << "[energy] T3 lossStorageWeight validity (carry-forward B6): the supply-minus-dissipation form is "
+              << "positive semidefinite -- i.e. the inequality holds for EVERY (s, x), not merely at sampled "
+              << "directions -- at all " << points << " (rate x lossLow x lossHigh x note) points. Smallest "
+              << "determinant " << smallestDeterminant << " at " << worstAt[0] << " Hz, knobs " << worstAt[1] << "/"
+              << worstAt[2] << ", MIDI " << worstAt[3] << "; smallest eigenvalue " << smallestEigenvalue
+              << "; p ranged " << smallestWeight << " .. " << largestWeight << "\n";
 
     // Non-vacuous: the probe must have exercised a range of filters, not one.
     REQUIRE(largestWeight > smallestWeight);
-    REQUIRE(worstViolation < 0.0); // strictly inside the feasible region everywhere, not on its edge
+    // Strictly INSIDE the feasible region everywhere, not on its edge -- a form that were merely
+    // semidefinite would make the storage marginal rather than strict.
+    REQUIRE(smallestDeterminant > 0.0);
+    REQUIRE(smallestEigenvalue > 0.0);
 }

@@ -588,6 +588,15 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             const bool live = !muted && (sounding_[index] || releasing_[index] || ringing_[index] ||
                                          exciters[index].isActive() || bridgeMayDrive);
             if (!live) {
+                // M2 (P2.4 review), stated where it happens: a string that is in the trip count but
+                // not live presents a ZERO incident wave while still occupying a port, and a port
+                // presenting zero is a PERFECT ABSORBER -- the junction hands it b = v and that
+                // energy is discarded, because the string is not ticked and never accepts it. So
+                // the bridge's effective damping depends on how many strings are currently idle or
+                // disabled: six live strings load it differently from one live and five muted.
+                // That is passive (energy only ever leaves) and it is not a defect, but it IS an
+                // audible coupling between the string count and the instrument's decay, and P2.6
+                // and the P2.8 listening pass should both know it is there.
                 for (int t = 0; t < numTaps; ++t)
                     tapBase[(base + static_cast<std::size_t>(t)) * stride + static_cast<std::size_t>(n)] = SampleT(0);
                 portIncident_[index] = SampleT(0); // presents no incident wave at its bridge slot
@@ -642,9 +651,10 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             const SampleT outgoing = strings[index].railOutgoingAtBridge();
             // B5 (P2.1): a disabled or ramping string presents its bridge incident wave SCALED by
             // the enable gain, so it reaches exactly zero only once fully muted. The reflection is
-            // scaled by the same gain on the way back (see the accept pass below), which is what
-            // keeps the muting passive: a round trip through the junction is scaled by gain^2 <= 1,
-            // whereas dividing the reflection back out would make a half-muted string an amplifier.
+            // handed back UNSCALED -- see the accept pass below for why one factor of gain is both
+            // sufficient for passivity and the right amount. (This comment claimed the opposite
+            // until the review caught it: it still described the two-factor version that measurement
+            // rejected.)
             portIncident_[index] = outgoing * static_cast<SampleT>(gain);
 
             // "This string carries motion", whether or not anyone played it. Latched here because

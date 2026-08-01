@@ -25,7 +25,11 @@ std::string scenarioFileName(int midiNote) {
 
 const char* chordChannelName(ChordIrChannel channel) { return channel == ChordIrChannel::Tap ? "tap" : "bridge"; }
 
-std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote) {
+namespace {
+// One implementation, two captured channels -- so the bridge features can never describe a
+// different render from the one the tap golden froze.
+std::vector<double> renderStringIrChannel(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote,
+                                          bool bridgeChannel) {
     // docs/plan.md section 4.3: "a single-string StringNetwork (1 active string, damper
     // transparent, default BridgeAdmittanceParams)". The damper is transparent because nothing
     // engages it; the bridge admittance is the shipping default, which from Task P2.4 is a LOADED
@@ -61,11 +65,20 @@ std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double s
     while (out.size() < count) {
         const auto wanted = static_cast<int>(std::min<std::size_t>(kStringIrBlockSize, count - out.size()));
         network.process(events, wanted);
-        const float* channel = network.tapBuffers().channel(0, 0);
+        const float* channel = bridgeChannel ? network.bridgeOutputBuffer() : network.tapBuffers().channel(0, 0);
         for (int n = 0; n < wanted; ++n)
             out.push_back(static_cast<double>(channel[n]));
     }
     return out;
+}
+} // namespace
+
+std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote) {
+    return renderStringIrChannel(kind, sampleRate, midiNote, false);
+}
+
+std::vector<double> renderStringIrBridge(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote) {
+    return renderStringIrChannel(kind, sampleRate, midiNote, true);
 }
 
 std::vector<double> renderChordIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, ChordIrChannel channel) {

@@ -1,5 +1,6 @@
 #include "support/GoldenIo.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -129,6 +130,21 @@ std::filesystem::path chordGoldenJsonPath(cnpg::dsp::FractionalDelayKind kind, d
     return chordDirectory(kind, sampleRate) / (chordFileName(channel) + ".json");
 }
 
+std::string checksumF64(const std::vector<double>& samples) {
+    // FNV-1a, 64-bit. Chosen for being three lines and reproducible from any language, not for
+    // cryptographic strength -- what it has to detect is "a sample changed", not an adversary.
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto* bytes = reinterpret_cast<const unsigned char*>(samples.data());
+    const std::size_t count = samples.size() * sizeof(double);
+    for (std::size_t i = 0; i < count; ++i) {
+        hash ^= static_cast<std::uint64_t>(bytes[i]);
+        hash *= 1099511628211ull;
+    }
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(hash));
+    return std::string(buffer);
+}
+
 bool readGoldenF64(const std::filesystem::path& path, std::vector<double>& out) {
     std::ifstream file(path, std::ios::binary);
     if (!file)
@@ -180,6 +196,9 @@ bool readGoldenSidecar(const std::filesystem::path& path, GoldenSidecar& out) {
     readDouble(text, "attackRmsDbfs", out.features.attackRmsDbfs);
     readArray(text, "partialHz", out.features.partialHz);
     readArray(text, "bandT60Seconds", out.features.bandT60);
+    readDouble(text, "bridgeAttackRmsDbfs", out.bridgeFeatures.attackRmsDbfs);
+    readArray(text, "bridgeBandT60Seconds", out.bridgeFeatures.bandT60);
+    findValue(text, "bridgeChecksum", out.bridgeChecksum);
     return true;
 }
 
@@ -214,8 +233,18 @@ void writeGoldenSidecar(const std::filesystem::path& path, const GoldenSidecar& 
     {
         char buffer[512];
         std::snprintf(buffer, sizeof(buffer), "%.8g", sidecar.features.attackRmsDbfs);
-        file << "  \"attackRmsDbfs\": " << buffer << "\n";
+        file << "  \"attackRmsDbfs\": " << buffer << ",\n";
     }
+    // The BRIDGE channel at layer-(a) resolution plus a checksum (schema v3) -- see GoldenIo.h.
+    // Written unconditionally so every sidecar has the same field set; the chord scenario, whose
+    // bridge channel IS captured as a full .f64, leaves these at their defaults.
+    writeArray(file, "bridgeBandT60Seconds", sidecar.bridgeFeatures.bandT60, 8);
+    {
+        char buffer[512];
+        std::snprintf(buffer, sizeof(buffer), "%.8g", sidecar.bridgeFeatures.attackRmsDbfs);
+        file << "  \"bridgeAttackRmsDbfs\": " << buffer << ",\n";
+    }
+    file << "  \"bridgeChecksum\": \"" << sidecar.bridgeChecksum << "\"\n";
     file << "}\n";
 }
 

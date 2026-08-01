@@ -535,6 +535,25 @@ TEST_CASE("TUNING: a per-string tuning offset detunes exactly one string of a un
               << ") -- one coupled system with shared normal modes, which is why the gate above runs decoupled\n";
     REQUIRE(coupledAHz > 0.0);
     REQUIRE(coupledBHz > 0.0);
+
+    // MODE LOCKING, as a measured and gated fact rather than an anecdote (P2.4 review). Two strings
+    // 25 cents apart on a shared bridge PULL TOGETHER -- the other half of Weinreich's result -- so
+    // both taps report one frequency between the two nominals, and the string that was NOT offset is
+    // dragged off its own nominal by far more than the whole decoupled error budget. That is the
+    // part a player would notice, and it is why this is a listening question and not only a number.
+    const double pullOnPlain = cnpg::test::centsBetween(coupledAHz, nominalHz);
+    const double pullOnDetuned = cnpg::test::centsBetween(coupledBHz, detunedNominalHz);
+    const double coupledSeparation = cnpg::test::centsBetween(coupledBHz, coupledAHz);
+    std::cout << "[tuning] MODE LOCKING at couplingStrength " << coupledParams.bridge.couplingStrength
+              << ": the unoffset string is pulled " << pullOnPlain << " cents off its nominal, the offset one "
+              << pullOnDetuned << " cents off its own; measured separation " << coupledSeparation << " cents against "
+              << kOffsetCents
+              << " cents dialled in. *** P2.8 LISTENING ITEM: does a unison-adjacent voicing sound "
+                 "locked? ***\n";
+    // The separation really collapses...
+    REQUIRE(std::fabs(coupledSeparation) < 0.5 * static_cast<double>(kOffsetCents));
+    // ...and the pull lands on the string nobody detuned.
+    REQUIRE(std::fabs(pullOnPlain) > kToleranceCents);
 }
 
 // ---------------------------------------------------------------------------------------------

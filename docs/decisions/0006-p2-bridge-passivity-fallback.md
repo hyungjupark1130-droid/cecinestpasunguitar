@@ -65,9 +65,34 @@ choice"):
   shorter above — which is what ADR 0004 means by shipping the chamber as a continuum rather than a
   toggle.
 - Its cost in tuning is bounded and known: the load's phase response pulls partials near the bridge
-  resonance by at most **4.85 cents** across MIDI 33–96 at all three sample rates (measured;
-  `tests/dsp/BridgePortContractTests.cpp`). That is inside what Task P2.7's calibration table is
-  scheduled to absorb, and outside what a listener notices as mistuning.
+  resonance by at most **4.90 cents** across MIDI 33–96 at all three sample rates (measured;
+  `tests/dsp/WaveguideStringTuningTests.cpp` and `tests/dsp/BridgePortContractTests.cpp`).
+
+### D1a — the tuning residual is NOT something a note-indexed calibration table can absorb
+
+*(Added 2026-08-01 after the P2.4 review. The original text of D1 claimed the residual sat "inside
+what Task P2.7's calibration table is scheduled to absorb". That is true only at the frozen default
+admittance, and stating it without that qualifier misrepresents what P2.7 inherits.)*
+
+The residual is a function of three **live APVTS parameters**, not of the MIDI note alone. Measured
+at MIDI 45 / 48 kHz (`TUNING: the coupled residual is a function of three LIVE parameters`):
+
+| swept parameter | values | residual |
+|---|---|---|
+| `couplingStrength` | 0.00 / 0.35 / 1.00 | 0.000 / −4.855 / −14.056 cents |
+| `resonanceHz` | 80 / 110 / 180 / 2000 Hz | +4.461 / +0.001 / −4.855 / −0.527 cents |
+| `damping` | 0.01 / 0.50 / 10.0 | −0.188 / −4.855 / −0.494 cents |
+
+**The sign reverses across resonance**, and all three parameters are user-reachable while playing. A
+table indexed by MIDI note can represent a residual that is a function of the note; it structurally
+cannot represent one that also depends on three continuous controls and changes sign along one of
+them.
+
+Task P2.4 deliberately does **not** solve this — it measures it, prints it, and pins the shape with
+an assertion, so that P2.7's scope decision is made against numbers. The options P2.7 faces (a
+parameter-dependent correction, a restricted admittance range, or accepting a documented residual
+and re-scoping the ±2-cent gate) are a design question for the author, not an implementation
+detail, and the plan's §4.5 amendment records it as a binding entry condition on that task.
 
 `kBridgeMaxMobilityRatio = 0.05` is the design constant behind the knob's top end. It is set so that
 `couplingStrength = 1` is *strongly* coupled without being a matched termination: at `mu = 0.05` a
@@ -110,8 +135,18 @@ fallback bus would inherit by adding one line.
   terminates on a loaded bridge, which changes both the waveform and the band T60s.
 - A sixth golden scenario, `chord_ir`, was added — the 6-string open-E chord on both the summed tap
   channel and `bridgeOutputBuffer()` — because inter-string coupling appears in no other scenario.
-- Task P2.7 inherits a measured, bounded tuning residual (≤ 4.85 cents) rather than an unmeasured
-  one, and inherits it *without* the bridge seam's own sample, which the loop-length solve already
-  subtracts.
+- Task P2.7 inherits a measured, bounded tuning residual (≤ 4.90 cents at the default admittance)
+  rather than an unmeasured one, and inherits it *without* the bridge seam's own sample, which the
+  loop-length solve already subtracts — **plus the open scope question in D1a**.
+- The `[tuning]` suite renders the shipping coupled topology from this task on. Its P1 analytic cases
+  assert a documented ±12 cent sanity bound and report; the ±2-cent criterion binds P2.7's
+  calibration-table case, as plan §4.5 already assigned it. Recorded as an amendment in both plan
+  copies.
+- **Mode locking is a new audible behaviour**, not only a measurement one: two strings 25 cents apart
+  on the shared bridge pull together, and the string that was *not* detuned is dragged **+20.29
+  cents** off its own nominal while the measured separation collapses from 25 cents to 0.003. It is
+  gated in `TUNING: a per-string tuning offset…` and is on the P2.8 listening checklist as its own
+  item, because whether a unison-adjacent voicing sounds like an instrument or like a bug is an ear
+  question.
 - `SympatheticResonatorBus` is **not** built. If a later phase wants a one-way colour path it is
   still available at the same seam, but it is no longer a contingency.

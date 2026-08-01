@@ -347,8 +347,6 @@ struct CoupledRender {
     unsigned long long unbridgedTicks = 0;
     bool silentStringReportedActive = false;
     float couplingInForce = -1.0f;
-    float f0OfString0 = 0.0f;
-    float f0OfString1 = 0.0f;
 };
 
 struct RenderSpec {
@@ -404,7 +402,6 @@ CoupledRender renderCoupled(const RenderSpec& spec) {
             out.bridge.push_back(static_cast<double>(network.bridgeOutputBuffer()[n]));
         if (!firstBlockDone) {
             out.energyOfSilentStringAfterFirstBlock = network.stringEnergyEstimate(1);
-            out.f0OfString0 = 0.0f;
             firstBlockDone = true;
         }
         if (network.tapBuffers().isActive(1))
@@ -797,14 +794,19 @@ TEST_CASE("CoupledStrings: a coupled unison pair decays in two stages", "[contra
     //   difference = residual(single) - residual(twin) >= 6 dB
     //
     // requires residual(single) >= 6 dB, since residual(twin) >= 0. residual(single) is the RMS
-    // dB error of the BEST straight line through a log-decay curve that bends once. Its size is set
-    // by how far the curve departs from that line, and the sweep printed above shows it saturating
-    // at ~3.5 dB and then FALLING as the span widens -- past the knee the slow mode is a straight
-    // line again and the extra points are fitted well, so widening the measurement cannot buy the
-    // missing 2.5 dB. Making the effect STRONGER does not help either: a sharper knee moves the
-    // curve further from a line but also concentrates the misfit into a shorter stretch of it, and
-    // the RMS is taken over the whole span. There is no configuration of a two-stage decay in which
-    // a one-exponential RMS-dB residual reaches 6 dB while remaining a two-stage decay.
+    // dB error of the BEST straight line through a log-decay curve that bends once, and that is
+    // bounded BY THE SPAN: the worst case is a curve that is two straight segments, whose best
+    // single line has RMS error 0.1875 x (span in dB). At the -1 .. -30 dB span this case fits, the
+    // ceiling is 5.44 dB -- strictly under 6, so the difference reading cannot be met here at all.
+    // The measured sweep printed above agrees and is well under the ceiling (~3.5 dB), saturating
+    // and then FALLING as the span widens, because past the knee the slow mode is a straight line
+    // again and the extra points are fitted well.
+    //
+    // The claim is scoped to the span DELIBERATELY. 0.1875 x span reaches 6 dB at a 32 dB span, so
+    // "unreachable for any two-stage decay" would be over-stated; what is true is that it is
+    // unreachable at any span this project's conventions license -- bandT60Seconds fits -5 .. -25,
+    // this case fits -1 .. -30, and section 4.3's layer (a) uses the same family. (Corrected after
+    // the P2.4 review derived the ceiling independently.)
     //
     // SUBSTITUTED, and strictly stronger than what the difference reading would have gated:
     //   (1) the residual RATIO, which is the scale-free form of "beats by N dB" and the one that
@@ -812,8 +814,16 @@ TEST_CASE("CoupledStrings: a coupled unison pair decays in two stages", "[contra
     //       >= 6 dB, i.e. the two-exponential fit is at least twice as accurate. Measured 25 dB.
     //   (2) the single-exponential fit must be wrong by >= 6 dB SOMEWHERE (peak error), which is the
     //       plain-language claim "a single exponential does not describe this decay" as an ABSOLUTE
-    //       statement rather than a relative one. Measured 8.6 dB.
-    //   (3) the rate separation the criterion also names, unchanged at >= 2x. Measured 6.3x.
+    //       statement rather than a relative one. Measured 10.14 dB.
+    //   (3) the rate separation the criterion also names, unchanged at >= 2x. Measured 6.30x.
+    //
+    // CONJUNCT (2) IS SPAN-SENSITIVE, and the span is therefore a load-bearing constant rather than
+    // a formatting choice: at -1 .. -20 dB the same coupled pair reads a peak error of 0.97 dB and
+    // this gate would FAIL, because 20 dB of curve is not enough to contain the knee. The span is
+    // -1 .. -30 dB for that reason and for one more -- it is the shallowest span that does contain
+    // it, and going deeper (see the printed sweep) buys nothing but noise-floor. It is deliberately
+    // NOT bandT60Seconds' -5 .. -25 dB: that window is chosen to measure ONE slope robustly, which
+    // is the opposite of what this case needs.
     // The three MUST be a conjunction, and the single-string control is what proves it: the control
     // clears (1) at 21.8 dB, because a scale-free ratio does not care that BOTH of its residuals
     // are 0.01 dB -- a very well fitted curve fitted slightly better still improves by a large

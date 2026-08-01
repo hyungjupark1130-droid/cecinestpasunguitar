@@ -61,6 +61,19 @@ report deliberately did not answer them.
 | 11 | **Silence hygiene** | Gaps between phrases decay to digital silence. No denormal fizz, no stuck resonance, no low-level hum or DC thump at note boundaries. | P1 |
 | 12 | **Abuse survival** | Nothing in phrases 04–07 produces NaN blasts, stuck notes, or level runaways. Coloration under the drive sweep stays smooth and stable — see the RC2 note above for what this item does *not* ask. | P1 |
 
+### Items added after the locked P1 set
+
+These are not in `docs/plan.md` section 4.8's list of twelve. They were added when the task that
+created the behaviour also created a question a measurement cannot answer, and each names the task
+that added it. First judged at the P2 listening pass (Task P2.8).
+
+| # | Item | What to listen for | Added by |
+|---|---|---|---|
+| 13 | **Slow pickup automation continuity** | The effective read position is hysteretically quantised to ~1/32 of the string, so a slow pickup sweep moves the comb in ~32 discrete crossfaded steps rather than continuously. Does it sound continuous, or stepped? | P2.3 |
+| 14 | **Sympathetic resonance** | Hold a low note, play staccato notes on other strings: the held string should shimmer sympathetically. Raise `Bridge Coupling` and it should get brighter and more coupled — and shorter. Is the shipping default (0.35) the right amount of instrument, or does it want more or less? | P2.4 |
+| 15 | **Unison-adjacent voicings and mode locking** | Two strings a few cents apart on a shared bridge PULL TOGETHER: at the shipping coupling a 25-cent detune collapses to a measured 0.003 cents of separation, and the string that was *not* detuned is dragged +20.3 cents off its own nominal. That is real coupled-string physics (Weinreich) and it is also, potentially, an instrument that will not stay where the tuner put it. Play a deliberately spread unison and a close voicing: does it sound like a real instrument locking, or like a bug? | P2.4 |
+| 16 | **String count and decay** | A string that is disabled or idle presents a zero wave at its bridge port, which makes it a perfect absorber there — so the bridge's effective damping depends on how many strings are switched on. Does changing the string count audibly change the decay of the strings that stay? | P2.4 |
+
 ## Which P1 phrase is the evidence for which item
 
 | Item | Primary evidence in the P1 corpus |
