@@ -151,15 +151,28 @@ void PickupTap::process(const StringTapBuffers<Sample>& taps, Sample* out, int n
     if (count <= 0)
         return;
 
+    // (string, tap), not string: the boundary carries taps.numTaps() spatial taps per string from
+    // Task P2.1 (docs/decisions/0004-phase2-vision-decisions.md D1), and reading only tap 0 would
+    // silently drop a second coil the day one exists. numTaps() is 1 through P2.1, so this loop
+    // sums exactly one tap per active string and no output sample moves.
+    //
+    // Summing is the right combination for the arity that exists (one tap) and for the one it was
+    // widened for (two coils in series). Per-coil polarity, spacing and aperture -- the terms that
+    // turn a second tap into an actual humbucker rather than a doubled copy -- belong to the task
+    // that adds them, and will weight this sum rather than replace it.
     const int numStrings = taps.numStrings();
-    std::array<const Sample*, kMaxStrings> channels{};
+    const int numTaps = taps.numTaps();
+    std::array<const Sample*, static_cast<std::size_t>(kMaxStrings) * static_cast<std::size_t>(kMaxTapsPerString)>
+        channels{};
     int activeCount = 0;
     for (int s = 0; s < numStrings && s < kMaxStrings; ++s) {
         if (!taps.isActive(s))
             continue;
-        const Sample* channel = taps.channel(s);
-        if (channel != nullptr)
-            channels[static_cast<std::size_t>(activeCount++)] = channel;
+        for (int t = 0; t < numTaps && t < kMaxTapsPerString; ++t) {
+            const Sample* channel = taps.channel(s, t);
+            if (channel != nullptr)
+                channels[static_cast<std::size_t>(activeCount++)] = channel;
+        }
     }
 
     for (int n = 0; n < count; ++n) {

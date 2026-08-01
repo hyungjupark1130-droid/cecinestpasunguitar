@@ -109,7 +109,7 @@ TailRender renderDecayTail(bool timed) {
         // from the start.
         const auto& taps = network.tapBuffers();
         for (int s = 0; s < kNumStrings; ++s) {
-            const float* channel = taps.channel(s);
+            const float* channel = taps.channel(s, 0);
             for (int n = 0; n < kBlockSize; ++n) {
                 result.allFinite &= std::isfinite(channel[n]);
                 if (block < firstSecondBlocks)
@@ -124,7 +124,7 @@ TailRender renderDecayTail(bool timed) {
 
     const auto& taps = network.tapBuffers();
     for (int s = 0; s < kNumStrings; ++s) {
-        const float* channel = taps.channel(s);
+        const float* channel = taps.channel(s, 0);
         result.finalTaps.insert(result.finalTaps.end(), channel, channel + kBlockSize);
     }
     result.finalBridge.assign(network.bridgeOutputBuffer(), network.bridgeOutputBuffer() + kBlockSize);

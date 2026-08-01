@@ -59,7 +59,7 @@ std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double s
     while (out.size() < count) {
         const auto wanted = static_cast<int>(std::min<std::size_t>(kStringIrBlockSize, count - out.size()));
         network.process(events, wanted);
-        const float* channel = network.tapBuffers().channel(0);
+        const float* channel = network.tapBuffers().channel(0, 0);
         for (int n = 0; n < wanted; ++n)
             out.push_back(static_cast<double>(channel[n]));
     }

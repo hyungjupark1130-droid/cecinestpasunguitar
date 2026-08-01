@@ -33,10 +33,13 @@ double midiNoteToHz(int midiNote) noexcept { return 440.0 * std::exp2((static_ca
 // StringTapBuffers
 // ------------------------------------------------------------------------------------------
 
-template <typename SampleT> const SampleT* StringTapBuffers<SampleT>::channel(int stringIndex) const noexcept {
-    if (base_ == nullptr || stringIndex < 0 || stringIndex >= numStrings_)
+template <typename SampleT>
+const SampleT* StringTapBuffers<SampleT>::channel(int stringIndex, int tapIndex) const noexcept {
+    if (base_ == nullptr || stringIndex < 0 || stringIndex >= numStrings_ || tapIndex < 0 || tapIndex >= numTaps_)
         return nullptr;
-    return base_ + static_cast<std::ptrdiff_t>(stringIndex) * static_cast<std::ptrdiff_t>(stride_);
+    const auto slot = static_cast<std::ptrdiff_t>(stringIndex) * static_cast<std::ptrdiff_t>(kMaxTapsPerString) +
+                      static_cast<std::ptrdiff_t>(tapIndex);
+    return base_ + slot * static_cast<std::ptrdiff_t>(stride_);
 }
 
 template <typename SampleT> bool StringTapBuffers<SampleT>::isActive(int stringIndex) const noexcept {
@@ -46,6 +49,8 @@ template <typename SampleT> bool StringTapBuffers<SampleT>::isActive(int stringI
 }
 
 template <typename SampleT> int StringTapBuffers<SampleT>::numStrings() const noexcept { return numStrings_; }
+
+template <typename SampleT> int StringTapBuffers<SampleT>::numTaps() const noexcept { return numTaps_; }
 
 template <typename SampleT> int StringTapBuffers<SampleT>::numSamples() const noexcept { return numSamples_; }
 
@@ -71,11 +76,17 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
         portImpedance_[static_cast<std::size_t>(s)] = strings_[static_cast<std::size_t>(s)].portImpedance();
     }
 
-    tapStorage_.assign(static_cast<std::size_t>(kMaxStrings) * static_cast<std::size_t>(maxBlockSize_), SampleT(0));
+    // (string, tap, sample): kMaxStrings * kMaxTapsPerString runs of maxBlockSize_, all of them
+    // preallocated regardless of how many strings or taps are active, for the same reason the rails
+    // are -- setNumStrings() and setNumTapsPerString() are realtime-safe and must never allocate.
+    tapStorage_.assign(static_cast<std::size_t>(kMaxStrings) * static_cast<std::size_t>(kMaxTapsPerString) *
+                           static_cast<std::size_t>(maxBlockSize_),
+                       SampleT(0));
     bridgeBuffer_.assign(static_cast<std::size_t>(maxBlockSize_), SampleT(0));
 
     positionSmoothingCoeff_ = 1.0 - std::exp(-1.0 / (kPositionSmoothingSeconds * sampleRate_));
     releaseCoeff_ = static_cast<float>(std::exp(-1.0 / (kReleaseTimeConstantSeconds * sampleRate_)));
+    enableRampStep_ = static_cast<float>(1.0 / std::max(1.0, kEnableRampSeconds * sampleRate_));
 
     if (port_ == nullptr)
         port_ = &internalPort_;
@@ -108,21 +119,61 @@ template <typename SampleT> void StringNetwork<SampleT>::reset() noexcept {
     std::fill(bridgeBuffer_.begin(), bridgeBuffer_.end(), SampleT(0));
     tapView_ = StringTapBuffers<SampleT>{};
 
-    // Snap the position smoother onto its target, matching WaveguideString::reset(): a reset
-    // instance must be indistinguishable from a freshly prepared one.
-    pickupSmoothed_ = pickupTarget_;
+    // Snap every position smoother and every enable ramp onto its target, matching
+    // WaveguideString::reset(): a reset instance must be indistinguishable from a freshly prepared
+    // one. That includes collapsing a pending count reduction -- nothing is ringing for a ramp to
+    // protect any more, so the trip count IS the requested count.
+    refreshEnableTargets();
+    for (int s = 0; s < kMaxStrings; ++s) {
+        enableGain_[static_cast<std::size_t>(s)] = enableTarget_[static_cast<std::size_t>(s)];
+        snapTapPositions(s);
+    }
+    loopStrings_ = numStrings_;
 
     if (port_ != nullptr)
         port_->reset();
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::setNumStrings(int count) noexcept {
-    numStrings_ = std::clamp(count, 1, kMaxStrings);
+    const int clamped = std::clamp(count, 1, kMaxStrings);
+    const int previous = numStrings_;
+    numStrings_ = clamped;
+
+    if (clamped > previous) {
+        // Immediate. A string that was outside the count carries no state (a reduction cleared it
+        // when its ramp completed, and prepare()/reset() cleared it before that), so snapping its
+        // enable gain cannot produce a discontinuity: it is 0 * silence against 1 * silence.
+        // Ramping instead would fade in the attack of a note plucked on it in this same block.
+        loopStrings_ = std::max(loopStrings_, clamped);
+        for (int s = previous; s < clamped; ++s)
+            snapTapPositions(s);
+    }
+
+    refreshEnableTargets();
+}
+
+template <typename SampleT> void StringNetwork<SampleT>::setNumTapsPerString(int count) noexcept {
+    const int clamped = std::clamp(count, 1, kMaxTapsPerString);
+    if (clamped > numTapsPerString_) {
+        // A newly activated tap has no history to glide from: snap it onto the current target so
+        // its first sample reads where the pickup is.
+        for (int s = 0; s < kMaxStrings; ++s)
+            for (int t = numTapsPerString_; t < clamped; ++t) {
+                const auto slot = static_cast<std::size_t>(tapSlot(s, t));
+                tapSmoothed_[slot] = tapTarget_[slot];
+            }
+    }
+    numTapsPerString_ = clamped;
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::setParams(const StringNetworkParams& p) noexcept {
     params_ = p;
-    pickupTarget_ = clampd(static_cast<double>(params_.pickupPosition01), 0.0, 1.0);
+    // One target per (string, tap). Every slot carries the same global pickupPosition01 today; the
+    // array exists so a per-coil offset has somewhere to land without another rewrite of the loop.
+    const double target = clampd(static_cast<double>(params_.pickupPosition01), 0.0, 1.0);
+    for (double& slot : tapTarget_)
+        slot = target;
+    refreshEnableTargets();
     for (int s = 0; s < kMaxStrings; ++s)
         applyStringParams(s);
 }
@@ -132,6 +183,46 @@ template <typename SampleT> void StringNetwork<SampleT>::setBridgePort(IBridgePo
     port_->prepare(sampleRate_, maxBlockSize_, kMaxStrings, portImpedance_.data());
     port_->setLossBypassed(lossless_);
     port_->reset();
+}
+
+template <typename SampleT> bool StringNetwork<SampleT>::stringHasState(int stringIndex) const noexcept {
+    const auto index = static_cast<std::size_t>(stringIndex);
+    if (sounding_[index] || releasing_[index])
+        return true;
+    return !exciters_.empty() && exciters_[index].isActive();
+}
+
+template <typename SampleT> void StringNetwork<SampleT>::refreshEnableTargets() noexcept {
+    for (int s = 0; s < kMaxStrings; ++s) {
+        const auto index = static_cast<std::size_t>(s);
+        const bool wanted = (s < numStrings_) && params_.perString[index].enabled;
+        enableTarget_[index] = wanted ? 1.0f : 0.0f;
+
+        // Coming back ON while the string is provably silent is a snap, not a ramp: there is
+        // nothing to fade in, and ramping would attenuate the front of whatever gets plucked next.
+        // Coming back on MID-RAMP-OUT (a reduction reversed before it finished) is a genuine ramp,
+        // because the string still holds a ringing tail that would step if the gain jumped.
+        if (enableTarget_[index] > enableGain_[index] && !stringHasState(s))
+            enableGain_[index] = enableTarget_[index];
+    }
+}
+
+template <typename SampleT> void StringNetwork<SampleT>::snapTapPositions(int stringIndex) noexcept {
+    for (int t = 0; t < kMaxTapsPerString; ++t) {
+        const auto slot = static_cast<std::size_t>(tapSlot(stringIndex, t));
+        tapSmoothed_[slot] = tapTarget_[slot];
+    }
+}
+
+template <typename SampleT> void StringNetwork<SampleT>::updateLoopStringCount() noexcept {
+    // The trip count is the requested count, extended upward over any removed string whose enable
+    // ramp has not finished taking it to silence. Once a ramp lands on 0 the per-sample loop clears
+    // that string, so `enableGain_ > 0` is exactly "still has something to say".
+    int required = numStrings_;
+    for (int s = numStrings_; s < kMaxStrings; ++s)
+        if (enableGain_[static_cast<std::size_t>(s)] > 0.0f)
+            required = s + 1;
+    loopStrings_ = std::clamp(required, 1, kMaxStrings);
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int stringIndex) noexcept {
@@ -150,14 +241,23 @@ template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int s
     strings_[index].setParams(p);
 }
 
+template <typename SampleT> float StringNetwork<SampleT>::tapPosition01(int stringIndex, int tapIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings || tapIndex < 0 || tapIndex >= kMaxTapsPerString)
+        return 0.0f;
+    return static_cast<float>(tapSmoothed_[static_cast<std::size_t>(tapSlot(stringIndex, tapIndex))]);
+}
+
 // ------------------------------------------------------------------------------------------
 // event consumption
 // ------------------------------------------------------------------------------------------
 
 template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteEvent& event) noexcept {
     const int stringIndex = static_cast<int>(event.stringIndex);
+    // Addressed against the REQUESTED count, not the trip count: a string that is only still in the
+    // loop because it is ramping out has been removed as far as a caller is concerned, and handing
+    // it a fresh note would resurrect it underneath its own fade.
     if (stringIndex < 0 || stringIndex >= numStrings_)
-        return; // addressed to a string this network is not running
+        return;
     const auto index = static_cast<std::size_t>(stringIndex);
     if (!params_.perString[index].enabled)
         return;
@@ -172,7 +272,7 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
 
     const int note = std::clamp(static_cast<int>(event.midiNote), kMinMidiNote, kMaxMidiNote);
 
-    // P1 retrigger semantics (see the StringNetwork.h scope note): same pitch on a ringing string
+    // Retrigger semantics (see the StringNetwork.h scope note): same pitch on a ringing string
     // plucks over the existing state; anything else re-initializes the string at the new pitch.
     // A string mid-release counts as "anything else" -- its tail is already attenuated, so
     // clearing it is inaudible, whereas restoring the release gain to 1 over a still-ringing tail
@@ -202,29 +302,57 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
 template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue& events, int numSamples) noexcept {
     const int count = std::clamp(numSamples, 0, maxBlockSize_);
 
+    // Resolved once per block, before anything is published: a removed string leaves the trip count
+    // only after its ramp has already taken it to silence, so the boundary the block-domain
+    // consumer sees never loses a channel that still carries signal.
+    updateLoopStringCount();
+
+    const auto stride = static_cast<std::size_t>(maxBlockSize_);
     tapView_.base_ = tapStorage_.data();
     tapView_.stride_ = maxBlockSize_;
-    tapView_.numStrings_ = numStrings_;
+    tapView_.numStrings_ = loopStrings_;
+    tapView_.numTaps_ = numTapsPerString_;
     tapView_.numSamples_ = count;
     for (int s = 0; s < kMaxStrings; ++s) {
         const auto index = static_cast<std::size_t>(s);
         // "Enabled and ringing at some point during this block": seeded from the state the block
-        // starts in, then latched true by any NoteOn the loop consumes.
-        tapView_.active_[index] =
-            params_.perString[index].enabled && (sounding_[index] || releasing_[index]) && s < numStrings_;
+        // starts in, then latched true by any NoteOn the loop consumes. A string whose enable ramp
+        // is on its way UP counts too -- its gain can be exactly 0 at the block boundary and
+        // non-zero one sample later, and marking it inactive would drop that whole block.
+        tapView_.active_[index] = s < loopStrings_ && (sounding_[index] || releasing_[index]) &&
+                                  (enableGain_[index] > 0.0f || enableTarget_[index] > 0.0f);
     }
 
     if (count == 0)
         return; // events stay queued for the next block rather than firing at no sample at all
 
-    for (int s = 0; s < numStrings_; ++s)
+    for (int s = 0; s < loopStrings_; ++s)
         exciters_[static_cast<std::size_t>(s)].setParams(params_.exciter);
 
-    // Ports past the active count present no incident wave. Written once per block rather than
-    // once per sample: scatter() is only ever handed numStrings_ ports, so these slots exist to
-    // keep the array wholly defined, not to be read.
-    for (int s = numStrings_; s < kMaxStrings; ++s)
+    // Ports past the trip count present no incident wave. Written once per block rather than once
+    // per sample: scatter() is only ever handed loopStrings_ ports, so these slots exist to keep
+    // the array wholly defined, not to be read.
+    for (int s = loopStrings_; s < kMaxStrings; ++s)
         portIncident_[static_cast<std::size_t>(s)] = SampleT(0);
+
+    // Which strings the loop actually ran this sample, as a bitmask, so the tick pass below does
+    // not have to recompute the predicate. process() is only ever entered with count > 0 on a
+    // prepared instance, so indexing strings_/exciters_ inside the loop needs no emptiness guard.
+    std::uint32_t renderedMask = 0;
+
+    // Block-invariant loads hoisted out of the per-sample loop. handleEvent() is called from inside
+    // that loop and the compiler must assume a non-inlined member call can touch any member, so
+    // every one of these would otherwise be re-loaded from `this` on every sample of every string.
+    // None of them is written by handleEvent(): the trip count, the tap count and the three
+    // coefficients are all set outside process(), and the vectors are never resized after prepare().
+    const int loopStrings = loopStrings_;
+    const int numTaps = numTapsPerString_;
+    const double smoothingCoeff = positionSmoothingCoeff_;
+    const float rampStep = enableRampStep_;
+    const float releaseCoeff = releaseCoeff_;
+    SampleT* const tapBase = tapStorage_.data();
+    WaveguideString<SampleT>* const strings = strings_.data();
+    PluckExciter<SampleT>* const exciters = exciters_.data();
 
     for (int n = 0; n < count; ++n) {
         // Sample-accurate consumption: every event whose (clamped) offset has been reached fires
@@ -236,33 +364,79 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             handleEvent(*event);
             events.pop();
         }
+        renderedMask = 0;
 
-        // Per-sample smoothed fractional pickup tap (docs/plan.md Task P1.5 step 3): the position
-        // moves continuously inside the loop, not once per block, which is what makes a moving
-        // pickup click-free (P2.3 sweeps it).
-        pickupSmoothed_ += positionSmoothingCoeff_ * (pickupTarget_ - pickupSmoothed_);
-        const auto pickup = static_cast<float>(pickupSmoothed_);
+        // Per-sample smoothed fractional pickup taps (docs/plan.md Task P1.5 step 3), now one
+        // smoother per (string, tap). The position moves continuously INSIDE the loop, not once per
+        // block, which is what makes a moving pickup click-free (P2.3 sweeps it). Kept as its own
+        // tight, branch-free pass rather than folded into the string body below: every slot is an
+        // independent one-pole recurrence over two contiguous arrays, which is the one part of this
+        // loop a compiler can actually vectorise. Advanced for every string in the trip count
+        // whether or not that string is currently sounding, so a string plucked after a position
+        // change reads where the pickup is now rather than gliding in from where it was when that
+        // string last rang.
+        for (int s = 0; s < loopStrings; ++s) {
+            const auto base = static_cast<std::size_t>(s) * static_cast<std::size_t>(kMaxTapsPerString);
+            for (int t = 0; t < numTaps; ++t) {
+                const std::size_t slot = base + static_cast<std::size_t>(t);
+                tapSmoothed_[slot] += smoothingCoeff * (tapTarget_[slot] - tapSmoothed_[slot]);
+            }
+        }
 
-        for (int s = 0; s < numStrings_; ++s) {
+        for (int s = 0; s < loopStrings; ++s) {
             const auto index = static_cast<std::size_t>(s);
-            if (!params_.perString[index].enabled) {
-                tapStorage_[index * static_cast<std::size_t>(maxBlockSize_) + static_cast<std::size_t>(n)] = SampleT(0);
-                portIncident_[index] = SampleT(0); // a disabled string presents no incident wave
+            const auto base = static_cast<std::size_t>(s) * static_cast<std::size_t>(kMaxTapsPerString);
+
+            // Enable ramp. Linear, one step per sample, landing exactly on the target.
+            float gain = enableGain_[index];
+            const float gainTarget = enableTarget_[index];
+            if (gain != gainTarget) {
+                gain =
+                    (gain < gainTarget) ? std::min(gainTarget, gain + rampStep) : std::max(gainTarget, gain - rampStep);
+                enableGain_[index] = gain;
+                if (gain == 0.0f) {
+                    // The fade has landed on silence: clear the string rather than leave a muted
+                    // tail ringing forever underneath a gain of zero. This is what lets the trip
+                    // count drop on a later block, and what makes energyEstimate() tell the truth.
+                    strings[index].reset();
+                    sounding_[index] = false;
+                    releasing_[index] = false;
+                    releaseGain_[index] = 1.0f;
+                }
+            }
+
+            // Nothing to render: either the string is fully muted with its state already cleared,
+            // or it is enabled but idle (no note ringing, no release tail, no burst in flight). An
+            // idle string's rails are zero, so ticking it would compute zeros -- and re-solve its
+            // loop length while doing it. Skipping is bit-identical, and it is what keeps eight
+            // preallocated strings from costing eight strings' CPU when two are being played.
+            const bool muted = (gain == 0.0f && gainTarget == 0.0f);
+            const bool live = !muted && (sounding_[index] || releasing_[index] || exciters[index].isActive());
+            if (!live) {
+                for (int t = 0; t < numTaps; ++t)
+                    tapBase[(base + static_cast<std::size_t>(t)) * stride + static_cast<std::size_t>(n)] = SampleT(0);
+                portIncident_[index] = SampleT(0); // presents no incident wave at its bridge slot
                 continue;
             }
 
-            const SampleT excitation = exciters_[index].renderSample();
-            if (excitation != SampleT(0))
-                strings_[index].injectAt(exciters_[index].latchedPosition01(), excitation);
+            renderedMask |= (1u << static_cast<unsigned>(s));
 
-            // Multiplying by an exactly-1.0f gain is exact in IEEE-754, so a string that is not
-            // releasing is bit-identical to one with no release envelope at all.
-            const SampleT tap = strings_[index].readTapAt(pickup) * static_cast<SampleT>(releaseGain_[index]);
-            tapStorage_[index * static_cast<std::size_t>(maxBlockSize_) + static_cast<std::size_t>(n)] = tap;
-            portIncident_[index] = strings_[index].railOutgoingAtBridge();
+            const SampleT excitation = exciters[index].renderSample();
+            if (excitation != SampleT(0))
+                strings[index].injectAt(exciters[index].latchedPosition01(), excitation);
+
+            // Multiplying by an exactly-1.0f gain is exact in IEEE-754, so a string that is neither
+            // releasing nor ramping is bit-identical to one carrying no envelope at all.
+            const auto envelope = static_cast<SampleT>(releaseGain_[index] * gain);
+            for (int t = 0; t < numTaps; ++t) {
+                const std::size_t slot = base + static_cast<std::size_t>(t);
+                const SampleT tap = strings[index].readTapAt(static_cast<float>(tapSmoothed_[slot])) * envelope;
+                tapBase[slot * stride + static_cast<std::size_t>(n)] = tap;
+            }
+            portIncident_[index] = strings[index].railOutgoingAtBridge() * static_cast<SampleT>(gain);
 
             if (releasing_[index]) {
-                releaseGain_[index] *= releaseCoeff_;
+                releaseGain_[index] *= releaseCoeff;
                 if (releaseGain_[index] <= kReleaseFloor) {
                     // Inaudible: clear the string rather than leave it ringing under a vanishing
                     // gain, so energyEstimate() tells the truth and the decayed tail costs
@@ -270,19 +444,20 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
                     // make a render depend on note history.
                     releaseGain_[index] = 0.0f;
                     releasing_[index] = false;
-                    strings_[index].reset();
+                    strings[index].reset();
                 }
             }
         }
 
         // The port sees every string's outgoing bridge wave and publishes the mono bridge signal.
-        // Its reflected waves are not routed back into the strings in P1 -- see setBridgePort().
-        port_->scatter(portIncident_.data(), portOutgoing_.data(), numStrings_);
+        // Its reflected waves are not routed back into the strings before P2.4 -- see
+        // setBridgePort().
+        port_->scatter(portIncident_.data(), portOutgoing_.data(), loopStrings);
         bridgeBuffer_[static_cast<std::size_t>(n)] = port_->bridgeOutput();
 
-        for (int s = 0; s < numStrings_; ++s)
-            if (params_.perString[static_cast<std::size_t>(s)].enabled)
-                strings_[static_cast<std::size_t>(s)].tick();
+        for (int s = 0; s < loopStrings; ++s)
+            if ((renderedMask & (1u << static_cast<unsigned>(s))) != 0u)
+                strings[static_cast<std::size_t>(s)].tick();
     }
 }
 
@@ -309,15 +484,18 @@ template <typename SampleT> void StringNetwork<SampleT>::setLosslessTestMode(boo
 }
 
 template <typename SampleT> Sample64 StringNetwork<SampleT>::energyEstimate() const noexcept {
+    if (strings_.empty())
+        return 0.0;
     Sample64 total = 0.0;
-    for (int s = 0; s < numStrings_; ++s) {
-        const auto index = static_cast<std::size_t>(s);
-        if (!params_.perString[index].enabled)
-            continue;
-        total += strings_[index].energyEstimate();
-    }
-    // P1's termination is rigid and memoryless, so it stores nothing; the bridge admittance
-    // biquad's storage term joins this sum with BridgeJunction (P2.4).
+    // Every string, including strings outside the active count and strings the enable ramp has
+    // muted: a muted string that is still ringing genuinely stores that energy, and reporting 0 for
+    // it would make this function agree with the output rather than with the physics. A string that
+    // has never been excited, or whose ramp or release has completed, contributes exactly 0 because
+    // its state was cleared -- so this is honest without being noisy.
+    for (int s = 0; s < kMaxStrings; ++s)
+        total += strings_[static_cast<std::size_t>(s)].energyEstimate();
+    // The rigid termination is memoryless, so it stores nothing; the bridge admittance biquad's
+    // storage term joins this sum with BridgeJunction (P2.4).
     return total;
 }
 

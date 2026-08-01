@@ -19,21 +19,32 @@
 // pickup taps computed PER SAMPLE inside the loop) and the bridge output buffer.
 //
 // Task P1.1 landed RetriggerMode and the APVTS-wired subset of StringNetworkParams. Task P1.5
-// (this file's current state) adds StringTapBuffers, the StringNetwork class, and the remaining
-// StringNetworkParams fields except `damper`, whose DamperJunctionParams type ships in
-// DamperJunction.h with Task P2.2 -- adding it here would put a P2.2-owned type in a P1 header.
+// added StringTapBuffers, the StringNetwork class, and the remaining StringNetworkParams fields
+// except `damper`, whose DamperJunctionParams type ships in DamperJunction.h with Task P2.2 --
+// adding it here would put a P2.2-owned type in a P1 header. Task P2.1 (this file's current state)
+// scales the network out to N = 1..8 strings and widens the domain boundary to (string, tap).
 // Zero JUCE includes.
 //
 // ---------------------------------------------------------------------------------------------
-// P1 SCOPE (what is real here, and what is deliberately not yet)
+// SCOPE (what is real here, and what is deliberately not yet)
 // ---------------------------------------------------------------------------------------------
-// P1 is the single-string vertical slice: prepare() preallocates all kMaxStrings strings, but
-// setNumStrings(1) is what P1 runs and what NoteAllocator targets. Specifically:
-//   - Storage. Everything StringNetwork itself owns is already per-field (structure-of-arrays)
-//     across strings, including the tap buffers, so the P2.1 scale-out changes the loop's trip
-//     count rather than its shape. The per-string physics objects are still one WaveguideString
-//     and one PluckExciter per string; P2.1 flattens THEIR rails, filter states and smoothers
-//     into per-field arrays, which is the part that needs the SIMD-friendly layout.
+//   - Storage (P2.1). Every piece of per-string state StringNetwork itself owns is one contiguous
+//     array per field spanning all strings -- note/sounding/releasing/release gain/enable gain,
+//     the port's incident and outgoing waves, the per-(string, tap) position smoothers, and the
+//     tap buffers. What is deliberately NOT flattened is the interior of WaveguideString and
+//     PluckExciter: those are separate, shipped, gated modules (the [tuning] +/-2-cent sweep and
+//     the float64 golden IRs both measure WaveguideString directly), and dissolving their rails
+//     and filter states into arrays here would rewrite that arithmetic -- which is exactly what
+//     the goldens exist to forbid. The measured headroom does not ask for it either: the P1
+//     baseline is ~0.26% of one core per string against a 30% budget. If a later phase does need
+//     field-wise physics, it is its own task with its own golden regeneration, not a side effect
+//     of a scale-out.
+//   - Tap arity (P2.1, docs/decisions/0004-phase2-vision-decisions.md D1). The boundary is
+//     (string, tap) with kMaxTapsPerString preallocated and exactly ONE active. Every tap of a
+//     string currently reads the same position, so the widening does not move one output sample;
+//     it exists because a humbucker is a true two-coil construction -- two spatial taps with real
+//     spacing, aperture and polarity -- and because widening the storage is cheap inside the task
+//     that is already rewriting it.
 //   - Retrigger. A same-pitch retrigger plucks over the ringing state; a pitch-changing retrigger
 //     re-initializes the string at the new pitch. retriggerMode is accepted and stored, and the
 //     full Physical (damper choke -> retune ramp -> re-excite) and Synth (<= 5 ms fade) semantics
@@ -43,8 +54,11 @@
 //     once it is inaudible. It is an envelope, not physics: the real felt damper is
 //     DamperJunction (P2.2), and damperPosition01/`damper` are stored for it.
 //   - Bridge. The port is driven every sample (it sees the strings' outgoing waves and publishes
-//     bridgeOutput()), but its reflected waves are NOT fed back into the strings in P1 -- see
-//     setBridgePort() for why that is a deliberate P1 boundary rather than an omission.
+//     bridgeOutput()), but its reflected waves are NOT fed back into the strings before P2.4 --
+//     see setBridgePort() for why that is a deliberate boundary rather than an omission.
+//   - Allocation. Which string a host note lands on is NoteAllocator's decision, and its
+//     multi-string assignment modes are Task P2.6. StringNetwork addresses strings by the
+//     NoteEvent's own stringIndex and does not care where it came from.
 
 namespace cnpg::dsp {
 
@@ -67,7 +81,20 @@ struct StringNetworkParams {
 
     struct PerString {
         float tuningOffsetCents = 0.0f; // additive cents inside the same f0 smoother as the bend
-        bool enabled = true;            // mute/enable
+
+        // RESERVED, and inert through P2.1 -- nothing reads it, and a [contract] test pins that it
+        // cannot move an output sample. It is declared now because of what the Envelope module
+        // needs (docs/decisions/0004-phase2-vision-decisions.md, D2): in Physical mode the envelope
+        // drives LOOP LOSS and damper engagement, and loop loss lives in the SHARED
+        // stringMaterial set above. Strings are independently triggered, so an envelope written
+        // against that shared set would let one string's note-on alter every other ringing
+        // string's decay -- audible, wrong, and structurally impossible to fix without a
+        // per-string scalar sitting exactly here. Reserving the seam in the task that is already
+        // rewriting this struct costs nothing; retrofitting it after the Envelope module is
+        // written costs the Envelope module.
+        float envelopeScale = 1.0f;
+
+        bool enabled = true; // mute/enable; a runtime change routes through the enable ramp
     };
     std::array<PerString, kMaxStrings> perString{};
 };
@@ -75,22 +102,48 @@ struct StringNetworkParams {
 static_assert(std::is_trivially_copyable_v<StringNetworkParams>,
               "StringNetworkParams must stay trivially copyable for the realtime APVTS snapshot path.");
 
+// StringNetwork seeds its per-(string, tap) position smoothers with this same value, so a
+// prepare() before the first setParams() starts the taps where the parameter says they are rather
+// than gliding in from 0. Pinned here so the two cannot drift apart silently.
+static_assert(StringNetworkParams{}.pickupPosition01 == 0.5f,
+              "StringNetwork::kDefaultTapPosition01 must track StringNetworkParams::pickupPosition01's default.");
+
 template <typename SampleT> class StringNetwork;
 
-// View over the per-block per-string tap buffers filled by StringNetwork::process. Storage is
-// SoA: one contiguous SampleT run per string, owned by StringNetwork and valid until that
-// network's next process() call. PickupTap (Task P1.6) is the block-domain consumer.
+// View over the per-block tap buffers filled by StringNetwork::process. This is THE sample->block
+// domain boundary, and from Task P2.1 it is addressed by (string, tap) rather than by string alone
+// (docs/decisions/0004-phase2-vision-decisions.md, D1). Storage is SoA: one contiguous SampleT run
+// per (string, tap), laid out string-major so a string's taps are neighbours, owned by StringNetwork
+// and valid until that network's next process() call. PickupTap (Task P1.6) is the block-domain
+// consumer.
+//
+// numTaps() is 1 through P2.1 and the capacity is kMaxTapsPerString. A consumer must loop
+// `for t in [0, numTaps())` rather than hardcoding tap 0: that is the whole point of the widening,
+// and a consumer that reads only tap 0 will silently drop the second coil of a humbucker the day
+// one exists.
 template <typename SampleT> struct StringTapBuffers {
-    // numSamples() contiguous samples for `stringIndex`; nullptr if the index is out of range or
-    // no block has been processed yet.
-    const SampleT* channel(int stringIndex) const noexcept;
+    // numSamples() contiguous samples for (stringIndex, tapIndex); nullptr if either index is out
+    // of range or no block has been processed yet. The tap index is deliberately NOT defaulted:
+    // an implicit tap 0 is exactly the silent-drop this widening exists to prevent.
+    const SampleT* channel(int stringIndex, int tapIndex) const noexcept;
 
     // String enabled and ringing at some point during the block just processed. A string that is
-    // silent for the whole block reports false and its channel is all zeros, so a consumer may
-    // skip it entirely rather than summing silence.
+    // silent for the whole block reports false and every one of its channels is all zeros, so a
+    // consumer may skip it entirely rather than summing silence.
+    //
+    // Per STRING, not per (string, tap), and that asymmetry is deliberate: activity means "this
+    // string has energy in it", and a tap cannot ring independently of the string it reads.
     bool isActive(int stringIndex) const noexcept;
 
+    // The loop trip count of the block just processed. NOTE: during a setNumStrings() REDUCTION
+    // this is larger than StringNetwork::numStrings() -- a removed string keeps its channel until
+    // its enable ramp has taken it to silence, because dropping a still-ringing channel from the
+    // consumer's view IS the click the ramp exists to prevent.
     int numStrings() const noexcept;
+
+    // Active taps per string; 1 through P2.1, capacity kMaxTapsPerString.
+    int numTaps() const noexcept;
+
     int numSamples() const noexcept;
 
   private:
@@ -99,6 +152,7 @@ template <typename SampleT> struct StringTapBuffers {
     const SampleT* base_ = nullptr;
     int stride_ = 0; // samples between channel starts; the prepared maxBlockSize, not numSamples_
     int numStrings_ = 0;
+    int numTaps_ = 0;
     int numSamples_ = 0;
     std::array<bool, kMaxStrings> active_{};
 };
@@ -116,19 +170,45 @@ template <typename SampleT> class StringNetwork {
     void prepare(double sampleRate, int maxBlockSize, FractionalDelayKind kind);
 
     // Realtime-safe. Clears every string, exciter and buffer, releases all sounding notes, snaps
-    // the pickup-position smoother onto its target, and resets the attached port, so a reset
-    // instance is indistinguishable from a freshly prepared one carrying the same parameters.
+    // every per-(string, tap) position smoother and every enable ramp onto its target, and resets
+    // the attached port, so a reset instance is indistinguishable from a freshly prepared one
+    // carrying the same parameters. Also collapses any pending setNumStrings() reduction: after
+    // reset() the loop trip count IS numStrings().
     void reset() noexcept;
 
     // Realtime-safe; never allocates (capacity is preallocated for kMaxStrings). Clamped to
-    // 1..kMaxStrings. A count increase takes effect immediately and the new string starts silent.
-    // A count REDUCTION is immediate here as well; routing it through the per-string enable ramp
-    // (so the removed string ramps silent first and leaves the loop on a later block) lands with
-    // the P2.1 scale-out, together with the ramp itself.
+    // 1..kMaxStrings.
+    //
+    // An INCREASE takes effect immediately. The new string starts silent -- its state was already
+    // clear, so its enable gain is snapped rather than ramped (0 * silence and 1 * silence are the
+    // same silence, and ramping instead would fade in the attack of a note plucked on it in that
+    // same block). Its position smoothers are snapped onto the current target too, so it reads
+    // where the pickup IS rather than gliding in from wherever the count last left it.
+    //
+    // A REDUCTION is deferred. The removed strings are retargeted to silence through the per-string
+    // enable ramp and stay in the loop -- and in tapBuffers() -- until that ramp completes, at which
+    // point their state is cleared and the trip count drops on a later block. numStrings() reports
+    // the count you asked for from the moment you ask for it; tapBuffers().numStrings() reports the
+    // trip count, which is what lags. Dropping a still-ringing string from the consumer's view in
+    // the same block would be precisely the click the ramp exists to prevent.
     void setNumStrings(int count) noexcept;
     int numStrings() const noexcept { return numStrings_; }
 
+    // Spatial taps per string on the domain boundary, 1..kMaxTapsPerString (D1). ONE through P2.1,
+    // and this setter is the seam a later coil-count feature turns up, not a shipped control: every
+    // tap currently reads the same smoothed position, so a second tap today is an exact duplicate
+    // of the first and summing both would simply double the level. Real per-coil spacing, aperture
+    // and polarity -- the things that make a second tap mean something, and that make the comb null
+    // at f = v/2d emerge instead of being dialled in -- belong to the task that adds them.
+    //
+    // Realtime-safe; never allocates (storage is preallocated for kMaxStrings * kMaxTapsPerString).
+    // A newly activated tap starts snapped onto the current position target.
+    void setNumTapsPerString(int count) noexcept;
+    int numTapsPerString() const noexcept { return numTapsPerString_; }
+
     // Realtime-safe; only retargets. Never touches string state or a burst already in flight.
+    // A change to perString[i].enabled routes through the same per-string enable ramp a count
+    // reduction uses.
     void setParams(const StringNetworkParams& p) noexcept;
 
     // Message thread. StringNetwork holds exactly one port and cannot tell implementations apart.
@@ -176,14 +256,47 @@ template <typename SampleT> class StringNetwork {
     // Discrete Lyapunov storage function, NOT rail energy alone: impedance-weighted rail energy
     // PLUS the closed-form quadratic storage of every state-bearing element (dispersion allpass
     // states, loss-filter states, fractional-delay interpolator states -- and, from P2.4, the
-    // bridge admittance biquad states). Summed over enabled strings. NOT realtime-safe: a
-    // string's first call after a coefficient change may run a closed-form factorization. Tier-2
-    // [energy] tests assert the 1e-9 per-block non-increase on the double instantiation.
+    // bridge admittance biquad states). Summed over EVERY string, including strings outside the
+    // active count and strings whose enable ramp has muted them: a muted string that is still
+    // ringing genuinely stores that energy, and reporting 0 for it would make this function agree
+    // with the output rather than with the physics. NOT realtime-safe: a string's first call after
+    // a coefficient change may run a closed-form factorization. Tier-2 [energy] tests assert the
+    // 1e-9 per-block non-increase on the double instantiation.
     Sample64 energyEstimate() const noexcept;
+
+    // Diagnostics (tests, and later cnpg_calibrate). The position tap (stringIndex, tapIndex) is
+    // reading RIGHT NOW, i.e. the per-(string, tap) smoother's current value -- the same role
+    // WaveguideString::currentF0Hz() plays for pitch. Returns 0 for an out-of-range index.
+    float tapPosition01(int stringIndex, int tapIndex) const noexcept;
 
   private:
     void handleEvent(const NoteEvent& event) noexcept;
     void applyStringParams(int stringIndex) noexcept;
+    void refreshEnableTargets() noexcept;
+    void snapTapPositions(int stringIndex) noexcept;
+    void updateLoopStringCount() noexcept;
+    bool stringHasState(int stringIndex) const noexcept;
+
+    static constexpr int tapSlot(int stringIndex, int tapIndex) noexcept {
+        return stringIndex * kMaxTapsPerString + tapIndex;
+    }
+
+    static constexpr int kTapSlots = kMaxStrings * kMaxTapsPerString;
+
+    // The per-(string, tap) position arrays below are filled with the PARAMETER's own default
+    // rather than left value-initialized to 0. That is not cosmetic: prepare() snaps the smoothers
+    // onto their targets, and a caller that prepares before its first setParams() -- which is the
+    // documented order, and what every headless executable and the plugin itself do -- would
+    // otherwise start every tap at position 0 (the nut, where the two rails cancel to near-silence)
+    // and glide it to 0.5 over the first 8 ms of the very first block. The single smoother this
+    // array replaced carried the same default for the same reason.
+    static constexpr std::array<double, kTapSlots> filledTapSlots(double value) noexcept {
+        std::array<double, kTapSlots> slots{};
+        for (double& slot : slots)
+            slot = value;
+        return slots;
+    }
+    static constexpr double kDefaultTapPosition01 = 0.5;
 
     // P1 fixed fast release, standing in for DamperJunction (P2.2): a one-pole decay applied to
     // the string's tap contribution, after which the string's state is cleared. The time constant
@@ -196,13 +309,27 @@ template <typename SampleT> class StringNetwork {
     // Per-sample smoothing time for pickupPosition01, matching WaveguideString's own smoothers.
     static constexpr double kPositionSmoothingSeconds = 0.008;
 
+    // Per-string enable ramp: the fade a string takes to or from silence when perString[i].enabled
+    // moves, or when a setNumStrings() reduction removes it. LINEAR, not one-pole, and that is the
+    // point -- a one-pole fade never reaches zero, so "the string is silent, drop it from the trip
+    // count and clear its rails" would need an arbitrary audibility floor to ever become true. A
+    // linear ramp lands on exactly 0 (and exactly 1) at a known sample. 10 ms is far longer than
+    // the ~0.02 ms of one sample and far shorter than the release envelope, so what a listener
+    // hears is a mute, not a fade-out.
+    static constexpr double kEnableRampSeconds = 0.010;
+
     double sampleRate_ = 44100.0;
     int maxBlockSize_ = 0;
-    int numStrings_ = 1; // P1 vertical slice; P2.1 scales to 1..kMaxStrings
+    int numStrings_ = 1;       // the REQUESTED active count, 1..kMaxStrings
+    int loopStrings_ = 1;      // the per-sample loop's trip count; >= numStrings_ while a
+                               // reduction's removed strings are still ramping out
+    int numTapsPerString_ = 1; // active taps per string; capacity is kMaxTapsPerString
     StringNetworkParams params_{};
     bool lossless_ = false;
 
-    // Physics objects, one per string (see the P1 SCOPE note: P2.1 flattens their internals).
+    // Physics objects, one per string. Deliberately NOT flattened into per-field arrays -- see the
+    // SCOPE note at the top of this file for why dissolving WaveguideString's rails and filter
+    // states here would rewrite arithmetic the goldens and the [tuning] gate exist to pin.
     std::vector<WaveguideString<SampleT>> strings_;
     std::vector<PluckExciter<SampleT>> exciters_;
 
@@ -211,20 +338,26 @@ template <typename SampleT> class StringNetwork {
     std::array<bool, kMaxStrings> sounding_{};
     std::array<bool, kMaxStrings> releasing_{};
     std::array<float, kMaxStrings> releaseGain_{};
+    std::array<float, kMaxStrings> enableGain_{};   // 0..1, the ramp's current value
+    std::array<float, kMaxStrings> enableTarget_{}; // 0 or 1
     std::array<float, kMaxStrings> portImpedance_{};
     std::array<SampleT, kMaxStrings> portIncident_{};
     std::array<SampleT, kMaxStrings> portOutgoing_{};
 
-    // Domain-boundary buffers: kMaxStrings contiguous runs of maxBlockSize_ samples, plus the
-    // bridge feed.
+    // Domain-boundary buffers: kMaxStrings * kMaxTapsPerString contiguous runs of maxBlockSize_
+    // samples laid out (string, tap, sample), plus the bridge feed.
     std::vector<SampleT> tapStorage_;
     std::vector<SampleT> bridgeBuffer_;
     StringTapBuffers<SampleT> tapView_{};
 
+    // One position smoother per (string, tap), SoA (D1/A2). Every slot currently carries the same
+    // target -- the global pickupPosition01 -- so every slot holds the same value and the split
+    // moves no output sample; it exists so a per-coil offset has somewhere to land.
     double positionSmoothingCoeff_ = 0.0;
-    double pickupTarget_ = 0.5;
-    double pickupSmoothed_ = 0.5;
+    std::array<double, kTapSlots> tapTarget_ = filledTapSlots(kDefaultTapPosition01);
+    std::array<double, kTapSlots> tapSmoothed_ = filledTapSlots(kDefaultTapPosition01);
     float releaseCoeff_ = 0.0f;
+    float enableRampStep_ = 1.0f;
 
     RigidBridgeTermination<SampleT> internalPort_; // the P1 termination; see setBridgePort()
     IBridgePort<SampleT>* port_ = nullptr;

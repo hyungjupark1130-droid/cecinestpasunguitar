@@ -84,7 +84,7 @@ std::vector<SampleT> renderTap(StringNetwork<SampleT>& network, BlockEventQueue&
     out.reserve(static_cast<std::size_t>(numBlocks) * static_cast<std::size_t>(blockSize));
     for (int b = 0; b < numBlocks; ++b) {
         network.process(events, blockSize);
-        const SampleT* channel = network.tapBuffers().channel(stringIndex);
+        const SampleT* channel = network.tapBuffers().channel(stringIndex, 0);
         REQUIRE(channel != nullptr);
         out.insert(out.end(), channel, channel + blockSize);
     }
@@ -260,7 +260,7 @@ TEST_CASE("CONTRACT: StringNetwork process allocates nothing", "[contract]") {
         params.pickupPosition01 = 0.5f + 0.4f * std::sin(6.2831853f * 0.7f * t);
         network.setParams(params);
         network.process(events, kBlock);
-        (void)network.tapBuffers().channel(0);
+        (void)network.tapBuffers().channel(0, 0);
         (void)network.bridgeOutputBuffer();
     }
     REQUIRE(cnpg::test::allocationCount() == 0);
@@ -279,7 +279,7 @@ TEST_CASE("CONTRACT: StringNetwork is silent and inactive before excitation", "[
             REQUIRE(taps.numSamples() == kBlock);
             REQUIRE_FALSE(taps.isActive(0));
             for (int n = 0; n < kBlock; ++n) {
-                REQUIRE(taps.channel(0)[n] == 0.0f);
+                REQUIRE(taps.channel(0, 0)[n] == 0.0f);
                 REQUIRE(network.bridgeOutputBuffer()[n] == 0.0f);
             }
         }
@@ -533,31 +533,34 @@ TEST_CASE("CONTRACT: StringNetwork tap buffers are SoA and describe the block", 
     const auto& taps = network.tapBuffers();
     REQUIRE(taps.numStrings() == kStrings);
     REQUIRE(taps.numSamples() == kBlock);
-    REQUIRE(taps.channel(-1) == nullptr);
-    REQUIRE(taps.channel(kStrings) == nullptr);
+    REQUIRE(taps.channel(-1, 0) == nullptr);
+    REQUIRE(taps.channel(kStrings, 0) == nullptr);
     REQUIRE_FALSE(taps.isActive(-1));
     REQUIRE_FALSE(taps.isActive(kStrings));
 
-    // One contiguous run per string, stride == the prepared maxBlockSize.
-    REQUIRE(taps.channel(1) - taps.channel(0) == kBlock);
-    REQUIRE(taps.channel(2) - taps.channel(1) == kBlock);
+    // One contiguous run per (string, tap), laid out string-major with the prepared maxBlockSize as
+    // the stride between runs: consecutive strings' tap 0 are therefore kMaxTapsPerString runs
+    // apart, because the tap capacity sits between them (Task P2.1's (string, tap) widening).
+    REQUIRE(taps.channel(1, 0) - taps.channel(0, 0) == cnpg::dsp::kMaxTapsPerString * kBlock);
+    REQUIRE(taps.channel(2, 0) - taps.channel(1, 0) == cnpg::dsp::kMaxTapsPerString * kBlock);
 
     REQUIRE(taps.isActive(1));
     REQUIRE_FALSE(taps.isActive(0));
     REQUIRE_FALSE(taps.isActive(2));
     for (int n = 0; n < kBlock; ++n) {
-        REQUIRE(taps.channel(0)[n] == 0.0f);
-        REQUIRE(taps.channel(2)[n] == 0.0f);
+        REQUIRE(taps.channel(0, 0)[n] == 0.0f);
+        REQUIRE(taps.channel(2, 0)[n] == 0.0f);
     }
     bool middleSounds = false;
     for (int n = 0; n < kBlock; ++n)
-        middleSounds |= (taps.channel(1)[n] != 0.0f);
+        middleSounds |= (taps.channel(1, 0)[n] != 0.0f);
     REQUIRE(middleSounds);
 
     // A short block reports its own length; the stride does not shrink with it.
     network.process(events, 17);
     REQUIRE(network.tapBuffers().numSamples() == 17);
-    REQUIRE(network.tapBuffers().channel(1) - network.tapBuffers().channel(0) == kBlock);
+    REQUIRE(network.tapBuffers().channel(1, 0) - network.tapBuffers().channel(0, 0) ==
+            cnpg::dsp::kMaxTapsPerString * kBlock);
 }
 
 TEST_CASE("CONTRACT: StringNetwork disables a string completely", "[contract]") {
@@ -610,7 +613,7 @@ TEST_CASE("CONTRACT: StringNetwork smooths the pickup position per sample", "[co
                 network.setParams(params);
             }
             network.process(events, kBlock);
-            const float* channel = network.tapBuffers().channel(0);
+            const float* channel = network.tapBuffers().channel(0, 0);
             out.insert(out.end(), channel, channel + kBlock);
         }
         return out;
@@ -752,7 +755,7 @@ TEST_CASE("CONTRACT: StringNetwork injectFeedback is audibly inert in P1", "[con
             if (callFeedback)
                 network.injectFeedback(feed.data(), kBlock, 3.5f, 0.9f);
             network.process(events, kBlock);
-            const float* channel = network.tapBuffers().channel(0);
+            const float* channel = network.tapBuffers().channel(0, 0);
             out.insert(out.end(), channel, channel + kBlock);
         }
         return out;

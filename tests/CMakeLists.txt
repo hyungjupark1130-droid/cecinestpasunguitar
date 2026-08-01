@@ -30,11 +30,13 @@ add_executable(cnpg_tests
     dsp/RenderTests.cpp
     dsp/ScopedFtzDazGuardTests.cpp
     dsp/StringNetworkTests.cpp
+    dsp/StringNetworkScaleTests.cpp
     dsp/TriodeStageTests.cpp
     dsp/WaveguideStringTests.cpp
     dsp/WaveguideStringRegressionTests.cpp
     dsp/WaveguideStringTuningTests.cpp
     support/AllocationGuard.cpp
+    support/ClickMetric.cpp
     support/GoldenIo.cpp
     support/SourceHash.cpp
     support/SpectralAnalysis.cpp

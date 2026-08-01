@@ -11,7 +11,16 @@ using Sample = float;    // realtime path (float32, locked)
 using Sample64 = double; // offline references, goldens, energy accounting in tests
 
 // Design-envelope constants; all preallocation in prepare() is sized against these.
-inline constexpr int kMaxStrings = 8;               // active count configurable 1..8, default 6
+inline constexpr int kMaxStrings = 8; // active count configurable 1..8, default 6
+// Spatial pickup taps preallocated PER STRING on the sample->block domain boundary
+// (docs/decisions/0004-phase2-vision-decisions.md, D1). Exactly one is active through P2.1; the
+// capacity exists because a humbucker is a TRUE two-coil construction -- two spatial taps on the
+// same string with real coil spacing, aperture and polarity, whose comb null at f = v/2d is then
+// emergent -- and not a downstream voicing preset. Widening the boundary is cheap inside the task
+// that is already rewriting that storage (P2.1) and expensive afterwards, which is the whole reason
+// the capacity lands before the feature. Same shape as kMaxStrings: preallocate the maximum,
+// run one, and let a later task raise the active count.
+inline constexpr int kMaxTapsPerString = 4;
 inline constexpr int kMinMidiNote = 21;             // A0
 inline constexpr int kMaxMidiNote = 108;            // C8
 inline constexpr double kMaxDesignRateHz = 96000.0; // 44.1-96 kHz guaranteed; 192 kHz best-effort

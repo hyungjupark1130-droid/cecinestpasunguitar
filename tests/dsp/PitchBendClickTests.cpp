@@ -74,7 +74,7 @@ std::vector<double> renderNote(double bendDepthSemitones, float lossKnob = 0.5f)
         params.pitchBendSemitones = static_cast<float>(bendDepthSemitones * std::sin(kTwoPi * kBendHz * t));
         network.setParams(params);
         network.process(events, kBlockSize);
-        const float* channel = network.tapBuffers().channel(0);
+        const float* channel = network.tapBuffers().channel(0, 0);
         for (int n = 0; n < kBlockSize; ++n)
             out.push_back(static_cast<double>(channel[n]));
     }
@@ -173,7 +173,7 @@ TEST_CASE("CONTRACT: StringNetwork static pitch bend lands on the bent target", 
         std::size_t rendered = 0;
         while (tap.size() < kAnalysisLength) {
             network.process(events, kBlockSize);
-            const float* channel = network.tapBuffers().channel(0);
+            const float* channel = network.tapBuffers().channel(0, 0);
             for (int n = 0; n < kBlockSize && tap.size() < kAnalysisLength; ++n, ++rendered)
                 if (rendered >= discard)
                     tap.push_back(static_cast<double>(channel[n]));
