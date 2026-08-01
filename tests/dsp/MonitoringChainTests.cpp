@@ -683,9 +683,9 @@ TEST_CASE("CONTRACT: full chain stays NaN-free over a 60 s random-parameter swee
             np.retriggerMode = (rng.unit() < 0.5f) ? RetriggerMode::Physical : RetriggerMode::Synth;
             np.pitchBendSemitones = rng.range(-kPitchBendRangeSemitones, kPitchBendRangeSemitones);
             np.pickupPosition01 = rng.unit();
-            np.material.lossGainLow = rng.unit();
-            np.material.lossGainHigh = rng.unit();
-            np.material.dispersionAmount = rng.unit();
+            np.stringMaterial.lossGainLow = rng.unit();
+            np.stringMaterial.lossGainHigh = rng.unit();
+            np.stringMaterial.dispersionAmount = rng.unit();
             np.exciter.defaultPosition = rng.unit();
             np.exciter.defaultHardness = rng.unit();
             np.exciter.noiseAmount = rng.unit();

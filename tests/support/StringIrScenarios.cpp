@@ -31,7 +31,7 @@ std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double s
     // "transparent" and "default" mean at this point in the plan, not a deviation from it.
     cnpg::dsp::StringNetworkParams params;
     params.pickupPosition01 = kStringIrTapPosition;
-    params.material = cnpg::dsp::StringMaterialParams{}; // documented defaults
+    params.stringMaterial = cnpg::dsp::StringMaterialParams{}; // documented defaults
     params.exciter.noiseAmount = kStringIrNoiseAmount;
 
     cnpg::dsp::StringNetwork<float> network;

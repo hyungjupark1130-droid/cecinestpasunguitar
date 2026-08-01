@@ -31,10 +31,15 @@ inline constexpr const char* exciterDefaultPosition = "exciterDefaultPosition";
 inline constexpr const char* exciterDefaultHardness = "exciterDefaultHardness";
 inline constexpr const char* exciterNoiseAmount = "exciterNoiseAmount";
 
-// Material (cnpg::dsp::StringMaterialParams, nested under StringNetworkParams::material)
-inline constexpr const char* materialLossGainLow = "materialLossGainLow";
-inline constexpr const char* materialLossGainHigh = "materialLossGainHigh";
-inline constexpr const char* materialDispersionAmount = "materialDispersionAmount";
+// String material (cnpg::dsp::StringMaterialParams, nested under
+// StringNetworkParams::stringMaterial). Renamed from material* at Task P2.1 per ADR 0004: these
+// three are the STRING's loop loss and dispersion, and Material/Wood is reserved for the body
+// module a later phase adds. Done in the task that already bumps the state version, because a
+// parameter ID persists into saved state and renaming it later would be a migration.
+
+inline constexpr const char* stringMaterialLossGainLow = "stringMaterialLossGainLow";
+inline constexpr const char* stringMaterialLossGainHigh = "stringMaterialLossGainHigh";
+inline constexpr const char* stringMaterialDispersionAmount = "stringMaterialDispersionAmount";
 
 // Pickup (cnpg::dsp::PickupTapParams, plus pickupPosition01 on StringNetworkParams itself --
 // see docs/plan.md section 2.7, pickupPosition01 is a StringNetwork-owned tap position, not a
@@ -73,9 +78,9 @@ struct RawParameterPointers {
     std::atomic<float>* exciterDefaultHardness = nullptr;
     std::atomic<float>* exciterNoiseAmount = nullptr;
 
-    std::atomic<float>* materialLossGainLow = nullptr;
-    std::atomic<float>* materialLossGainHigh = nullptr;
-    std::atomic<float>* materialDispersionAmount = nullptr;
+    std::atomic<float>* stringMaterialLossGainLow = nullptr;
+    std::atomic<float>* stringMaterialLossGainHigh = nullptr;
+    std::atomic<float>* stringMaterialDispersionAmount = nullptr;
 
     std::atomic<float>* pickupResonanceHz = nullptr;
     std::atomic<float>* pickupQ = nullptr;

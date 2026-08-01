@@ -276,9 +276,9 @@ template <typename SampleT> void WaveguideString<SampleT>::retargetSmoothers() n
         static_cast<double>(params_.f0Hz) * std::exp2(static_cast<double>(params_.bendSemitones) / 12.0);
     f0Target_ = clampd(bent, f0Min_, f0Max_);
 
-    const double low = clampd(static_cast<double>(params_.material.lossGainLow), 0.0, 1.0);
-    const double high = clampd(static_cast<double>(params_.material.lossGainHigh), 0.0, 1.0);
-    const double disp = clampd(static_cast<double>(params_.material.dispersionAmount), 0.0, 1.0);
+    const double low = clampd(static_cast<double>(params_.stringMaterial.lossGainLow), 0.0, 1.0);
+    const double high = clampd(static_cast<double>(params_.stringMaterial.lossGainHigh), 0.0, 1.0);
+    const double disp = clampd(static_cast<double>(params_.stringMaterial.dispersionAmount), 0.0, 1.0);
 
     lossLowTarget_ =
         static_cast<double>(kLossGainLowMin) + low * static_cast<double>(kLossGainLowMax - kLossGainLowMin);

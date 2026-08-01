@@ -37,13 +37,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::exciterNoiseAmount), "Exciter Noise",
                                                            unitRange, 0.0f));
 
-    // Material
-    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::materialLossGainLow),
-                                                           "Material Loss Low", unitRange, 0.5f));
-    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::materialLossGainHigh),
-                                                           "Material Loss High", unitRange, 0.5f));
-    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::materialDispersionAmount),
-                                                           "Material Dispersion", unitRange, 0.0f));
+    // String material (ADR 0004 amendment 1: these are the STRING's frequency-dependent loop loss
+    // and its dispersion, i.e. bending stiffness. "Material"/"Wood" is reserved for the BODY, which
+    // is a separate module in a later phase; shipping both under "Material" on one GUI tab would be
+    // a permanent naming collision, and parameter IDs persist into saved state.)
+    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::stringMaterialLossGainLow),
+                                                           "String Loss Low", unitRange, 0.5f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::stringMaterialLossGainHigh),
+                                                           "String Loss High", unitRange, 0.5f));
+    // Dispersion IS bending stiffness: a stiff string's partials stretch sharp. "String Stiffness"
+    // is the physical name for the knob; dispersionAmount stays the code-side spelling.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::stringMaterialDispersionAmount),
+                                                           "String Stiffness", unitRange, 0.0f));
 
     // Pickup
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupResonanceHz), "Pickup Resonance",
@@ -98,9 +103,9 @@ RawParameterPointers collectRawParameterPointers(const juce::AudioProcessorValue
     params.exciterDefaultHardness = apvts.getRawParameterValue(ID::exciterDefaultHardness);
     params.exciterNoiseAmount = apvts.getRawParameterValue(ID::exciterNoiseAmount);
 
-    params.materialLossGainLow = apvts.getRawParameterValue(ID::materialLossGainLow);
-    params.materialLossGainHigh = apvts.getRawParameterValue(ID::materialLossGainHigh);
-    params.materialDispersionAmount = apvts.getRawParameterValue(ID::materialDispersionAmount);
+    params.stringMaterialLossGainLow = apvts.getRawParameterValue(ID::stringMaterialLossGainLow);
+    params.stringMaterialLossGainHigh = apvts.getRawParameterValue(ID::stringMaterialLossGainHigh);
+    params.stringMaterialDispersionAmount = apvts.getRawParameterValue(ID::stringMaterialDispersionAmount);
 
     params.pickupResonanceHz = apvts.getRawParameterValue(ID::pickupResonanceHz);
     params.pickupQ = apvts.getRawParameterValue(ID::pickupQ);
@@ -127,9 +132,9 @@ Snapshot snapshotParameters(const RawParameterPointers& params) noexcept {
     snapshot.stringNetwork.exciter.defaultHardness = params.exciterDefaultHardness->load();
     snapshot.stringNetwork.exciter.noiseAmount = params.exciterNoiseAmount->load();
 
-    snapshot.stringNetwork.material.lossGainLow = params.materialLossGainLow->load();
-    snapshot.stringNetwork.material.lossGainHigh = params.materialLossGainHigh->load();
-    snapshot.stringNetwork.material.dispersionAmount = params.materialDispersionAmount->load();
+    snapshot.stringNetwork.stringMaterial.lossGainLow = params.stringMaterialLossGainLow->load();
+    snapshot.stringNetwork.stringMaterial.lossGainHigh = params.stringMaterialLossGainHigh->load();
+    snapshot.stringNetwork.stringMaterial.dispersionAmount = params.stringMaterialDispersionAmount->load();
 
     snapshot.stringNetwork.pickupPosition01 = params.pickupPosition01->load();
     // AudioParameterChoice reports its selected index as a float via getRawParameterValue();

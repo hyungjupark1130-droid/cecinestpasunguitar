@@ -43,8 +43,8 @@ constexpr double kTwoPi = 6.283185307179586;
 std::vector<double> renderNote(double bendDepthSemitones, float lossKnob = 0.5f) {
     StringNetworkParams params;
     params.pickupPosition01 = kPickup;
-    params.material.lossGainLow = lossKnob;
-    params.material.lossGainHigh = lossKnob;
+    params.stringMaterial.lossGainLow = lossKnob;
+    params.stringMaterial.lossGainHigh = lossKnob;
 
     StringNetwork<float> network;
     network.prepare(kSampleRate, kBlockSize, FractionalDelayKind::Lagrange3);
@@ -147,8 +147,8 @@ TEST_CASE("CONTRACT: StringNetwork static pitch bend lands on the bent target", 
         StringNetworkParams params;
         params.pickupPosition01 = kPickup;
         params.pitchBendSemitones = bend;
-        params.material.lossGainLow = 1.0f;
-        params.material.lossGainHigh = 1.0f;
+        params.stringMaterial.lossGainLow = 1.0f;
+        params.stringMaterial.lossGainHigh = 1.0f;
 
         StringNetwork<float> network;
         network.prepare(kSampleRate, kBlockSize, FractionalDelayKind::Lagrange3);

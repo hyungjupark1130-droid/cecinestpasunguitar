@@ -477,9 +477,9 @@ enum class AutomatableParam {
     ExciterDefaultPosition,
     ExciterDefaultHardness,
     ExciterNoiseAmount,
-    MaterialLossGainLow,
-    MaterialLossGainHigh,
-    MaterialDispersionAmount,
+    StringMaterialLossGainLow,
+    StringMaterialLossGainHigh,
+    StringMaterialDispersionAmount,
     PickupPosition01,
     DamperPosition01,
     PickupResonanceHz,
@@ -500,9 +500,20 @@ constexpr ParamNameEntry kParamNames[] = {
     {"exciterDefaultPosition", AutomatableParam::ExciterDefaultPosition},
     {"exciterDefaultHardness", AutomatableParam::ExciterDefaultHardness},
     {"exciterNoiseAmount", AutomatableParam::ExciterNoiseAmount},
-    {"materialLossGainLow", AutomatableParam::MaterialLossGainLow},
-    {"materialLossGainHigh", AutomatableParam::MaterialLossGainHigh},
-    {"materialDispersionAmount", AutomatableParam::MaterialDispersionAmount},
+    // Task P2.1 renamed these three APVTS ids material* -> stringMaterial* (ADR 0004: Material/Wood
+    // belongs to the BODY module a later phase adds). BOTH spellings are accepted, and the legacy
+    // one is not deprecation cruft: tests/corpus/07_param_sweeps_midnote.json is corpus v1 data,
+    // and tests/corpus/README.md's versioning rule is that an existing phrase's BYTES NEVER CHANGE
+    // -- that is what makes "cv1" in a render filename identify exactly one set of inputs, and what
+    // the P1 listening notes are attributable against. Rewriting a frozen sidecar to chase a source
+    // rename would break that guarantee for a purely cosmetic gain, so the renderer absorbs the
+    // rename instead. New phrases (P2.8 onward) use the stringMaterial* spelling.
+    {"stringMaterialLossGainLow", AutomatableParam::StringMaterialLossGainLow},
+    {"stringMaterialLossGainHigh", AutomatableParam::StringMaterialLossGainHigh},
+    {"stringMaterialDispersionAmount", AutomatableParam::StringMaterialDispersionAmount},
+    {"materialLossGainLow", AutomatableParam::StringMaterialLossGainLow},           // corpus v1 spelling
+    {"materialLossGainHigh", AutomatableParam::StringMaterialLossGainHigh},         // corpus v1 spelling
+    {"materialDispersionAmount", AutomatableParam::StringMaterialDispersionAmount}, // corpus v1 spelling
     {"pickupPosition01", AutomatableParam::PickupPosition01},
     // damperPosition01 is stored by StringNetworkParams and is INERT in P1 -- DamperJunction is
     // Task P2.2 (StringNetwork.h's P1 SCOPE note). It is accepted here so a P2 corpus phrase does
@@ -550,14 +561,14 @@ void applyParam(cnpg::test::P1ChainParams& params, AutomatableParam which, float
     case AutomatableParam::ExciterNoiseAmount:
         params.network.exciter.noiseAmount = value;
         break;
-    case AutomatableParam::MaterialLossGainLow:
-        params.network.material.lossGainLow = value;
+    case AutomatableParam::StringMaterialLossGainLow:
+        params.network.stringMaterial.lossGainLow = value;
         break;
-    case AutomatableParam::MaterialLossGainHigh:
-        params.network.material.lossGainHigh = value;
+    case AutomatableParam::StringMaterialLossGainHigh:
+        params.network.stringMaterial.lossGainHigh = value;
         break;
-    case AutomatableParam::MaterialDispersionAmount:
-        params.network.material.dispersionAmount = value;
+    case AutomatableParam::StringMaterialDispersionAmount:
+        params.network.stringMaterial.dispersionAmount = value;
         break;
     case AutomatableParam::PickupPosition01:
         params.network.pickupPosition01 = value;

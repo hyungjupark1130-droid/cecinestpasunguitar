@@ -39,7 +39,7 @@ void configure(WaveguideString<SampleT>& string, double sampleRate, FractionalDe
     string.prepare(sampleRate, 512, kind);
     WaveguideStringParams params;
     params.f0Hz = static_cast<float>(f0Hz);
-    params.material = material;
+    params.stringMaterial = material;
     string.setParams(params);
     string.setAnalyticTuningCompensation(0.0f);
     string.reset();
@@ -104,7 +104,7 @@ TEMPLATE_TEST_CASE("CONTRACT: WaveguideString reset is idempotent and complete",
         pluckAndRender(excited, 48000.0, 48000); // 1 s of ringing
         WaveguideStringParams moving;
         moving.f0Hz = 146.83f;
-        moving.material.dispersionAmount = 0.7f;
+        moving.stringMaterial.dispersionAmount = 0.7f;
         excited.setParams(moving);
         for (int i = 0; i < 64; ++i)
             excited.tick();
@@ -115,7 +115,7 @@ TEMPLATE_TEST_CASE("CONTRACT: WaveguideString reset is idempotent and complete",
         // The reference is a fresh instance carrying the SAME current parameters -- reset() clears
         // state, it does not roll parameters back.
         WaveguideString<TestType> fresh;
-        configure(fresh, 48000.0, kind, static_cast<double>(moving.f0Hz), moving.material);
+        configure(fresh, 48000.0, kind, static_cast<double>(moving.f0Hz), moving.stringMaterial);
 
         REQUIRE(excited.energyEstimate() == 0.0);
         REQUIRE(excited.currentF0Hz() == fresh.currentF0Hz());
@@ -197,9 +197,9 @@ TEST_CASE("CONTRACT: WaveguideString stays finite under a continuous bend fuzz",
                 exciter.trigger(unit01(rng), unit01(rng), unit01(rng));
             params.f0Hz = 82.41f;
             params.bendSemitones = -2.0f + 4.0f * unit01(rng);
-            params.material.lossGainLow = unit01(rng);
-            params.material.lossGainHigh = unit01(rng);
-            params.material.dispersionAmount = unit01(rng);
+            params.stringMaterial.lossGainLow = unit01(rng);
+            params.stringMaterial.lossGainHigh = unit01(rng);
+            params.stringMaterial.dispersionAmount = unit01(rng);
             string.setParams(params);
 
             const float excitation = exciter.renderSample();

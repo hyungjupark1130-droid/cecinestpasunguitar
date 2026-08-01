@@ -76,6 +76,16 @@ render rate. Seconds is the authoring unit because the same sidecar has to rende
 name a different musical moment at each rate and would silently slide the sweep out of sync with the
 phrase it is sweeping over.
 
+Three parameter names have **two accepted spellings**. Task P2.1 renamed the APVTS ids
+`materialLossGainLow` / `materialLossGainHigh` / `materialDispersionAmount` to
+`stringMaterialLossGainLow` / `stringMaterialLossGainHigh` / `stringMaterialDispersionAmount`
+(ADR 0004: `Material`/`Wood` is reserved for the *body* module a later phase adds). Corpus v1's
+`07_param_sweeps_midnote.json` still carries the original spelling and **was deliberately not
+rewritten** — the versioning rule above says an existing phrase's bytes never change, which is what
+makes `cv1` in a render filename identify exactly one set of inputs. `cnpg_render` therefore
+accepts both spellings (`tests/render/RenderMain.cpp`, `kParamNames`); new phrases use the
+`stringMaterial*` form.
+
 Not every accepted parameter name does something in P1. `damperPosition01` in particular is stored
 by `StringNetworkParams` and is **inert** until `DamperJunction` lands in Task P2.2
 (`dsp/include/cnpg/dsp/StringNetwork.h`, "P1 SCOPE"): `cnpg_render` accepts it so a P2 phrase does

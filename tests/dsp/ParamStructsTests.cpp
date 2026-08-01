@@ -33,9 +33,9 @@ TEST_CASE("StringNetworkParams: nests StringMaterialParams and PluckExciterParam
     StringNetworkParams params;
     REQUIRE(params.retriggerMode == RetriggerMode::Physical);
     REQUIRE(params.pickupPosition01 == 0.5f);
-    REQUIRE(params.material.lossGainLow == 0.5f);
-    REQUIRE(params.material.lossGainHigh == 0.5f);
-    REQUIRE(params.material.dispersionAmount == 0.0f);
+    REQUIRE(params.stringMaterial.lossGainLow == 0.5f);
+    REQUIRE(params.stringMaterial.lossGainHigh == 0.5f);
+    REQUIRE(params.stringMaterial.dispersionAmount == 0.0f);
     REQUIRE(params.exciter.defaultPosition == 0.5f);
 
     params.retriggerMode = RetriggerMode::Synth;

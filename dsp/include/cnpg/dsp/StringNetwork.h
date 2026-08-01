@@ -55,13 +55,13 @@ enum class RetriggerMode : std::uint8_t {
 
 struct StringNetworkParams {
     RetriggerMode retriggerMode = RetriggerMode::Physical;
-    float pitchBendSemitones = 0.0f; // global bend, +/-kPitchBendRangeSemitones (Common.h); not an APVTS
-                                     // parameter -- the plugin drives it from the MIDI pitch
-                                     // wheel via pitchWheelToSemitones() (MidiTranslation.h)
-    float pickupPosition01 = 0.5f;   // tap position; continuously modulatable while ringing
-    float damperPosition01 = 0.15f;  // junction position; consumed by DamperJunction (P2.2)
-    StringMaterialParams material;   // one global shared physics set
-    BridgeAdmittanceParams bridge;   // consumed by BridgeJunction (P2.4)
+    float pitchBendSemitones = 0.0f;     // global bend, +/-kPitchBendRangeSemitones (Common.h); not an APVTS
+                                         // parameter -- the plugin drives it from the MIDI pitch
+                                         // wheel via pitchWheelToSemitones() (MidiTranslation.h)
+    float pickupPosition01 = 0.5f;       // tap position; continuously modulatable while ringing
+    float damperPosition01 = 0.15f;      // junction position; consumed by DamperJunction (P2.2)
+    StringMaterialParams stringMaterial; // one global shared physics set
+    BridgeAdmittanceParams bridge;       // consumed by BridgeJunction (P2.4)
     PluckExciterParams exciter;
     // DamperJunctionParams damper;  // P2.2, with DamperJunction.h (see the file comment above)
 

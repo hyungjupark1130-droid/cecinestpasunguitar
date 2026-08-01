@@ -95,7 +95,7 @@ static_assert(std::is_trivially_copyable_v<StringMaterialParams>,
 struct WaveguideStringParams {
     float f0Hz = 440.0f;        // target fundamental (MIDI 21..108 mapped upstream)
     float bendSemitones = 0.0f; // continuous retune contribution; click-free under constant modulation
-    StringMaterialParams material;
+    StringMaterialParams stringMaterial;
 };
 
 static_assert(std::is_trivially_copyable_v<WaveguideStringParams>,

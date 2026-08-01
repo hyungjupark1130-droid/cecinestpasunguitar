@@ -60,9 +60,9 @@ std::vector<double> renderTapChannel(FractionalDelayKind kind, double sampleRate
     WaveguideStringParams params;
     params.f0Hz = static_cast<float>(f0Hz);
     params.bendSemitones = bendSemitones;
-    params.material.lossGainLow = lossKnob;
-    params.material.lossGainHigh = lossKnob;
-    params.material.dispersionAmount = dispersionKnob;
+    params.stringMaterial.lossGainLow = lossKnob;
+    params.stringMaterial.lossGainHigh = lossKnob;
+    params.stringMaterial.dispersionAmount = dispersionKnob;
     string.setParams(params);
     string.setAnalyticTuningCompensation(0.0f);
     string.reset(); // snaps the smoothers, so f0 is exact from the first rendered sample

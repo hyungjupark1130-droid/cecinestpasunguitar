@@ -146,7 +146,7 @@ template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int s
     const float bend = clampf(params_.pitchBendSemitones, -kPitchBendRangeSemitones, kPitchBendRangeSemitones);
     p.bendSemitones =
         bend + static_cast<float>(static_cast<double>(params_.perString[index].tuningOffsetCents) / kCentsPerSemitone);
-    p.material = params_.material;
+    p.stringMaterial = params_.stringMaterial;
     strings_[index].setParams(p);
 }
 
