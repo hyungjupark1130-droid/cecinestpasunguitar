@@ -56,6 +56,7 @@ namespace cnpg::test {
 // field the same aggregate, in the same order.
 struct P1ChainParams {
     cnpg::dsp::StringNetworkParams network; // includes the nested exciter + material params
+    int numStrings = 1;                     // mirrors cnpg::params::Snapshot::numStrings (Task P2.1)
     cnpg::dsp::PickupTapParams pickup;
     cnpg::dsp::TriodeStageParams triode;
     cnpg::dsp::CabFilterParams cab;
@@ -127,6 +128,9 @@ struct P1Chain {
     // inside this function rather than being hoisted out of a caller's render loop.
     void processBlock(const P1ChainParams& params, cnpg::dsp::BlockEventQueue& events, int numSamples) noexcept {
         network.setParams(params.network);
+        // Applied every block, after setParams and before process, exactly as
+        // PluginProcessor::renderChunk() does it -- see there for why that order and not the other.
+        network.setNumStrings(params.numStrings);
         pickup.setParams(params.pickup);
         triode.setParams(params.triode);
         cab.setParams(params.cab);

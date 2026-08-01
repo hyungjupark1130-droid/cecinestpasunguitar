@@ -70,17 +70,18 @@
 // timeline, so excluding it from the stats never perturbs what gets played.
 //
 // -----------------------------------------------------------------------------------------------
-// CLI (locked; P2.1 extends the --config table only -- see kNamedConfigs below).
+// CLI (locked; P2.1 extended the --config table only -- see kNamedConfigs below).
 // -----------------------------------------------------------------------------------------------
 //
 //   cnpg_bench [--config <name> | --strings N] --samplerate R --blocksize B --oversample F --seconds S
 //
-// --config and --strings are mutually exclusive. No named --config values exist yet (they arrive
-// in Task P2.1 as p2_default6/p2_max8, docs/plan.md line 1146); resolveNamedConfig() below always
-// reports "not found" through P1, so P2.1's whole edit to this file's CLI surface is filling in
-// kNamedConfigs' table -- the parser, validation, and error text never change. Every flag
-// has a default so `cnpg_bench` with no arguments at all (exactly what ci.yml's bench step runs)
-// still executes the P1 single-string configuration end to end.
+// --config and --strings are mutually exclusive. Task P2.1 filled in the two named configurations
+// docs/plan.md asks for -- p2_default6 (6 strings) and p2_max8 (8) -- and that table IS the whole
+// of its edit to this file's CLI surface: the parser and the validation are untouched, exactly as
+// P1.10 predicted. A named config sets the string count and nothing else, so the remaining flags
+// stay live on top of it. Every flag has a default, so `cnpg_bench` with no arguments at all
+// (exactly what ci.yml's bench step runs) still executes the single-string configuration end to
+// end and stays comparable with docs/bench/p1-baseline.md.
 //
 // -----------------------------------------------------------------------------------------------
 // Output.
@@ -287,17 +288,20 @@ struct BenchArgs {
     std::string configName;
 };
 
+void printNamedConfigs(std::FILE* stream);
+
 void printUsage(std::FILE* stream) {
     std::fprintf(stream,
                  "usage: cnpg_bench [--config <name> | --strings N] --samplerate R --blocksize B "
                  "--oversample F --seconds S\n"
-                 "  --config <name>  named bench configuration (none exist yet; land in Task P2.1)\n"
+                 "  --config <name>  named bench configuration (sets the string count; see below)\n"
                  "  --strings N      active string count, 1..%d (default 1)\n"
                  "  --samplerate R   sample rate in Hz (default 48000)\n"
                  "  --blocksize B    block size in samples (default 128)\n"
                  "  --oversample F   oversampling factor, snapped to {2,4,8} (default %d)\n"
                  "  --seconds S      render length in seconds (default 60)\n",
                  kMaxStrings, Oversampler::kDefaultFactor);
+    printNamedConfigs(stream);
 }
 
 bool parseDouble(const char* text, double& out) noexcept {
@@ -321,27 +325,40 @@ bool parseInt(const char* text, int& out) noexcept {
     return true;
 }
 
-// Named --config resolution. No entries exist through P1 (docs/plan.md line 1146: "named configs
-// arrive in P2"); Task P2.1 is the only place that ever needs to touch this function -- add
-// p2_default6/p2_max8 to the table it walks -- the CLI parser, validation and error text above
-// and below never change.
+// Named --config resolution. Task P1.10 left this table empty and predicted that P2.1 would be the
+// only place that ever needs to touch this function; that held exactly -- the two rows below are
+// the whole of P2.1's edit to this file's CLI surface, and the parser, the validation and the error
+// text above and below are untouched.
+//
+// A named config fixes ONLY the string count. Everything else about both configurations -- the full
+// P1 monitoring chain, the shipped parameter defaults, 2x oversampling -- is what cnpg_bench
+// already runs, so the rows do not restate it and cannot drift from it. The remaining flags stay
+// live on top of a --config, which is what makes `--config p2_max8 --samplerate 96000` a question
+// this tool can answer without a third named row.
 struct NamedConfig {
     const char* name;
     int strings;
+    const char* description;
 };
-constexpr NamedConfig kNamedConfigs[1] = {{"", 0}}; // placeholder-free empty table: see the note below
+constexpr NamedConfig kNamedConfigs[] = {
+    {"p2_default6", 6, "the shipped default count: 6 strings through the full P1 monitoring chain"},
+    {"p2_max8", 8, "the design maximum: 8 strings, same chain"},
+};
 
 bool resolveNamedConfig(const std::string& name, int& outStrings) noexcept {
-    // kNamedConfigs cannot be a genuinely zero-length array (ill-formed in standard C++), so it
-    // holds one sentinel entry with an empty name -- which can never match a real --config value,
-    // since argv strings are never empty -- and this loop is what P2.1 extends with real rows.
     for (const NamedConfig& config : kNamedConfigs) {
-        if (config.name[0] != '\0' && name == config.name) {
+        if (name == config.name) {
             outStrings = config.strings;
             return true;
         }
     }
     return false;
+}
+
+void printNamedConfigs(std::FILE* stream) {
+    std::fprintf(stream, "named configurations:\n");
+    for (const NamedConfig& config : kNamedConfigs)
+        std::fprintf(stream, "  %-12s %d strings -- %s\n", config.name, config.strings, config.description);
 }
 
 bool parseArgs(int argc, char** argv, BenchArgs& args, bool& configGiven, bool& stringsGiven) {
@@ -543,10 +560,8 @@ int main(int argc, char** argv) {
     if (configGiven) {
         int resolvedStrings = 0;
         if (!resolveNamedConfig(args.configName, resolvedStrings)) {
-            std::fprintf(stderr,
-                         "cnpg_bench: unknown --config '%s' -- no named configs exist yet (they "
-                         "land in Task P2.1); use --strings N instead\n",
-                         args.configName.c_str());
+            std::fprintf(stderr, "cnpg_bench: unknown --config '%s'\n", args.configName.c_str());
+            printNamedConfigs(stderr);
             return 1;
         }
         args.strings = resolvedStrings;
@@ -579,7 +594,8 @@ int main(int argc, char** argv) {
 
     // Built once; re-applied to every module every block from inside the timed region (see the
     // file-level comment and cnpg::test::P1Chain::processBlock()).
-    const cnpg::test::P1ChainParams chainParams = cnpg::test::makeDefaultP1ChainParams();
+    cnpg::test::P1ChainParams chainParams = cnpg::test::makeDefaultP1ChainParams();
+    chainParams.numStrings = args.strings;
 
     NoteStreamGenerator generator(args.strings, args.sampleRate);
 

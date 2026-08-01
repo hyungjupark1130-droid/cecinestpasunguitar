@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <array>
 #include <atomic>
 #include <type_traits>
 
@@ -62,7 +63,44 @@ inline constexpr const char* outputGainDb = "outputGainDb";
 // Global (cnpg::dsp::RetriggerMode, nested under StringNetworkParams::retriggerMode)
 inline constexpr const char* retriggerMode = "retriggerMode";
 
+// Active string count, 1..kMaxStrings (Task P2.1). Not a StringNetworkParams field: the count is
+// set through StringNetwork::setNumStrings(), which is deliberately its own entry point because a
+// reduction is not a plain retarget -- it routes the removed strings through their enable ramp and
+// only drops the loop's trip count on a later block.
+inline constexpr const char* numStrings = "numStrings";
+
+// Per-string block (cnpg::dsp::StringNetworkParams::PerString), one entry per slot for all
+// kMaxStrings slots regardless of the active count -- automation lanes and saved state have to
+// exist for a string before it is switched on, or turning the count up would silently reset the
+// slots it reveals. Spelled as indexed tables rather than 16 named constants because the surface is
+// a fixed-size family that createParameterLayout() builds in a loop; the ID STRINGS themselves are
+// still literal, so this stays a complete grep-able registry of every shipped parameter ID.
+inline constexpr const char* stringTuningOffsetCents[cnpg::dsp::kMaxStrings] = {
+    "stringTuningOffsetCents0", "stringTuningOffsetCents1", "stringTuningOffsetCents2", "stringTuningOffsetCents3",
+    "stringTuningOffsetCents4", "stringTuningOffsetCents5", "stringTuningOffsetCents6", "stringTuningOffsetCents7"};
+inline constexpr const char* stringEnabled[cnpg::dsp::kMaxStrings] = {
+    "stringEnabled0", "stringEnabled1", "stringEnabled2", "stringEnabled3",
+    "stringEnabled4", "stringEnabled5", "stringEnabled6", "stringEnabled7"};
+
 } // namespace ID
+
+// Task P2.1's per-string tuning offset range, in cents either side of the note. Half a semitone is
+// a deliberate ceiling rather than a round number: the offset composes ADDITIVELY with the pitch
+// wheel inside the same f0 smoother, and WaveguideString's rails are sized for kMinMidiNote detuned
+// by exactly kPitchBendRangeSemitones. Anything past that is clamped by the string rather than
+// realised, so a wider knob would buy nothing at the bottom of the range except a control that
+// silently stops responding. +/-50 cents covers what the control is for -- unison spread, a
+// deliberately sour course, per-string compensation -- with the clamp only reachable by combining a
+// full-scale bend with a full-scale offset on the lowest note the instrument has.
+inline constexpr float kStringTuningOffsetRangeCents = 50.0f;
+
+// Shipped default active string count (cnpg/dsp/Common.h: "active count configurable 1..8,
+// default 6"). NOTE for the reader wondering why six strings sound like one today: NoteAllocator's
+// multi-string assignment modes are Task P2.6, so every host note still lands on string 0 and the
+// other five idle. They cost almost nothing while idle (StringNetwork skips a string with no state
+// rather than ticking zeros through it), and shipping the designed count now means the parameter's
+// default does not move again after saved state starts carrying it.
+inline constexpr int kDefaultNumStrings = 6;
 
 // Builds the full P1 APVTS parameter layout (docs/plan.md Task P1.1 step 1). Message-thread
 // only; called once from PluginProcessor's member-initializer list.
@@ -96,6 +134,10 @@ struct RawParameterPointers {
     std::atomic<float>* outputGainDb = nullptr;
 
     std::atomic<float>* retriggerMode = nullptr;
+
+    std::atomic<float>* numStrings = nullptr;
+    std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringTuningOffsetCents{};
+    std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringEnabled{};
 };
 
 // Message-thread only; must run after the APVTS (and therefore every parameter in
@@ -111,6 +153,13 @@ RawParameterPointers collectRawParameterPointers(const juce::AudioProcessorValue
 // whole Snapshot by value with no allocation or locking.
 struct Snapshot {
     cnpg::dsp::StringNetworkParams stringNetwork; // includes the nested exciter + material params
+
+    // The active string count travels beside StringNetworkParams rather than inside it, mirroring
+    // the dsp/ split: setParams() retargets, setNumStrings() changes the loop's shape. The audio
+    // thread applies it with the same once-per-block cascade as everything else, and
+    // setNumStrings() is idempotent, so re-applying an unchanged count every block costs a compare.
+    int numStrings = kDefaultNumStrings;
+
     cnpg::dsp::PickupTapParams pickup;
     cnpg::dsp::TriodeStageParams triode;
     cnpg::dsp::CabFilterParams cab;

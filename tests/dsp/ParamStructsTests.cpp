@@ -15,6 +15,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
+
 using namespace cnpg::dsp;
 
 TEST_CASE("PluckExciterParams: default-constructs to its documented defaults and copies by value", "[contract]") {
@@ -37,6 +39,16 @@ TEST_CASE("StringNetworkParams: nests StringMaterialParams and PluckExciterParam
     REQUIRE(params.stringMaterial.lossGainHigh == 0.5f);
     REQUIRE(params.stringMaterial.dispersionAmount == 0.0f);
     REQUIRE(params.exciter.defaultPosition == 0.5f);
+
+    // The per-string block (Task P2.1), one entry per kMaxStrings slot. Every slot defaults to "in
+    // tune, on, and carrying no envelope scaling", so a StringNetworkParams built from nothing is a
+    // playable instrument rather than a silent one.
+    REQUIRE(params.perString.size() == static_cast<std::size_t>(cnpg::dsp::kMaxStrings));
+    for (const auto& perString : params.perString) {
+        REQUIRE(perString.tuningOffsetCents == 0.0f);
+        REQUIRE(perString.envelopeScale == 1.0f); // reserved for the Envelope module (ADR 0004 D2)
+        REQUIRE(perString.enabled);
+    }
 
     params.retriggerMode = RetriggerMode::Synth;
     const StringNetworkParams copy = params;

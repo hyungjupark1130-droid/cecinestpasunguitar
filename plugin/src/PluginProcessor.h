@@ -83,13 +83,16 @@ class PluginProcessor final : public juce::AudioProcessor {
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // Stays 1 through all of P1 (docs/plan.md Task P2.1 is what bumps this to 2, and keeps it 2
-    // through all of P2; P2.1's own acceptance criterion requires loading a genuine version-1 P1
-    // state without crashing, which requires a version-1 P1 state to actually exist). The
-    // root-tag check above already rejects the P0.4 XML scaffold blob on its own, regardless of
-    // this integer, since that blob's root tag ("CNPG_PLUGIN_STATE") never matches the APVTS's
-    // ("PARAMETERS").
-    static constexpr int kCnpgStateVersion = 1;
+    // Bumped to 2 by Task P2.1 and it stays 2 through all of P2 (docs/plan.md). Two changes in that
+    // task make a version-1 blob genuinely incompatible rather than merely incomplete: three
+    // parameter IDs were renamed material* -> stringMaterial*, and the per-string family plus the
+    // active count were added. A version-1 blob is rejected to defaults by the check in
+    // setStateInformation() -- deliberately, per the plan's "no session-compatibility guarantee
+    // before P5" -- and rejecting is what keeps a stale blob from half-loading into a surface whose
+    // ids no longer mean the same thing. The root-tag check already rejects the P0.4 XML scaffold
+    // blob on its own, regardless of this integer, since that blob's root tag
+    // ("CNPG_PLUGIN_STATE") never matches the APVTS's ("PARAMETERS").
+    static constexpr int kCnpgStateVersion = 2;
 
   private:
     // One chunk of at most preparedBlockSize_ samples through the whole chain, writing

@@ -11,10 +11,17 @@ namespace {
 // ("PARAMETERS", set at construction below), not this scaffold's "CNPG_PLUGIN_STATE".
 const juce::Identifier kStateVersionAttribute("cnpgStateVersion");
 
-// P1 is the single-string vertical slice (docs/plan.md Task P1.5 "P1 SCOPE"): StringNetwork
-// preallocates all kMaxStrings strings but runs one, and NoteAllocator targets that one. P2.1 is
-// the scale-out.
-constexpr int kP1NumStrings = 1;
+// Task P2.1 scaled the network out to 1..kMaxStrings, driven by the `numStrings` APVTS parameter
+// (cnpg::params::kDefaultNumStrings ships 6). NoteAllocator is prepared for the CAPACITY rather
+// than the active count, matching how StringNetwork itself preallocates: the count is a realtime
+// parameter and prepare() is message-thread-only, so it could not track the parameter anyway.
+//
+// Until Task P2.6 gives NoteAllocator its multi-string assignment modes, allocate() still puts every
+// host note on string 0 and the remaining strings idle. That is audibly identical to running one
+// string, and costs almost nothing (StringNetwork skips a string with no state rather than ticking
+// zeros through it) -- but it does mean a chord played into this build sounds monophonic, and no
+// amount of turning `numStrings` up changes that before P2.6.
+constexpr int kNoteAllocatorStrings = cnpg::dsp::kMaxStrings;
 
 // MIDI status nibbles this file reads directly. Note on/off and CC are interpreted dsp-side by
 // cnpg::dsp::NoteAllocator; the pitch wheel is NOT a note event -- it is a latched global
@@ -52,12 +59,14 @@ void PluginProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     // a buffer. One sample is the smallest honest floor.
     preparedBlockSize_ = std::max(1, samplesPerBlock);
 
-    noteAllocator_.prepare(kP1NumStrings);
+    noteAllocator_.prepare(kNoteAllocatorStrings);
 
     // FractionalDelayKind::Lagrange3 is the shipping default recorded in
     // docs/decisions/0002-fractional-delay.md; it is fixed for the life of one prepare().
     stringNetwork_.prepare(currentSampleRate_, preparedBlockSize_, cnpg::dsp::FractionalDelayKind::Lagrange3);
-    stringNetwork_.setNumStrings(kP1NumStrings);
+    // Seeded from the parameter here (message thread) as well as re-applied every block, so the
+    // first block after a prepare() already runs the saved count instead of ramping onto it.
+    stringNetwork_.setNumStrings(cnpg::params::snapshotParameters(rawParams_).numStrings);
 
     pickupTap_.prepare(currentSampleRate_, preparedBlockSize_);
 
@@ -109,7 +118,13 @@ void PluginProcessor::renderChunk(const cnpg::params::Snapshot& snapshot, const 
 
     cnpg::dsp::StringNetworkParams networkParams = snapshot.stringNetwork;
     networkParams.pitchBendSemitones = pitchBendSemitones_;
+    // Parameters first, then the count. Either order leaves the enable targets correct (both calls
+    // refresh them), but a count INCREASE snaps the newly added string's position smoothers onto
+    // the current target, and doing that after setParams() means "current" is this block's value
+    // rather than the previous one's. Both are idempotent and realtime-safe, so re-applying an
+    // unchanged pair every block is the same unconditional cascade every other module here gets.
     stringNetwork_.setParams(networkParams);
+    stringNetwork_.setNumStrings(snapshot.numStrings);
 
     // Every module is retargeted from this block's snapshot BEFORE its process() call, which is
     // what keeps a host re-prepare's reset-to-defaults from surviving a whole block (docs/plan.md
