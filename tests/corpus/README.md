@@ -97,8 +97,28 @@ re-derived byte-for-byte from it plus the encoding conventions above, without th
 being the only record of what they contain.
 
 Pitch-wheel values map through `cnpg::dsp::pitchWheelToSemitones` (`MidiTranslation.h`): 8192 is
-centre, 16383 is +2 semitones, 0 is −2 semitones. "wheel ramp" below means a linear interpolation
-emitted every 5 ms; "wheel sine"/"wheel triangle" the same emission rate over the named waveform.
+centre, 16383 is +2 semitones, 0 is −2 semitones. A normalized wheel value `v` in [−1, 1] below
+encodes as `8192 + round(v · 8191)` for `v ≥ 0` and `8192 + round(v · 8192)` for `v < 0` — the
+asymmetry is MIDI's, not a choice here (there is no exact 14-bit representation of full-scale up).
+
+Wheel gestures are emitted on a uniform grid over their stated window, **endpoints inclusive**:
+`n = round((t1 − t0) / 0.005)` intervals, so `n + 1` messages at `t0 + (t1 − t0)·i/n`.
+
+- **wheel ramp** `from → to` — linear in `i/n`.
+- **wheel sine** `depth, f` — `depth · sin(2π·f·(t − t0))`, so it starts at 0.
+- **wheel triangle** `depth, f` — phased to start at 0 and rise: with
+  `p = ((t − t0)·f + 0.25) mod 1`, the value is `depth · (1 − 4·|p − 0.5|)`, i.e.
+  0 → +1 → 0 → −1 → 0 per cycle.
+
+Both of those phasings are load-bearing rather than incidental. Phrase 05 exists to answer
+checklist item 5 — "no zipper noise, **stepping**, or clicks anywhere" — so every wheel gesture in
+it has to begin and end exactly where the previous one left the wheel. A triangle starting at its
+own peak would have stepped the wheel instantaneously from centre to +2 semitones at 18.00 s, and
+the vibrato's original 5.5 Hz over 3.30 s (18.15 cycles) would have ended mid-swing at
++0.81 semitones and made the wheel-to-centre message at 11.60 s an audible step. Measured after
+the fix: across all seven wheel-only (note-on-free) windows in the phrase, the largest
+sample-to-sample step sits a uniform 25.2–27.5 dB below that window's own peak — no window is an
+outlier, which is what "no discontinuities" looks like objectively.
 
 **Every phrase's first event is at 0.20 s, never at sample 0**, and that is deliberate. The first
 block of any render is the one in which `TriodeStage`'s output-trim ramp travels from the struct
@@ -138,11 +158,13 @@ Wheel centred at 0.00 s.
 - **A.** Note-on 21/110 at 0.20. Wheel ramp 0 → +1 over 1.00–2.20; ramp +1 → 0 over 2.60–3.40;
   repluck 21/100 at 3.00; ramp 0 → −1 over 3.60–4.80; repluck 21/100 at 5.00; ramp −1 → 0 over
   5.20–6.00; note-off at 7.00.
-- **B.** Note-on 28/104 at 7.50. Wheel sine, ±0.5 (±1 semitone) at 5.5 Hz, 7.70–11.00; repluck
-  28/96 at 9.00; note-off at 11.50; wheel to centre at 11.60.
+- **B.** Note-on 28/104 at 7.50. Wheel sine, ±0.5 (±1 semitone) at 5.0 Hz, 7.70–11.00 (exactly
+  16.5 cycles, so it ends at 0 as well as starting there); repluck 28/96 at 9.00; note-off at
+  11.50; wheel to centre at 11.60 (a no-op reassertion, by construction).
 - **C.** Note-on 40/108 at 12.20. Wheel ramp 0 → −1 over 12.50–14.00; repluck 40/100 at 14.50; ramp
   −1 → 0 over 15.00–16.50; note-off at 17.20.
-- **D.** Note-on 21/110 at 17.80. Wheel triangle, full ±1 at 3 Hz, 18.00–21.00; note-off at 21.50;
+- **D.** Note-on 21/110 at 17.80. Wheel triangle, full ±1 at 3 Hz, 18.00–21.00 (exactly 9 cycles,
+  starting and ending at 0); note-off at 21.50;
   wheel to centre at 21.60.
 
 ### `07_param_sweeps_midnote.mid` + `.json` — 33.000 s render, 27 events
