@@ -1436,10 +1436,15 @@ Manual: in Ableton Live at 48 kHz and again at 96 kHz, play against a reference 
 >   residual trim. The file-format, determinism, CSV/header-agreement and no-audio-thread-allocation criteria above
 >   still apply to whatever it emits.
 >
-> **Blocked on an author input:** the definition of the *normal parameter range*. The gate cannot be written until it
-> exists. Note the scheduling wrinkle — it is a listening judgement, but this task precedes the P2.8 listening pass;
-> the controller's recommendation is to set it provisionally from measured data, gate P2.7 against that, and confirm it
-> at P2.8 in the same session that settles the `couplingStrength` default.
+**Additional acceptance criteria (author decision 2026-08-01, ADR 0007 D5/D6):**
+- [ ] **`[tuning]` grid gate.** ±2 cents over the supported note range at 44.1/48/96 kHz, across the **provisional Normal range** of (`couplingStrength` × `bridgeResonanceHz` × `bridgeDamping`) — not only at the default admittance. Grid points, not samples.
+- [ ] **The Normal range is derived, not declared.** It is the **largest contiguous region** of the three-parameter space in which *all five* hold at once: (1) tuning within ±2 cents across the supported note range; (2) the fixed-point solver converges reliably; (3) live parameter changes remain click-free; (4) near-unison strings **≈25 cents apart do not involuntarily mode-lock** under ordinary playing conditions; (5) the bridge still behaves as an instrument component rather than an overt resonant effect. Four are measurable here; (5) is P2.8's judgement. P2.7 derives and records a **provisional** region; **P2.8 confirms or revises it** alongside the `couplingStrength` default. Criterion (4) is what ties the two together — mode-locking is a coupling phenomenon, so the range ceiling and the default are the same measurement.
+- [ ] **Extended (Effect) range declared.** Settings outside the Normal range remain available and carry **no tuning guarantee**; the boundary is declared in the ADR and enforced in whatever the UI/parameter surface reports, never merely discovered by a user.
+- [ ] **Solver contract declared *and tested*:** convergence tolerance in cents (tighter than ±2 by a stated margin), maximum iteration count, and **defined fallback behaviour for non-convergent or pathological settings**. A test drives the solver into non-convergence deliberately and asserts the fallback, rather than assuming it is unreachable — the P2.4 review found exactly that assumption false about a different "unreachable" branch.
+- [ ] **Dedicated live-parameter gate `[contract]`:** `couplingStrength`, `bridgeResonanceHz` and `bridgeDamping` each changed **while strings are sounding**, asserting no clicks, no discontinuities, and **no unstable pitch transitions**. All compensation changes route through **P2.3's dual-anchor crossfade machinery** — retuning a ringing string is a delay-length change on a ringing string. The pitch-stability half is not implied by the click half: a converging solver can be perfectly smooth and still audibly hunt.
+- [ ] **Steep phase-slope region around bridge resonance measured early** and reported, before the grid gate is finalized — it is the risk item for this task. A **residual trim** is applied *only if* the analytic solution leaves a small systematic error there; it is a fallback, not part of the design.
+- [ ] `cnpg_calibrate` retained and re-scoped to the **verification harness** over the note × bridge-parameter grid (plus the optional residual trim). Its determinism, CSV/header agreement, and no-audio-thread-allocation criteria above apply to whatever it emits.
+- [ ] **`couplingStrength` is not confirmed here.** It remains provisional per ADR 0007 D4; this task must not record it as the shipping default.
 
 ---
 

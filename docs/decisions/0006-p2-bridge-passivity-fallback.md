@@ -26,6 +26,56 @@ Two decisions had to be made here and recorded outside a task report:
 
 ## Decision
 
+### D0 — the passing construction: a **wave-digital parallel adaptor**, passive by algebra
+
+*This section exists because P2.5's pass-path criterion requires the decision record — not the task
+report — to carry the construction and discretization that passed. Independently re-derived from
+Kirchhoff's law and checked against the shipped code during the P2.4 review.*
+
+**Not** a bridge admittance discretized into a transfer function and inverted into a scattering
+matrix — that route makes passivity an empirical property of the resulting coefficients, which is
+where these designs usually fail. Instead the junction is the parallel connection of N string ports
+with a lumped load, solved exactly.
+
+Kirchhoff at the shared velocity node gives
+
+    v = 2 * sum_p (Z_p * a_p) / sigma,      b_p = v - a_p,      sigma = sum_p Z_p
+
+In **power-normalized** wave variables `â_p = sqrt(Z_p) * a_p` this is `b̂ = S̃ â` with
+
+    S̃ = (2/sigma) * u u^T - I,     u_p = sqrt(Z_p),     ||u||^2 = sigma
+
+`(2/sigma) u u^T` has eigenvalue 2 on `span(u)` and 0 on its orthogonal complement, so `S̃` has
+eigenvalues +1 and −1: it is a **symmetric orthogonal reflection**, and `||S̃||_2 = 1` *exactly*,
+for **any** set of positive port impedances. Passivity is therefore an algebraic identity, not a
+measured outcome, and there is **no clamp anywhere in the audio path** — the only `clamp` calls in
+the module are parameter validation in `setAdmittance` and a bound on the port count.
+
+**Discretization of the load elements.** The lumped load is three wave-digital one-ports joined at
+the same node: a **mass** with `a[n+1] = b[n]`, a **spring** with `a[n+1] = -b[n]`, and a matched
+**dashpot** with `a_R ≡ 0`, which contributes its `Z_R` to `sigma` and dissipates `Z_R * v^2`. The
+element states are stored already normalized (`sM = sqrt(Z_M) * a_M`), so `sM^2` *is* that port's
+stored energy and no conversion is needed at the energy boundary. The rigid termination is the
+exact `v = 0` substitution rather than a stiff approximation of it. `copyScatteringMatrix` exposes
+the **power-normalized** `2*sqrt(Z_i Z_j)/sigma - delta_ij`; the raw `2*Z_j/sigma - delta_ij` has
+norm exceeding 1 at unequal impedances and would have been the wrong thing to publish.
+
+**What the matrix norm does *not* carry.** A correct matrix wrapped in wrong element impedances is
+still wrong, so the binding gate measures the **full energy account on `scatter()` itself, every
+sample**, over ~1500 configurations (port counts 1/2/6/8, equal impedances and a 4:1 spread):
+`sum Z a^2 >= sum Z b^2 + dE_stored`. Worst gain **2.22e-15**; exact balance with the dashpot
+bypassed; worst single-sample dissipation **1.578** as the non-vacuity control.
+
+**Deriving the balance found two state-bearing elements nobody had counted** — the junction's own
+mass and spring (11–12% of total network energy; omitting them misses the passivity bound by
+~1.28e8×), and a per-string seam register that only *becomes* state once a port drives that string.
+Both are now in `energyEstimate()`. A test would have reported only that the bound failed; the
+derivation is what said why.
+
+**Measured against the three tiers:** spectral norm 1.0 to within **4.4e-16** over 2304 grid points
+at three sample rates; tier 2 worst per-block growth **6.4e-15** against a 1e-9 bound; tier 3
+**4.7e-9** against 1e-6.
+
 ### D1 — `couplingStrength` is **provisionally 0.35**
 
 > **SUPERSEDED IN PART, 2026-08-01 — this default is PROVISIONAL, not shipped.** By author decision
@@ -136,6 +186,26 @@ Q17's design-for-fallback stays intact regardless: `BridgeJunction` and the (unb
 `SympatheticResonatorBus` share `IBridgePort`, `StringNetwork::setBridgePort()` substitutes one for
 the other, and `tests/dsp/BridgePortContractTests.cpp` is written as an interface-level suite that a
 fallback bus would inherit by adding one line.
+
+### D3 — Task P2.5's acceptance criteria, verified rather than re-executed
+
+P2.5 is a *protocol*, not an implementation task, and the pass path closes it. Each criterion
+checked against the tree at `5c37baa` rather than assumed:
+
+| P2.5 criterion | State | Evidence |
+|---|---|---|
+| Decision doc exists, records the passing construction, no TBD text | **Met** | This file. **D0 was added specifically to close this** — it was the one criterion genuinely unmet, because the construction lived only in the task report under the gitignored `.superpowers/`. Grep for TBD/TODO/FIXME: none. |
+| `BridgePortContractTests` `[contract]` passes for every `IBridgePort` implementation | **Met, and exceeded** | The suite is `TEMPLATE_TEST_CASE`-parameterized over **two** production implementations — `BridgeJunction<double>` and `RigidBridgeTermination<double>` — where the pass path anticipated one. That it is genuinely parameterized, rather than a single-implementation test wearing a contract name, is what makes the fallback's "`StringNetwork` must not be able to tell the difference" claim checkable. |
+| Fail-path items (`SympatheticResonatorBus`, `research/bidirectional-bridge`) | **N/A** | Fallback not triggered. Branch list confirms no `research/bidirectional-bridge` exists, which is the correct state. |
+| Timebox ≤ 2 calendar weeks from first red `[energy]` run | **Met vacuously** | The clock never started: the energy suite enters history green in `7339697`, and no red `[energy]` run was ever committed or pushed. The one red reading during development is recorded in the task report (float32 subnormal, ~1e-87 total energy) and was diagnosed rather than accommodated. |
+
+**One judgement recorded rather than waved through.** A third type satisfies `IBridgePort` in the
+compiled test binary: `RecordingPort` in `tests/dsp/StringNetworkTests.cpp`. It is a deliberate
+test spy — a rigid reflection scaled by −0.5, passive by construction, existing so that "the
+substituted port is the one actually being used" is observable. It is **exempt** from the shared
+contract: it is not a shipped implementation, and requiring a stand-in to satisfy a physical
+junction's contract would defeat the reason it exists. The criterion's intent is that no
+*production* `IBridgePort` ships without passing the contract, and that holds.
 
 ## Consequences
 

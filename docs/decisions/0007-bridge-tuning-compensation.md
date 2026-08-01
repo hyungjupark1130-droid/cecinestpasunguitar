@@ -107,14 +107,59 @@ richness against pitch integrity, and where that trade should sit is a musical j
 - **P2.9 must not lock the coupling default.** The exit gate records it as provisional pending
   P2.8, per D4.
 
+### D5 — the Normal range is **derived, not declared**, and there are two ranges
+
+*(author decision, same day, answering this ADR's original open question 1)*
+
+The **Normal range** is the **largest contiguous region** of the three-parameter space in which
+*all five* of the following hold simultaneously:
+
+1. tuning stays within **±2 cents** across the supported note range;
+2. the fixed-point solver (D6) **converges reliably**;
+3. **live parameter changes remain click-free**;
+4. near-unison strings **≈25 cents apart do not involuntarily mode-lock** under ordinary playing
+   conditions;
+5. the bridge still behaves as an **instrument component rather than an overt resonant effect**.
+
+This is a definition P2.7 can *execute* — four of the five conditions are measurable and the fifth
+is the listening judgement P2.8 supplies. P2.7 derives a **provisional** region from measured data
+so it can proceed; **P2.8 confirms or revises it** in the same session that settles the
+`couplingStrength` default. Criterion 4 is the one that ties the range to D4: mode-locking is a
+coupling phenomenon, so the coupling default and the range ceiling are the same measurement.
+
+Settings **outside** the Normal range remain available as an **Extended (Effect) range**. They
+carry **no tuning guarantee** — this is where D3's bounded physical detuning lives, and it is a
+legitimate place for the instrument to be an effect, provided the boundary is declared rather than
+discovered.
+
+### D6 — the solver is specified, not merely required
+
+*(author decision, same day, answering original open questions 2 and 3)*
+
+The fixed point runs **outside the audio path**, on parameter change. P2.7 must **declare and
+test**, not merely implement:
+
+- the **convergence tolerance** (in cents, tighter than the ±2-cent gate by a stated margin);
+- the **maximum iteration count**;
+- the **fallback behaviour for non-convergent or pathological settings** — what the instrument does
+  when the solve does not land, which must be defined behaviour rather than whatever the loop
+  happens to leave behind.
+
+**All compensation changes caused by live bridge parameters route through P2.3's dual-anchor
+crossfade machinery**, and P2.7 carries a **dedicated gate** proving that `couplingStrength`,
+`bridgeResonanceHz` and `bridgeDamping` can each be changed *while strings are sounding* without
+clicks, discontinuities, or unstable pitch transitions. Note the third of those is new: click-free
+is not sufficient here, because a converging solver can be smooth and still audibly hunt.
+
+`cnpg_calibrate` is retained as the **verification harness** across the MIDI-note × bridge-parameter
+grid. The **steep phase-slope region around bridge resonance is measured early** — it is the risk
+item, and discovering it at the gate is the failure mode to avoid. A **residual trim** is used
+*only if* the analytic solution leaves a small systematic error there; it is a fallback, not part
+of the design.
+
 ## Open questions this ADR does not settle
 
-1. **What is the "normal parameter range"?** The ±2-cent gate cannot bind until it is defined.
-   It needs a musical answer, not an arithmetic one — the range over which the bridge is a bridge
-   rather than an effect. Owed before P2.7's gate can be written.
-2. **What bound applies to extreme settings under D3** — a hard cents ceiling, a soft warning, or
-   simply "declared and measured"?
-3. **Does the analytic correction hold ±2 cents across the whole normal range**, or does a residual
-   trim remain necessary near the load resonance, where the phase slope is steepest and the
-   sensitivity to every parameter is highest? This is the risk item for P2.7 and it should be
-   measured early rather than discovered at the gate.
+None outstanding. The three original open questions were answered by the author on the same day and
+are recorded above as D5 and D6. What remains is not a question but a scheduled confirmation: the
+**provisional** Normal range and the **provisional** `couplingStrength` default are both settled by
+ear at P2.8.
