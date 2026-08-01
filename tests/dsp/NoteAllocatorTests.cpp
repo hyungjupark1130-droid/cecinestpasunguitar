@@ -141,8 +141,19 @@ TEST_CASE("NoteAllocator: velocity maps data2 0..127 onto 0..1", "[contract]") {
 }
 
 TEST_CASE("NoteAllocator: notes outside kMinMidiNote..kMaxMidiNote are rejected", "[contract]") {
+    // The design-envelope rejection, ISOLATED from the assignment policy. A zone table covering all
+    // of MIDI is what isolates it: under the default GuitarFingering tuning the in-range boundary
+    // note (MIDI 21) is also unassignable -- a 6-string EADGBE instrument cannot play it -- so a
+    // single "one event came out" assertion would pass for the wrong reason and would keep passing
+    // if the range check were deleted. Here every in-range note has somewhere to go, so the only
+    // thing that can drop one is the range check itself.
     NoteAllocator allocator;
     allocator.prepare(1);
+
+    NoteAllocatorParams params;
+    params.mode = AllocationMode::FreeZones;
+    params.zones[0] = cnpg::dsp::StringZone{0, 127};
+    allocator.setParams(params);
 
     const RawMidiEvent events[] = {
         noteOn(0, static_cast<std::uint8_t>(cnpg::dsp::kMinMidiNote - 1), 100),  // below range
@@ -154,6 +165,12 @@ TEST_CASE("NoteAllocator: notes outside kMinMidiNote..kMaxMidiNote are rejected"
 
     REQUIRE(outEvents.size() == 1);
     REQUIRE(outEvents.peek()->midiNote == static_cast<std::uint8_t>(cnpg::dsp::kMinMidiNote));
+
+    // A rejected note is NOT an unassignable one, and the counters say so: an out-of-envelope note
+    // never reaches the assignment policy at all, so the counter that reports "the policy had
+    // nowhere to put this" must stay at zero.
+    REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.queueOverflowCount() == 0);
 }
 
 TEST_CASE("NoteAllocator: channel is carried opaquely through into the NoteEvent", "[contract]") {
@@ -183,34 +200,69 @@ TEST_CASE("NoteAllocator: offsets out of allocate stay non-decreasing", "[contra
     }
 }
 
-TEST_CASE("NoteAllocator: CC64 is a no-op in P1 -- sustainActive() always returns false", "[contract]") {
+TEST_CASE("NoteAllocator: every CC except 64 is ignored, and CC64 itself emits no NoteEvent", "[contract]") {
+    // Task P2.6 gave CC64 meaning (tests/dsp/SustainPedalTests.cpp is where that meaning is gated).
+    // What survives here is the half that did not change: the allocator consumes CC messages and
+    // never turns one into a note, and every controller other than 64 is somebody else's business.
     NoteAllocator allocator;
     allocator.prepare(1);
 
     REQUIRE_FALSE(allocator.sustainActive());
 
-    const RawMidiEvent events[] = {noteOn(0, 60, 100), controlChange(5, 64, 127), noteOff(10, 60)};
+    const RawMidiEvent events[] = {noteOn(0, 60, 100), controlChange(5, 1, 127), // mod wheel: ignored
+                                   controlChange(6, 11, 64),                     // expression: ignored
+                                   noteOff(10, 60)};
     BlockEventQueue outEvents;
-    allocator.allocate(events, 3, outEvents);
+    allocator.allocate(events, 4, outEvents);
 
-    REQUIRE_FALSE(allocator.sustainActive());
-    REQUIRE(outEvents.size() == 2); // the CC64 message itself produced no NoteEvent
+    REQUIRE_FALSE(allocator.sustainActive()); // no CC64 arrived, so the pedal never moved
+    REQUIRE(outEvents.size() == 2);           // the two CC messages produced no NoteEvent
+    REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.queueOverflowCount() == 0);
+
+    // ...and CC64 itself is a pedal, not a note: it moves state and emits nothing on its own.
+    allocator.reset();
+    const RawMidiEvent pedalOnly[] = {controlChange(0, 64, 127)};
+    BlockEventQueue pedalEvents;
+    allocator.allocate(pedalOnly, 1, pedalEvents);
+    REQUIRE(allocator.sustainActive());
+    REQUIRE(pedalEvents.empty());
 }
 
-TEST_CASE("NoteAllocator: AllocationMode values are accepted by setParams without affecting P1 assignment",
-          "[contract]") {
+TEST_CASE("NoteAllocator: setParams switches AllocationMode live, on the next note", "[contract]") {
+    // The mode is a realtime parameter read per block, so the only thing this case can assert
+    // without duplicating the two mode suites is that a change TAKES EFFECT and takes effect on the
+    // next NoteOn rather than at some later reset. It is checked with a table that makes the two
+    // modes disagree: MIDI 60 fingers cheapest on string 4 (open 59, fret 1) under the default
+    // EADGBE, while a zone table that lists it only on string 1 must send it there instead.
     NoteAllocator allocator;
-    allocator.prepare(1);
+    allocator.prepare(cnpg::dsp::kMaxStrings);
 
-    NoteAllocatorParams params;
-    params.mode = AllocationMode::FreeZones;
-    allocator.setParams(params);
+    NoteAllocatorParams fingering;
+    allocator.setParams(fingering);
 
-    const RawMidiEvent events[] = {noteOn(0, 60, 100)};
-    BlockEventQueue outEvents;
-    allocator.allocate(events, 1, outEvents);
+    const RawMidiEvent first[] = {noteOn(0, 60, 100)};
+    BlockEventQueue firstOut;
+    allocator.allocate(first, 1, firstOut);
+    REQUIRE(firstOut.peek()->stringIndex == 4);
+    REQUIRE(allocator.stringForNote(0, 60) == 4);
 
-    REQUIRE(outEvents.peek()->stringIndex == 0); // still monophonic single-string in P1
+    allocator.reset();
+
+    NoteAllocatorParams zones;
+    zones.mode = AllocationMode::FreeZones;
+    for (auto& zone : zones.zones)
+        zone = cnpg::dsp::StringZone{1, 0};         // deliberately empty everywhere...
+    zones.zones[1] = cnpg::dsp::StringZone{55, 70}; // ...except string 1
+    allocator.setParams(zones);
+
+    const RawMidiEvent second[] = {noteOn(0, 60, 100)};
+    BlockEventQueue secondOut;
+    allocator.allocate(second, 1, secondOut);
+    REQUIRE(secondOut.peek()->stringIndex == 1);
+    REQUIRE(allocator.stringForNote(0, 60) == 1);
+    REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.queueOverflowCount() == 0);
 }
 
 // -- allocate() performs no heap allocation ---------------------------------------------------

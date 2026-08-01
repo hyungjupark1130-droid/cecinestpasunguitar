@@ -39,6 +39,7 @@ using cnpg::dsp::BlockEventQueue;
 using cnpg::dsp::FractionalDelayKind;
 using cnpg::dsp::NoteEvent;
 using cnpg::dsp::NoteEventType;
+using cnpg::dsp::RetriggerMode;
 using cnpg::dsp::StringNetwork;
 using cnpg::dsp::StringNetworkParams;
 
@@ -722,23 +723,84 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a retrigger snaps the damper open over cl
     REQUIRE(midRamp < 0.95f);
     REQUIRE(network.energyEstimate() > 0.0); // ...and the string is still ringing under it
 
-    // A pitch-changing retrigger: re-init path, so the snap applies.
+    // -----------------------------------------------------------------------------------------
+    // TASK P2.6 SPLIT THIS IN TWO, and both halves are worth having.
+    // -----------------------------------------------------------------------------------------
+    // Through P2.3 EVERY pitch-changing retrigger took the re-init path, so the snap was reached
+    // from there and this case measured it there. P2.6 gives RetriggerMode real semantics and the
+    // two modes now take opposite paths over exactly this state -- a string mid-release, still
+    // ringing, with a felt half-way down:
+    //
+    //   Physical RAMPS the damper open (release(), the felt time) and KEEPS the rails, because the
+    //   waves passing through the junction are not zeros and a coefficient that jumps through them
+    //   is the click this pairing exists to prevent. The snap would be a defect here.
+    //   Synth FADES to exactly zero first and only then clears, which restores the invariant --
+    //   the snap happens over zeros -- and the re-attack is bit-identical to a fresh instance.
+    //
+    // So the invariant is unchanged ("the snap happens only over cleared state") and it is now
+    // asserted from both sides: that Physical does NOT snap, and that Synth does and lands clean.
+
+    StringNetworkParams physicalParams = paramsWith(100.0f);
+    physicalParams.retriggerMode = RetriggerMode::Physical;
+    network.setParams(physicalParams);
+
     BlockEventQueue retrigger;
     retrigger.push(noteOn(0, 52));
+    network.process(retrigger, kBlock);
+
+    // RAMPED, NOT SNAPPED. The engagement is on its way down from the mid-ramp value above, and it
+    // is emphatically not 0 -- one block is 2.67 ms against a 100 ms felt.
+    const float afterPhysical = network.damperEngagement(0);
+    INFO("engagement one block after a Physical retrigger " << afterPhysical << " (was " << midRamp << ")");
+    REQUIRE(afterPhysical > 0.0f);
+    REQUIRE(afterPhysical < midRamp); // releasing, not engaging
+    // ...and the state was kept: the string is not a fresh instance.
+    REQUIRE(network.energyEstimate() > 0.0);
+
+    // Now the Synth half, from the same mid-ramp state, on its own instance.
+    StringNetworkParams synthParams = paramsWith(100.0f);
+    synthParams.retriggerMode = RetriggerMode::Synth;
+
+    StringNetwork<float> synth;
+    configure(synth, synthParams);
+    BlockEventQueue synthEvents;
+    synthEvents.push(noteOn(0, 45));
+    for (int b = 0; b < 200; ++b)
+        synth.process(synthEvents, kBlock);
+    BlockEventQueue synthRelease;
+    synthRelease.push(noteOff(0, 45));
+    for (int b = 0; b < 20; ++b)
+        synth.process(synthRelease, kBlock);
+    const float synthMidRamp = synth.damperEngagement(0);
+    INFO("Synth engagement at the retrigger " << synthMidRamp);
+    REQUIRE(synthMidRamp > 0.05f);
+    REQUIRE(synthMidRamp < 0.95f);
+
+    BlockEventQueue synthRetrigger;
+    synthRetrigger.push(noteOn(0, 52));
     std::vector<float> revived;
     for (int b = 0; b < 60; ++b) {
-        network.process(retrigger, kBlock);
-        if (b == 0)
-            REQUIRE(network.damperEngagement(0) == 0.0f); // snapped, not ramped
-        const float* channel = network.tapBuffers().channel(0, 0);
+        synth.process(synthRetrigger, kBlock);
+        if (b == 0) {
+            // The fade landed inside this very block (2 ms at 48 kHz is 96 samples of a 128-sample
+            // block), and the snap went with it.
+            REQUIRE_FALSE(synth.retriggerFadeActive(0));
+            REQUIRE(synth.retriggerFadeGain(0) == 1.0f);
+            REQUIRE(synth.damperEngagement(0) == 0.0f); // snapped, over zeros
+        }
+        const float* channel = synth.tapBuffers().channel(0, 0);
         revived.insert(revived.end(), channel, channel + kBlock);
     }
 
-    // The state the snap happened over really was cleared: the render is BIT-IDENTICAL to the same
-    // note plucked on a string that never rang and was never damped. Nothing of the damped tail,
-    // and no residual engagement, survived into it.
+    // The state the snap happened over really was cleared: from the sample the fade landed, the
+    // render is BIT-IDENTICAL to the same note plucked on a string that never rang and was never
+    // damped. Nothing of the damped tail, and no residual engagement, survived into it. The first
+    // fadeSamples + 1 samples are the fade itself, which by construction is NOT in the fresh
+    // render -- that is the 2 ms of latency a Synth retrigger costs, and it is asserted below
+    // rather than skipped past silently.
+    const int fadeSamples = static_cast<int>(std::lround(cnpg::dsp::kSynthFadeSeconds * kRate));
     StringNetwork<float> fresh;
-    configure(fresh, paramsWith(100.0f));
+    configure(fresh, synthParams);
     BlockEventQueue freshEvents;
     freshEvents.push(noteOn(0, 52));
     std::vector<float> expected;
@@ -752,9 +814,12 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a retrigger snaps the damper open over cl
     for (float value : revived)
         peak = std::max(peak, std::fabs(value));
     REQUIRE(peak > 0.001f); // non-vacuous: the retriggered note really sounds
-    for (std::size_t i = 0; i < revived.size(); ++i) {
+
+    // The fade's last sample is exactly zero, and the note starts on the next one.
+    REQUIRE(revived[static_cast<std::size_t>(fadeSamples) - 1] == 0.0f);
+    for (std::size_t i = static_cast<std::size_t>(fadeSamples) + 1; i < revived.size(); ++i) {
         INFO("sample " << i);
-        REQUIRE(revived[i] == expected[i]);
+        REQUIRE(revived[i] == expected[i - static_cast<std::size_t>(fadeSamples)]);
     }
 }
 

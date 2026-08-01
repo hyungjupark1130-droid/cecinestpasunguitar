@@ -896,6 +896,12 @@ struct RenderStats {
     long long subnormalSamples = 0;
     long long midiEvents = 0;
     std::uint32_t droppedNoteEvents = 0;
+    // NoteAllocator's own drop (Task P2.6): a NoteOn no enabled in-count string could play. It is a
+    // DIFFERENT failure from a queue overflow and it has to be reported separately, because a note
+    // the allocator declined and a note nobody played sound exactly alike -- and because a
+    // misconfigured allocator is now a way for this tool to render a corpus phrase with notes
+    // missing and still report every other statistic as healthy.
+    std::uint32_t unassignableNotes = 0;
 };
 
 // MIDI status nibbles this layer reads directly, exactly as plugin/src/PluginProcessor.cpp does:
@@ -930,6 +936,21 @@ void renderPhrase(const MidiFileContents& midi, const RenderSpec& spec, std::vec
 
     cnpg::dsp::NoteAllocator allocator;
     allocator.prepare(kP1NumStrings);
+    {
+        // EVERY NOTE GOES TO THE ONE STRING, stated explicitly rather than inherited (Task P2.6).
+        // This tool is the P1 single-string vertical slice and its whole point is that the corpus
+        // renders the same way it always has; the allocator's shipping default is now
+        // GuitarFingering over an EADGBE table, which on ONE string spans MIDI 40..64 and would
+        // silently drop every corpus note outside it -- phrase 01 is a chromatic sweep. A full-range
+        // FreeZones table is what "put it on the string" means now that the allocator has an
+        // opinion. The multi-string corpus is Task P2.8's.
+        cnpg::dsp::NoteAllocatorParams allocatorParams;
+        allocatorParams.mode = cnpg::dsp::AllocationMode::FreeZones;
+        allocatorParams.activeStringCount = kP1NumStrings;
+        for (auto& zone : allocatorParams.zones)
+            zone = cnpg::dsp::StringZone{0, 127};
+        allocator.setParams(allocatorParams);
+    }
 
     cnpg::test::P1ChainParams baseParams = cnpg::test::makeDefaultP1ChainParams();
     baseParams.network.retriggerMode = spec.retriggerMode;
@@ -979,6 +1000,7 @@ void renderPhrase(const MidiFileContents& midi, const RenderSpec& spec, std::vec
         noteEvents.clear();
         allocator.allocate(rawEvents.data(), static_cast<int>(rawEvents.size()), noteEvents);
         stats.droppedNoteEvents += noteEvents.droppedCount();
+        stats.unassignableNotes = allocator.unassignableNoteCount(); // cumulative; not a per-block sum
 
         {
             // Exactly the guard PluginProcessor::processBlock() engages around the identical calls.
@@ -1178,8 +1200,8 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
     std::printf("    %lld samples (%.3f s), %lld MIDI event(s), peak %.2f dBFS, rms %.2f dBFS, dc %.2f dBFS\n",
                 stats.numSamples, stats.durationSeconds, stats.midiEvents, dbOf(stats.peak), dbOf(stats.rms),
                 dbOf(std::fabs(stats.dcOffset)));
-    std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u%s\n", stats.nonFiniteSamples,
-                stats.subnormalSamples, stats.droppedNoteEvents,
+    std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u unassignableNotes=%u%s\n",
+                stats.nonFiniteSamples, stats.subnormalSamples, stats.droppedNoteEvents, stats.unassignableNotes,
                 verifyDeterminism ? " determinism=verified(2 in-process renders bit-identical)" : "");
     std::fflush(stdout);
 
@@ -1191,6 +1213,13 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
     if (stats.droppedNoteEvents > 0) {
         std::fprintf(stderr, "cnpg_render: %s dropped %u note event(s) -- the block event queue overflowed\n",
                      label.c_str(), stats.droppedNoteEvents);
+        return false;
+    }
+    if (stats.unassignableNotes > 0) {
+        std::fprintf(stderr,
+                     "cnpg_render: %s left %u note(s) unassigned -- NoteAllocator had no string that could play "
+                     "them, so the render is missing notes the phrase contains\n",
+                     label.c_str(), stats.unassignableNotes);
         return false;
     }
 

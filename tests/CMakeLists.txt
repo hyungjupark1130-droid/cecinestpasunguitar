@@ -30,7 +30,9 @@ add_executable(cnpg_tests
     dsp/MovingPositionClickTests.cpp
     dsp/NetworkEnergyTierThreeTests.cpp
     dsp/NetworkEnergyTierTwoTests.cpp
+    dsp/NoteAllocatorFingeringTests.cpp
     dsp/NoteAllocatorTests.cpp
+    dsp/NoteAllocatorZonesTests.cpp
     dsp/OutputGainTests.cpp
     dsp/OversamplerTests.cpp
     dsp/ParamStructsTests.cpp
@@ -38,7 +40,9 @@ add_executable(cnpg_tests
     dsp/PitchBendClickTests.cpp
     dsp/PluckExciterTests.cpp
     dsp/RenderTests.cpp
+    dsp/RetriggerModeTests.cpp
     dsp/ScopedFtzDazGuardTests.cpp
+    dsp/SustainPedalTests.cpp
     dsp/StringNetworkTests.cpp
     dsp/StringNetworkScaleTests.cpp
     dsp/TriodeStageTests.cpp

@@ -214,28 +214,65 @@ TEST_CASE("CONTRACT: StringNetwork consumes events at their exact sample offsets
 
 TEST_CASE("CONTRACT: StringNetwork fires several events inside one block at their own offsets", "[contract]") {
     // The same identity with all three offsets present at once, which is what the queue actually
-    // sees: three NoteOns in a 128-sample block. Each retrigger at a NEW pitch re-initializes the
-    // string, so the render after the last event must equal a render that only contains that last
-    // event, delayed to the same offset.
+    // sees: three NoteOns in a 128-sample block.
+    //
+    // RE-POINTED AT TASK P2.6. This case used to put all three on ONE string and assert that the
+    // render after the last event equalled a render carrying only that event -- which was true
+    // only because a pitch-changing retrigger re-initialized the string, i.e. because the earlier
+    // two notes were thrown away. P2.6 gives Physical mode real retrigger semantics: the rails are
+    // KEPT and the pitch glides, so the first two notes are still in the string when the third
+    // arrives and the old identity is false BY DESIGN (that behaviour has its own gates in
+    // tests/dsp/RetriggerModeTests.cpp).
+    //
+    // The claim this case is named for -- three events in one block each fire at their own sample
+    // -- is unchanged and is now asserted on three SEPARATE strings, which tests all three onsets
+    // instead of only the last one. The strings are decoupled here (defaultParams), so each
+    // channel is a function of its own event alone.
+    constexpr int kBlocks = 24;
     StringNetwork<float> combined;
-    configure(combined, defaultParams());
+    configure(combined, defaultParams(), kRate, kBlock, FractionalDelayKind::Lagrange3, 3);
     BlockEventQueue events;
-    events.push(noteOn(0, 40));
-    events.push(noteOn(63, 45));
-    events.push(noteOn(127, 52));
-    const std::vector<float> together = renderTap(combined, events, 24);
+    events.push(noteOn(0, 40, 0));
+    events.push(noteOn(63, 45, 1));
+    events.push(noteOn(127, 52, 2));
 
-    StringNetwork<float> lastOnly;
-    configure(lastOnly, defaultParams());
-    BlockEventQueue lastEvent;
-    lastEvent.push(noteOn(127, 52));
-    const std::vector<float> alone = renderTap(lastOnly, lastEvent, 24);
-
-    for (std::size_t i = 127; i < together.size(); ++i) {
-        INFO("sample " << i);
-        REQUIRE(together[i] == alone[i]);
+    std::vector<float> together[3];
+    for (int b = 0; b < kBlocks; ++b) {
+        combined.process(events, kBlock);
+        for (int s = 0; s < 3; ++s) {
+            const float* channel = combined.tapBuffers().channel(s, 0);
+            REQUIRE(channel != nullptr);
+            together[s].insert(together[s].end(), channel, channel + kBlock);
+        }
     }
-    REQUIRE(peakOf(together) > 0.001f);
+
+    struct Expectation {
+        int offset;
+        int note;
+        int stringIndex;
+    };
+    const Expectation expectations[] = {{0, 40, 0}, {63, 45, 1}, {127, 52, 2}};
+
+    for (const Expectation& expected : expectations) {
+        StringNetwork<float> alone;
+        configure(alone, defaultParams(), kRate, kBlock, FractionalDelayKind::Lagrange3, 3);
+        BlockEventQueue single;
+        single.push(noteOn(expected.offset, expected.note, expected.stringIndex));
+        const std::vector<float> reference = renderTap(alone, single, kBlocks, expected.stringIndex);
+
+        const std::vector<float>& measured = together[expected.stringIndex];
+        REQUIRE(peakOf(reference) > 0.001f); // non-vacuous: this string really sounds
+        REQUIRE(measured.size() == reference.size());
+        for (std::size_t i = 0; i < measured.size(); ++i) {
+            INFO("string " << expected.stringIndex << " sample " << i);
+            REQUIRE(measured[i] == reference[i]);
+        }
+        // ...and nothing before its own offset.
+        for (int n = 0; n < expected.offset; ++n) {
+            INFO("string " << expected.stringIndex << ": sample " << n << " precedes the event");
+            REQUIRE(measured[static_cast<std::size_t>(n)] == 0.0f);
+        }
+    }
 }
 
 TEST_CASE("CONTRACT: StringNetwork clamps an out-of-block event onto the block's last sample", "[contract]") {
@@ -516,14 +553,50 @@ TEST_CASE("CONTRACT: StringNetwork plucks a same-pitch retrigger over the ringin
     INFO("worst superposition residual " << worst << " against peak " << peak);
     REQUIRE(worst <= 1.0e-5f * peak);
 
-    // A pitch-changing retrigger re-initializes the string at the new pitch instead -- the P1
-    // stand-in for the full Physical/Synth semantics, which need DamperJunction and land in P2.6.
-    // "Re-initialized" is exact too: the tail is bit-identical to the same note plucked on a
-    // string that never rang at all.
+    // A PITCH-CHANGING retrigger in Physical mode. Through P2.3 this re-initialized the string and
+    // the tail was bit-identical to the same note plucked on a string that never rang -- the P1
+    // stand-in the scope note called out. TASK P2.6 REPLACED THAT: the rails are KEPT and only the
+    // pitch glides, so the old note continues into the new one, and the bit-identity is now
+    // deliberately FALSE. Asserted in both directions here so the change cannot be undone silently:
+    // the retriggered tail must differ from a fresh pluck (state survived) while still sounding
+    // (the pluck happened). What that difference measures -- click-freedom, the 30 ms landing,
+    // the Synth contrast -- is tests/dsp/RetriggerModeTests.cpp's job.
     const std::vector<float> newPitch = renderRetrigger(kMidiNote + 5);
     const std::vector<float> freshNewPitch = renderFreshPluck(kMidiNote + 5);
+    REQUIRE(peakOf(newPitch) > 0.001f);
+    REQUIRE(peakOf(freshNewPitch) > 0.001f);
+
+    float worstAgainstFresh = 0.0f;
     for (std::size_t i = 0; i < newPitch.size(); ++i)
-        REQUIRE(newPitch[i] == freshNewPitch[i]);
+        worstAgainstFresh = std::max(worstAgainstFresh, std::fabs(newPitch[i] - freshNewPitch[i]));
+    INFO("worst |retriggered - fresh| " << worstAgainstFresh);
+    REQUIRE(worstAgainstFresh > 1.0e-4f * peakOf(freshNewPitch));
+
+    // ...and the string really did land on the new pitch rather than merely refusing to clear. The
+    // retune ramp is short and it LANDS -- once it is spent the smoothed f0 IS the new note, to the
+    // last bit of the float, which is what the one-pole it replaced could never say. Asserted
+    // mid-flight first (the P2.1 trap: a state change measured outside its own window measures
+    // something else).
+    StringNetwork<float> landing;
+    configure(landing, defaultParams());
+    BlockEventQueue first;
+    first.push(noteOn(0, kMidiNote));
+    renderTap(landing, first, kRingBlocks);
+
+    const int rampSamples = static_cast<int>(std::lround(landing.retuneRampSeconds() * kRate));
+    REQUIRE(rampSamples > kBlock); // the mid-flight assertion below is only meaningful if it is
+
+    BlockEventQueue second;
+    second.push(noteOn(0, kMidiNote + 5));
+    renderTap(landing, second, 1);
+    REQUIRE(landing.retuneRampSamplesRemaining(0) == rampSamples - kBlock); // genuinely mid-ramp
+
+    const int remainingBlocks = (rampSamples - kBlock + kBlock - 1) / kBlock;
+    renderTap(landing, second, remainingBlocks);
+    const float expectedHz = static_cast<float>(440.0 * std::exp2((kMidiNote + 5 - 69) / 12.0));
+    INFO("f0 after the retune ramp " << landing.stringF0Hz(0) << " Hz, target " << expectedHz);
+    REQUIRE(landing.retuneRampSamplesRemaining(0) == 0);
+    REQUIRE(landing.stringF0Hz(0) == expectedHz);
 }
 
 TEST_CASE("CONTRACT: StringNetwork NoteOff damps the string and then clears it", "[contract]") {

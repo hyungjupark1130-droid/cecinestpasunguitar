@@ -283,7 +283,11 @@ template <typename SampleT> void WaveguideString<SampleT>::reset() noexcept {
     junctionAnchor_ = PositionAnchor{};
 
     // Snap every smoother onto its target: a reset instance must be indistinguishable from a
-    // freshly prepared one (docs/plan.md section 4.1, "reset is idempotent and complete").
+    // freshly prepared one (docs/plan.md section 4.1, "reset is idempotent and complete"). A
+    // retune ramp in flight is exactly such a difference, so it is abandoned here rather than
+    // allowed to keep gliding a string whose rails were just zeroed.
+    retuneStepsRemaining_ = 0;
+    retuneRatio_ = 1.0;
     retargetSmoothers();
     f0Smoothed_ = f0Target_;
     lossLowSmoothed_ = lossLowTarget_;
@@ -311,6 +315,31 @@ template <typename SampleT> void WaveguideString<SampleT>::retargetSmoothers() n
     // (sharp-stretched) partial series real strings have. A positive coefficient would flatten
     // the partials instead.
     dispersionTarget_ = -disp * static_cast<double>(kDispersionMaxCoeff);
+
+    // A target that moves while a ramp is in flight (a pitch bend arriving during a retrigger)
+    // re-aims the remaining steps at it rather than stranding the glide short of the new note.
+    refreshRetuneRatio();
+}
+
+template <typename SampleT> void WaveguideString<SampleT>::refreshRetuneRatio() noexcept {
+    if (retuneStepsRemaining_ <= 0)
+        return;
+    // Constant cents per sample: the ratio that takes the value where it IS to where it is going in
+    // exactly the steps that are left. Recomputed rather than accumulated, so a mid-ramp retarget
+    // cannot leave the glide aimed at a pitch nobody asked for.
+    const double from = (f0Smoothed_ > 0.0) ? f0Smoothed_ : f0Target_;
+    const double to = (f0Target_ > 0.0) ? f0Target_ : from;
+    retuneRatio_ = std::pow(to / from, 1.0 / static_cast<double>(retuneStepsRemaining_));
+}
+
+template <typename SampleT> void WaveguideString<SampleT>::beginRetuneRamp(double rampSeconds) noexcept {
+    const double samples = rampSeconds * sampleRate_;
+    // At least one step, so "begin a ramp" always has a defined landing sample even at a
+    // degenerate duration -- a one-sample ramp is an immediate retune, which is a legitimate thing
+    // for a caller to ask for and is what the negative control in the P2.6 click gate uses.
+    retuneStepsRemaining_ = (samples >= 1.0) ? static_cast<int>(std::lround(samples)) : 1;
+    refreshRetuneRatio();
+    smoothersSettled_ = false;
 }
 
 template <typename SampleT> void WaveguideString<SampleT>::setParams(const WaveguideStringParams& p) noexcept {
@@ -375,7 +404,17 @@ template <typename SampleT> void WaveguideString<SampleT>::advanceSmoothers() no
     };
 
     bool moving = false;
-    moving |= approach(f0Smoothed_, f0Target_);
+    if (retuneStepsRemaining_ > 0) {
+        // The retune ramp OWNS f0 while it is in flight (Task P2.6). Geometric step, and the last
+        // one is written as the target itself rather than as the product of nine ratios -- so the
+        // ramp LANDS, exactly, at a sample the caller can name, which is the whole reason it exists
+        // beside the one-pole rather than instead of it.
+        --retuneStepsRemaining_;
+        f0Smoothed_ = (retuneStepsRemaining_ == 0) ? f0Target_ : f0Smoothed_ * retuneRatio_;
+        moving = true;
+    } else {
+        moving |= approach(f0Smoothed_, f0Target_);
+    }
     moving |= approach(lossLowSmoothed_, lossLowTarget_);
     moving |= approach(lossHighSmoothed_, lossHighTarget_);
     moving |= approach(dispersionSmoothed_, dispersionTarget_);

@@ -97,6 +97,13 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
     silenceWindowSamples_ = std::max(1, static_cast<int>(std::lround(kSilenceWindowSeconds * sampleRate_)));
     enableRampStep_ = static_cast<float>(1.0 / std::max(1.0, kEnableRampSeconds * sampleRate_));
 
+    // The Synth retrigger fade is a whole number of samples so the same gesture takes the same time
+    // at every rate, and it reaches EXACTLY zero on its last faded sample -- linear for the same
+    // reason the enable ramp is (a one-pole never arrives, and "the string is silent, clear it" has
+    // to become true at a sample somebody can name).
+    synthFadeSamples_ = std::max(1, static_cast<int>(std::lround(kSynthFadeSeconds * sampleRate_)));
+    synthFadeStep_ = 1.0f / static_cast<float>(synthFadeSamples_);
+
     if (port_ == nullptr)
         port_ = &internalBridge_;
     port_->prepare(sampleRate_, maxBlockSize_, kMaxStrings, portImpedance_.data());
@@ -128,6 +135,15 @@ template <typename SampleT> void StringNetwork<SampleT>::reset() noexcept {
         ringing_[static_cast<std::size_t>(s)] = false;
         portIncident_[static_cast<std::size_t>(s)] = SampleT(0);
         portOutgoing_[static_cast<std::size_t>(s)] = SampleT(0);
+        // A Synth retrigger fade in flight is abandoned, pending note and all: a reset instance
+        // must be indistinguishable from a freshly prepared one, and a note that fires 2 ms after a
+        // reset is exactly such a difference. The event that scheduled it is already gone from the
+        // queue, so there is nothing to re-deliver and nothing that could tell.
+        fadeGain_[static_cast<std::size_t>(s)] = 1.0f;
+        fadeSteps_[static_cast<std::size_t>(s)] = 0;
+        fadeActive_[static_cast<std::size_t>(s)] = false;
+        pendingNoteOff_[static_cast<std::size_t>(s)] = false;
+        pendingNote_[static_cast<std::size_t>(s)] = NoteEvent{};
     }
     previousRenderedMask_ = 0;
 
@@ -352,9 +368,53 @@ template <typename SampleT> float StringNetwork<SampleT>::damperPosition01(int s
     return static_cast<float>(damperSmoothed_[static_cast<std::size_t>(stringIndex)]);
 }
 
+template <typename SampleT> float StringNetwork<SampleT>::stringF0Hz(int stringIndex) const noexcept {
+    if (strings_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0.0f;
+    return strings_[static_cast<std::size_t>(stringIndex)].currentF0Hz();
+}
+
+template <typename SampleT> int StringNetwork<SampleT>::retuneRampSamplesRemaining(int stringIndex) const noexcept {
+    if (strings_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0;
+    return strings_[static_cast<std::size_t>(stringIndex)].retuneRampSamplesRemaining();
+}
+
+template <typename SampleT> float StringNetwork<SampleT>::retriggerFadeGain(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 1.0f;
+    return fadeGain_[static_cast<std::size_t>(stringIndex)];
+}
+
+template <typename SampleT> bool StringNetwork<SampleT>::retriggerFadeActive(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return false;
+    return fadeActive_[static_cast<std::size_t>(stringIndex)];
+}
+
+template <typename SampleT> void StringNetwork<SampleT>::setRetuneRampSeconds(double seconds) noexcept {
+    retuneRampSeconds_ = (seconds > 0.0) ? seconds : 0.0;
+}
+
 // ------------------------------------------------------------------------------------------
 // event consumption
 // ------------------------------------------------------------------------------------------
+
+// The excitation itself, with no decision in it: whatever the retrigger paths above decided about
+// the rails, this is what puts the new note into them.
+template <typename SampleT> void StringNetwork<SampleT>::excite(int stringIndex, const NoteEvent& event) noexcept {
+    const auto index = static_cast<std::size_t>(stringIndex);
+
+    sounding_[index] = true;
+    releasing_[index] = false;
+    silencePeak_[index] = 0.0f;
+    silenceCount_[index] = 0;
+
+    exciters_[index].setParams(params_.exciter);
+    exciters_[index].trigger(event.velocity, resolveNoteParam(event.pluckPosition, params_.exciter.defaultPosition),
+                             resolveNoteParam(event.hardness, params_.exciter.defaultHardness));
+    tapView_.active_[index] = true;
+}
 
 template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteEvent& event) noexcept {
     const int stringIndex = static_cast<int>(event.stringIndex);
@@ -368,6 +428,15 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
         return;
 
     if (event.type == NoteEventType::NoteOff) {
+        // A note-off for the note a Synth fade has not started yet. Without this the fade lands, the
+        // pending NoteOn fires into a string nobody will ever release, and the note is STUCK: the
+        // allocator has already moved ownership to the pending note, so this is the only note-off
+        // that note will ever get. Deferred to the landing rather than applied now, where it would
+        // damp the old state that is about to be discarded anyway.
+        if (fadeActive_[index]) {
+            pendingNoteOff_[index] = true;
+            return;
+        }
         if (!sounding_[index])
             return; // already released, or never sounded: nothing to damp
         sounding_[index] = false;
@@ -384,39 +453,132 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
         return;
     }
 
+    // A NoteOn arriving inside a Synth fade REPLACES what the fade is going to land on rather than
+    // restarting the fade -- restarting would extend the silence a third note could extend again,
+    // and the string is already on its way to zero either way.
+    if (fadeActive_[index]) {
+        pendingNote_[index] = event;
+        pendingNoteOff_[index] = false;
+        return;
+    }
+
     const int note = std::clamp(static_cast<int>(event.midiNote), kMinMidiNote, kMaxMidiNote);
 
-    // Retrigger semantics (see the StringNetwork.h scope note): same pitch on a ringing string
-    // plucks over the existing state; anything else re-initializes the string at the new pitch.
-    // A string mid-release counts as "anything else" -- its tail is already attenuated, so
-    // clearing it is inaudible, whereas restoring the release gain to 1 over a still-ringing tail
-    // would step it back up.
-    const bool pluckOverRinging =
-        sounding_[index] && !releasing_[index] && midiNote_[index] == static_cast<std::uint8_t>(note);
-    if (!pluckOverRinging) {
+    // -------------------------------------------------------------------------------------------
+    // "OWNS A NOTE" IS WHAT MAKES A NoteOn A RETRIGGER (Task P2.4's entry condition for P2.6)
+    // -------------------------------------------------------------------------------------------
+    // Since the bridge became bidirectional a string can be RINGING with no note of its own -- that
+    // is sympathetic resonance, and it is true of every string on the instrument a moment after the
+    // first chord. So "has state" and "is playing something" came apart, and the retrigger paths
+    // below are about the second one:
+    //
+    //   - A string that owns a note is being RE-struck. There is an old note to be continuous with
+    //     (Physical) or to be replaced cleanly (Synth), and that is what RetriggerMode decides
+    //     between.
+    //   - A string that owns none is being struck for the FIRST time, whatever else it may be
+    //     carrying. There is no old note. Retuning its sympathetic motion from whatever pitch the
+    //     string was last left at -- kMinMidiNote for a string nobody has played -- would glide
+    //     inaudible content across two and a half octaves to make a point no listener can hear, and
+    //     the same fresh attack would then sound different depending on whether a neighbour
+    //     happened to be ringing. The state is cleared, exactly as it was through P2.3.
+    //
+    // NoteAllocator draws the same line with the same predicate for allocation ("idle" is "owns no
+    // note", never "is silent"), so the two levels cannot disagree about which strings are free.
+    //
+    // WHAT THAT COSTS, MEASURED NOT ASSUMED: clearing a sympathetically ringing string discards
+    // real motion. tests/dsp/RetriggerModeTests.cpp quantifies it against the level of the note
+    // that replaces it and against the sympathetic response P2.4 measured.
+    const bool ownsNote = sounding_[index] || releasing_[index];
+
+    if (!ownsNote) {
         midiNote_[index] = static_cast<std::uint8_t>(note);
         applyStringParams(stringIndex); // retarget f0 first...
         clearStringState(stringIndex);  // ...so reset() snaps the smoothers onto the NEW pitch
-    } else {
-        // Plucking over a ringing string: the finger comes OFF, so the damper ramps away with the
-        // same felt time it arrived with. Ramped, not snapped -- the rails under this junction are
-        // full, and a coefficient that jumps while a waveform is passing through it is precisely
-        // the click clearStringState() is allowed to make and this path is not. Today the
-        // engagement here is always already 0 (only a NoteOff engages it, and a NoteOff clears
-        // `sounding_`, which this branch requires), so release() is a no-op that becomes load-
-        // bearing the moment P2.6 adds a path that plucks over a damped string.
-        dampers_[index].release();
+        excite(stringIndex, event);
+        return;
     }
 
-    sounding_[index] = true;
-    releasing_[index] = false;
-    silencePeak_[index] = 0.0f;
-    silenceCount_[index] = 0;
+    if (params_.retriggerMode == RetriggerMode::Synth) {
+        // Fade first, clear at the bottom of it, then re-init and re-excite -- see landSynthFade().
+        pendingNote_[index] = event;
+        pendingNoteOff_[index] = false;
+        fadeActive_[index] = true;
+        fadeSteps_[index] = synthFadeSamples_;
+        return;
+    }
 
-    exciters_[index].setParams(params_.exciter);
-    exciters_[index].trigger(event.velocity, resolveNoteParam(event.pluckPosition, params_.exciter.defaultPosition),
-                             resolveNoteParam(event.hardness, params_.exciter.defaultHardness));
-    tapView_.active_[index] = true;
+    // -------------------------------------------------------------------------------------------
+    // PHYSICAL. The finger comes off the felt, and the pitch (if it moved) glides on kept rails.
+    // -------------------------------------------------------------------------------------------
+    // release(), ramped and not snapped: the rails under this junction are full, and a scattering
+    // coefficient that jumps while a waveform is passing through it is precisely the click
+    // clearStringState() is allowed to make and this path is not. Before P2.6 the engagement here
+    // was always already 0 and this call was the no-op its own comment predicted would "become
+    // load-bearing the moment P2.6 adds a path that plucks over a damped string" -- it now does,
+    // because a restrike on a RELEASING string reaches here instead of clearing it.
+    dampers_[index].release();
+
+    if (midiNote_[index] != static_cast<std::uint8_t>(note)) {
+        // ***** REFUSED, WITH A DERIVATION: the plan's "damper choke (fast engage())" *****
+        //
+        // docs/plan.md P2.6 specifies "pitch change performs damper choke (fast engage()), a retune
+        // ramp completing within 30 ms, then re-excitation". The retune ramp and the kept rails
+        // ship. The choke does not, because it cannot do the job it is named for.
+        //
+        // A damper is a LINEAR two-port (DamperJunction.h derives its 2x2 S from Kirchhoff; there is
+        // no nonlinearity anywhere in this loop). The string's output after the note-on is, by
+        // superposition, the free response of the state that was already circulating plus the
+        // response to the exciter's injection. A time-varying LINEAR operator applied to that sum
+        // attenuates both components -- and both are distributed around the same loop passing the
+        // same junction at the same rate, so it attenuates them by the same factor. A choke applied
+        // at or after the re-excitation therefore cannot make the old content quieter RELATIVE to
+        // the new note, which is the only thing "choke" could mean here. All it can do is make the
+        // whole re-attack quieter. The only asymmetry available is TIME -- choke first, excite
+        // afterwards -- and the plan's own "then" reads that way, at a cost of up to 30 ms of
+        // latency on every legato note, which is not a playable instrument.
+        //
+        // Measured rather than argued in tests/dsp/RetriggerModeTests.cpp ("a damper choke cannot
+        // make the old note quieter relative to the new one"), using a real engaged damper produced
+        // by the shipped note-off path rather than by code kept alive to be measured.
+        //
+        // What the choke was reaching for is real -- a fast retune of a full rail sweeps the old
+        // content -- and it is handled where it belongs: by the ramp being short and landing, and by
+        // the click gate over exactly that transition.
+        midiNote_[index] = static_cast<std::uint8_t>(note);
+        applyStringParams(stringIndex); // retarget f0; the RAILS ARE NOT TOUCHED
+        strings_[index].beginRetuneRamp(retuneRampSeconds_);
+    }
+
+    excite(stringIndex, event);
+}
+
+// The bottom of a Synth retrigger fade: the string is at exactly zero gain, so clearing it is free
+// (the same invariant clearStringState() documents -- coefficients may jump while zeros travel),
+// and the note that has been waiting fires on this sample.
+template <typename SampleT> void StringNetwork<SampleT>::landSynthFade(int stringIndex) noexcept {
+    const auto index = static_cast<std::size_t>(stringIndex);
+    const NoteEvent pending = pendingNote_[index];
+
+    fadeActive_[index] = false;
+    fadeSteps_[index] = 0;
+    fadeGain_[index] = 1.0f;
+
+    midiNote_[index] =
+        static_cast<std::uint8_t>(std::clamp(static_cast<int>(pending.midiNote), kMinMidiNote, kMaxMidiNote));
+    applyStringParams(stringIndex);
+    clearStringState(stringIndex);
+    excite(stringIndex, pending);
+
+    if (pendingNoteOff_[index]) {
+        // The host released the note before it started. Applied here rather than dropped, so a
+        // zero-length note is a zero-length note and not a stuck one.
+        pendingNoteOff_[index] = false;
+        sounding_[index] = false;
+        releasing_[index] = true;
+        dampers_[index].engage();
+        silencePeak_[index] = 0.0f;
+        silenceCount_[index] = 0;
+    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -554,6 +716,19 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
                 }
             }
 
+            // The Synth retrigger fade (Task P2.6). Linear, one step per sample, reaching EXACTLY
+            // zero on its last faded sample -- and the sample AFTER that is where the state is
+            // cleared and the pending note fires, because a clear is only free while the waves it
+            // scatters are zeros and the fade is what makes them so.
+            if (fadeActive_[index]) {
+                if (fadeSteps_[index] > 0) {
+                    --fadeSteps_[index];
+                    fadeGain_[index] = static_cast<float>(fadeSteps_[index]) * synthFadeStep_;
+                } else {
+                    landSynthFade(s);
+                }
+            }
+
             // Nothing to render: either the string is fully muted with its state already cleared,
             // or it is enabled but idle (no note ringing, no release tail, no burst in flight). An
             // idle string's rails are zero, so ticking it would compute zeros -- and re-solve its
@@ -586,7 +761,7 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             // (P4 owes injectFeedback() the same treatment, for the same reason.)
             const bool muted = (gain == 0.0f && gainTarget == 0.0f);
             const bool live = !muted && (sounding_[index] || releasing_[index] || ringing_[index] ||
-                                         exciters[index].isActive() || bridgeMayDrive);
+                                         fadeActive_[index] || exciters[index].isActive() || bridgeMayDrive);
             if (!live) {
                 // M2 (P2.4 review), stated where it happens: a string that is in the trip count but
                 // not live presents a ZERO incident wave while still occupying a port, and a port
@@ -633,10 +808,11 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             dampers[index].scatter(fromNut, fromBridge, toBridge, toNut);
             strings[index].writeJunctionOutputs(damperPosition, toBridge, toNut);
 
-            // Multiplying by an exactly-1.0f gain is exact in IEEE-754, so a string that is not
-            // ramping is bit-identical to one carrying no envelope at all. Nothing else multiplies
-            // the tap any more: a note-off is the damper's work, not a gain's.
-            const auto envelope = static_cast<SampleT>(gain);
+            // Multiplying by an exactly-1.0f gain is exact in IEEE-754, so a string that is neither
+            // ramping nor mid-retrigger-fade is bit-identical to one carrying no envelope at all --
+            // which is why adding the Synth fade's factor here moves no sample of any render that
+            // does not use it. Nothing else multiplies the tap: a note-off is the damper's work.
+            const auto envelope = static_cast<SampleT>(gain * fadeGain_[index]);
             for (int t = 0; t < numTaps; ++t) {
                 const std::size_t slot = base + static_cast<std::size_t>(t);
                 // The tap INDEX is passed, not just the position: each (string, tap) owns its own
@@ -654,8 +830,10 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             // handed back UNSCALED -- see the accept pass below for why one factor of gain is both
             // sufficient for passivity and the right amount. (This comment claimed the opposite
             // until the review caught it: it still described the two-factor version that measurement
-            // rejected.)
-            portIncident_[index] = outgoing * static_cast<SampleT>(gain);
+            // rejected.) The Synth retrigger fade rides the same factor, so a string on its way to
+            // a state clear stops driving its NEIGHBOURS through the bridge as it goes quiet, rather
+            // than feeding them right up to the sample its rails are zeroed.
+            portIncident_[index] = outgoing * envelope;
 
             // "This string carries motion", whether or not anyone played it. Latched here because
             // this is the one place that knows: `outgoing` is the wave leaving the string at the

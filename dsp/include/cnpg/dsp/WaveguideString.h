@@ -200,6 +200,35 @@ template <typename SampleT> class WaveguideString {
     // dispersion amount). Never resizes and never touches rail contents.
     void setParams(const WaveguideStringParams& p) noexcept;
 
+    // ---- retune ramp (Task P2.6, the Physical retrigger's pitch change) ------------------------
+    //
+    // A one-shot glide of the SMOOTHED f0 onto whatever setParams() last targeted, over exactly
+    // round(rampSeconds * fs) samples, replacing the ordinary 8 ms one-pole for the duration.
+    // Realtime-safe; allocates nothing; call it AFTER the setParams() that moves the target.
+    //
+    // Three properties, and each of them is why this exists rather than "make the smoother
+    // faster":
+    //
+    //   1. IT LANDS. The step is GEOMETRIC -- f0 is multiplied by a constant ratio per sample, so
+    //      the glide is linear in cents (the only pitch ramp a listener hears as even) and the last
+    //      step is written as the target itself. The one-pole only ever asymptotes: at its 8 ms
+    //      time constant an octave jump is still ~28 cents away after 30 ms, so "f0 reaches the new
+    //      pitch within 30 ms" is not a claim it can satisfy at any tolerance worth asserting.
+    //   2. IT TRACKS A MOVING TARGET. The per-sample ratio is recomputed from the remaining step
+    //      count whenever the target moves (a pitch-wheel change mid-ramp), so a bend during a
+    //      retrigger neither strands the ramp short nor overshoots.
+    //   3. IT IS THE RAILS, NOT A PARAMETER. Everything downstream -- the loop-length solve, the
+    //      integer/fractional split of the rail read, the position mapping -- follows the smoothed
+    //      f0 exactly as it does during a pitch bend, so the ramp inherits the click-freedom the
+    //      bend path already has instead of needing its own.
+    //
+    // `retuneRampSamplesRemaining()` is the direct state observation of the ramp: a test asserts
+    // the string IS mid-ramp rather than assuming it, and asserts the landing sample rather than
+    // sampling a tolerance.
+    void beginRetuneRamp(double rampSeconds) noexcept;
+    bool retuneRampActive() const noexcept { return retuneStepsRemaining_ > 0; }
+    int retuneRampSamplesRemaining() const noexcept { return retuneStepsRemaining_; }
+
     // f0 compensation hook. Exactly one source is active:
     //   P1: analytic phase-delay correction computed internally from the filter coefficients at
     //       f0 (see the file header). `delaySamplesCorrection` is an ADDITIONAL caller-supplied
@@ -427,6 +456,7 @@ template <typename SampleT> class WaveguideString {
 
     void retargetSmoothers() noexcept;
     void advanceSmoothers() noexcept;
+    void refreshRetuneRatio() noexcept; // per-sample geometric step for the remaining ramp
     void updateCoefficients() noexcept; // re-solves the loop length; called from tick()
     double interpolatorPhaseDelay(double d, double w, double sinw, double cosw) const noexcept;
     double solveFractionalDelay(double target, double w, double sinw, double cosw, double lo, double hi) const noexcept;
@@ -474,6 +504,11 @@ template <typename SampleT> class WaveguideString {
     double dispersionTarget_ = 0.0; // allpass coefficient (<= 0), already mapped from the knob
     double dispersionSmoothed_ = 0.0;
     bool smoothersSettled_ = false;
+
+    // The one-shot retune ramp (Task P2.6). Zero steps remaining IS "no ramp in flight", so the
+    // ordinary one-pole is the default path and costs nothing extra.
+    int retuneStepsRemaining_ = 0;
+    double retuneRatio_ = 1.0;
 
     double analyticCorrectionSamples_ = 0.0;
     std::vector<float> calibrationCents_; // stored by loadCalibrationTable; P2.7 adds the selector

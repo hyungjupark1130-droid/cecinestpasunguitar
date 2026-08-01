@@ -14,13 +14,9 @@ const juce::Identifier kStateVersionAttribute("cnpgStateVersion");
 // Task P2.1 scaled the network out to 1..kMaxStrings, driven by the `numStrings` APVTS parameter
 // (cnpg::params::kDefaultNumStrings ships 6). NoteAllocator is prepared for the CAPACITY rather
 // than the active count, matching how StringNetwork itself preallocates: the count is a realtime
-// parameter and prepare() is message-thread-only, so it could not track the parameter anyway.
-//
-// Until Task P2.6 gives NoteAllocator its multi-string assignment modes, allocate() still puts every
-// host note on string 0 and the remaining strings idle. That is audibly identical to running one
-// string, and costs almost nothing (StringNetwork skips a string with no state rather than ticking
-// zeros through it) -- but it does mean a chord played into this build sounds monophonic, and no
-// amount of turning `numStrings` up changes that before P2.6.
+// parameter and prepare() is message-thread-only, so it could not track the parameter anyway. Task
+// P2.6 gave NoteAllocatorParams its own activeStringCount, which is what the count actually travels
+// on -- see the snapshot cascade in renderChunk().
 constexpr int kNoteAllocatorStrings = cnpg::dsp::kMaxStrings;
 
 // MIDI status nibbles this file reads directly. Note on/off and CC are interpreted dsp-side by
@@ -134,6 +130,12 @@ void PluginProcessor::renderChunk(const cnpg::params::Snapshot& snapshot, const 
     cabFilter_.setParams(snapshot.cab);
     outputGain_.setParams(snapshot.outputGain);
     limiter_.setParams(snapshot.limiter);
+
+    // The allocator is retargeted from the same snapshot, immediately before it is used, exactly as
+    // every other module here is (Task P2.6). Its params carry the active string count and the
+    // per-string mute as well as the mode tables, so this call and the setNumStrings() above are
+    // driven from ONE value and cannot disagree about which strings a note may land on.
+    noteAllocator_.setParams(snapshot.noteAllocator);
 
     noteEvents_.clear();
     noteAllocator_.allocate(events, numEvents, noteEvents_);

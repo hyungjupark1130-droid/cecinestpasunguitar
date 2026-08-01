@@ -7,6 +7,7 @@
 #include <type_traits>
 
 #include "cnpg/dsp/CabFilter.h"
+#include "cnpg/dsp/NoteAllocator.h"
 #include "cnpg/dsp/OutputGain.h"
 #include "cnpg/dsp/PickupTap.h"
 #include "cnpg/dsp/SoftClipLimiter.h"
@@ -87,6 +88,14 @@ inline constexpr const char* bridgeDamping = "bridgeDamping";
 // Global (cnpg::dsp::RetriggerMode, nested under StringNetworkParams::retriggerMode)
 inline constexpr const char* retriggerMode = "retriggerMode";
 
+// Allocation (cnpg::dsp::NoteAllocatorParams). Task P2.6. This is the control that decides WHICH
+// string a host note lands on, and until it existed the instrument was monophonic on string 0
+// however many strings were switched on. `allocationMode` picks between the guitar-fingering
+// assignment over the open-string tuning below and the free-zone table after it; both are spelled
+// out per slot for all kMaxStrings slots for the same reason the per-string block is (automation
+// lanes and saved state have to exist for a string before it is switched on).
+inline constexpr const char* allocationMode = "allocationMode";
+
 // Active string count, 1..kMaxStrings (Task P2.1). Not a StringNetworkParams field: the count is
 // set through StringNetwork::setNumStrings(), which is deliberately its own entry point because a
 // reduction is not a plain retarget -- it routes the removed strings through their enable ramp and
@@ -105,6 +114,22 @@ inline constexpr const char* stringTuningOffsetCents[cnpg::dsp::kMaxStrings] = {
 inline constexpr const char* stringEnabled[cnpg::dsp::kMaxStrings] = {
     "stringEnabled0", "stringEnabled1", "stringEnabled2", "stringEnabled3",
     "stringEnabled4", "stringEnabled5", "stringEnabled6", "stringEnabled7"};
+
+// Allocation tables (Task P2.6), one entry per slot. The open note is the string's tuning
+// reference in GuitarFingering mode (the note it sounds unfretted, and the bottom of its 24-fret
+// span); the zone pair is its inclusive note range in FreeZones mode. Both are MIDI note numbers,
+// exposed as integer parameters rather than 0..1 floats for the same reason the string count is --
+// a host showing "MIDI note 45.4" as an automatable value is offering something that does not
+// exist.
+inline constexpr const char* stringOpenNote[cnpg::dsp::kMaxStrings] = {
+    "stringOpenNote0", "stringOpenNote1", "stringOpenNote2", "stringOpenNote3",
+    "stringOpenNote4", "stringOpenNote5", "stringOpenNote6", "stringOpenNote7"};
+inline constexpr const char* stringZoneLowNote[cnpg::dsp::kMaxStrings] = {
+    "stringZoneLowNote0", "stringZoneLowNote1", "stringZoneLowNote2", "stringZoneLowNote3",
+    "stringZoneLowNote4", "stringZoneLowNote5", "stringZoneLowNote6", "stringZoneLowNote7"};
+inline constexpr const char* stringZoneHighNote[cnpg::dsp::kMaxStrings] = {
+    "stringZoneHighNote0", "stringZoneHighNote1", "stringZoneHighNote2", "stringZoneHighNote3",
+    "stringZoneHighNote4", "stringZoneHighNote5", "stringZoneHighNote6", "stringZoneHighNote7"};
 
 } // namespace ID
 
@@ -166,10 +191,14 @@ struct RawParameterPointers {
     std::atomic<float>* bridgeDamping = nullptr;
 
     std::atomic<float>* retriggerMode = nullptr;
+    std::atomic<float>* allocationMode = nullptr;
 
     std::atomic<float>* numStrings = nullptr;
     std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringTuningOffsetCents{};
     std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringEnabled{};
+    std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringOpenNote{};
+    std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringZoneLowNote{};
+    std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringZoneHighNote{};
 };
 
 // Message-thread only; must run after the APVTS (and therefore every parameter in
@@ -185,6 +214,12 @@ RawParameterPointers collectRawParameterPointers(const juce::AudioProcessorValue
 // whole Snapshot by value with no allocation or locking.
 struct Snapshot {
     cnpg::dsp::StringNetworkParams stringNetwork; // includes the nested exciter + material params
+
+    // Which string a host note lands on (Task P2.6). Carries the active count and the per-string
+    // mute as well as the mode tables, because NoteAllocator has to make the same "is this string
+    // available" decision StringNetwork does -- see NoteAllocatorParams for why splitting that
+    // knowledge would turn an assignment into a silent drop.
+    cnpg::dsp::NoteAllocatorParams noteAllocator;
 
     // The active string count travels beside StringNetworkParams rather than inside it, mirroring
     // the dsp/ split: setParams() retargets, setNumStrings() changes the loop's shape. The audio

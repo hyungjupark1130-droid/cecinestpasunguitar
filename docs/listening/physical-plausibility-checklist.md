@@ -67,12 +67,23 @@ These are not in `docs/plan.md` section 4.8's list of twelve. They were added wh
 created the behaviour also created a question a measurement cannot answer, and each names the task
 that added it. First judged at the P2 listening pass (Task P2.8).
 
+Items 1, 2, 4, 6 and 10's P2 halves, and items 14–20, are all judged from a HOST rather than from
+the corpus: the corpus renders through `cnpg_render`, which is still the single-string P1 chain, so
+nothing in it exercises allocation, chords, the pedal, or the coupled bridge under six real voices.
+`docs/listening/P2.6-ableton-checks.md` is the executable form of that session — the two manual
+checks deferred since Task P2.1 plus the retrigger and pedal items — and it should be run before or
+alongside the P2.8 pass rather than after it.
+
 | # | Item | What to listen for | Added by |
 |---|---|---|---|
 | 13 | **Slow pickup automation continuity** | The effective read position is hysteretically quantised to ~1/32 of the string, so a slow pickup sweep moves the comb in ~32 discrete crossfaded steps rather than continuously. Does it sound continuous, or stepped? | P2.3 |
 | 14 | **Sympathetic resonance** | Hold a low note, play staccato notes on other strings: the held string should shimmer sympathetically. Raise `Bridge Coupling` and it should get brighter and more coupled — and shorter. Is the shipping default (0.35) the right amount of instrument, or does it want more or less? | P2.4 |
 | 15 | **Unison-adjacent voicings and mode locking** | Two strings a few cents apart on a shared bridge PULL TOGETHER: at the shipping coupling a 25-cent detune collapses to a measured 0.003 cents of separation, and the string that was *not* detuned is dragged +20.3 cents off its own nominal. That is real coupled-string physics (Weinreich) and it is also, potentially, an instrument that will not stay where the tuner put it. Play a deliberately spread unison and a close voicing: does it sound like a real instrument locking, or like a bug? | P2.4 |
 | 16 | **String count and decay** | A string that is disabled or idle presents a zero wave at its bridge port, which makes it a perfect absorber there — so the bridge's effective damping depends on how many strings are switched on. Does changing the string count audibly change the decay of the strings that stay? | P2.4 |
+| 17 | **Legato glide length** | A pitch-changing retrigger in Physical mode keeps the rails and glides f0 to the new note over 30 ms — the plan's own figure, and the shortest ramp that clears the 3 dB click criterion (8 ms reads 10.4 dB, 16 ms reads 6.5 dB, 30 ms reads 1.69 dB). Does 30 ms read as a hammer-on, or as a slide? If it is a slide, the ramp wants to be shorter and the click criterion wants re-examining against what a listener actually hears. The knob is `StringNetwork::setRetuneRampSeconds` and is deliberately not on the APVTS surface yet. | P2.6 |
+| 18 | **Fingering plausibility** | With `Allocation Mode` = Guitar Fingering, do chords land where a player's hand would put them? The rule is "lowest fret among strings that own no note, ties to least-recently-used", and on an open C major it produces x32010 unprompted. Does a moving chord progression stay plausible, or does it wander onto implausible strings as notes are held and released? | P2.6 |
+| 19 | **Steals** | Play more simultaneous notes than there are strings. A steal displaces the note struck longest ago, with no synthesized note-off and no click. Does that sound like a guitarist running out of strings, or like a bug? Also: a note the fingering table cannot reach (below the low E, above the 24th fret) is DROPPED — silence, not a transposition. Is silence the right answer to play? | P2.6 |
+| 20 | **Sustain pedal** | With CC64 held, notes ring past their key releases and damp together on pedal-up. Six dampers landing on one sample measure −1.07 dB of click excess against a 3 dB criterion — is that inaudible in a dense held chord on a coupled bridge, where the six released strings are all still feeding each other? | P2.6 |
 
 ## Which P1 phrase is the evidence for which item
 

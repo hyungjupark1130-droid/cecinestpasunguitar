@@ -131,6 +131,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     layout.add(std::make_unique<juce::AudioParameterChoice>(makeParameterID(ID::retriggerMode), "Retrigger Mode",
                                                             juce::StringArray{"Physical", "Synth"}, 0));
 
+    // Allocation (Task P2.6). GuitarFingering is index 0 and the shipped default: it is the mode
+    // that makes six strings behave like an instrument rather than like six independent zones, and
+    // it is the one whose default table (EADGBE, below) is a tuning somebody actually plays.
+    layout.add(std::make_unique<juce::AudioParameterChoice>(makeParameterID(ID::allocationMode), "Allocation Mode",
+                                                            juce::StringArray{"Guitar Fingering", "Free Zones"}, 0));
+
     // Strings (Task P2.1). The count is an INT parameter, not a float: it is a structural choice
     // with kMaxStrings discrete states, and a host that shows it as a continuous 0..1 knob would
     // make "5.4 strings" a thing a user can automate toward.
@@ -141,6 +147,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     // count -- see the ID table's comment for why the inactive slots still get parameters.
     const juce::NormalisableRange<float> tuningOffsetRange(-kStringTuningOffsetRangeCents,
                                                            kStringTuningOffsetRangeCents);
+    const cnpg::dsp::NoteAllocatorParams allocatorDefaults;
     for (int s = 0; s < cnpg::dsp::kMaxStrings; ++s) {
         const auto index = static_cast<std::size_t>(s);
         const juce::String suffix(s + 1); // 1-based in the UI; 0-based in the ID, matching the code
@@ -149,6 +156,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
             juce::AudioParameterFloatAttributes().withLabel("cents")));
         layout.add(std::make_unique<juce::AudioParameterBool>(makeParameterID(ID::stringEnabled[index]),
                                                               "String " + suffix + " On", true));
+
+        // Allocation tables (Task P2.6). Every default is READ FROM cnpg::dsp::NoteAllocatorParams
+        // rather than retyped here, so the plugin's default state IS the dsp-side default and the
+        // headless [contract] cases cannot drift apart from what the plugin ships. The open note is
+        // restricted to the design envelope (kMinMidiNote..kMaxMidiNote) because a string tuned
+        // outside it could never sound; the zone bounds span the whole of MIDI, because a zone is a
+        // routing decision and a user is entitled to draw one that catches notes the strings will
+        // then reject on their own terms.
+        layout.add(std::make_unique<juce::AudioParameterInt>(
+            makeParameterID(ID::stringOpenNote[index]), "String " + suffix + " Open Note", cnpg::dsp::kMinMidiNote,
+            cnpg::dsp::kMaxMidiNote, static_cast<int>(allocatorDefaults.openStringMidiNote[index])));
+        layout.add(std::make_unique<juce::AudioParameterInt>(makeParameterID(ID::stringZoneLowNote[index]),
+                                                             "String " + suffix + " Zone Low", 0, 127,
+                                                             static_cast<int>(allocatorDefaults.zones[index].lowNote)));
+        layout.add(std::make_unique<juce::AudioParameterInt>(
+            makeParameterID(ID::stringZoneHighNote[index]), "String " + suffix + " Zone High", 0, 127,
+            static_cast<int>(allocatorDefaults.zones[index].highNote)));
     }
 
     return layout;
@@ -187,12 +211,16 @@ RawParameterPointers collectRawParameterPointers(const juce::AudioProcessorValue
     params.outputGainDb = apvts.getRawParameterValue(ID::outputGainDb);
 
     params.retriggerMode = apvts.getRawParameterValue(ID::retriggerMode);
+    params.allocationMode = apvts.getRawParameterValue(ID::allocationMode);
 
     params.numStrings = apvts.getRawParameterValue(ID::numStrings);
     for (int s = 0; s < cnpg::dsp::kMaxStrings; ++s) {
         const auto index = static_cast<std::size_t>(s);
         params.stringTuningOffsetCents[index] = apvts.getRawParameterValue(ID::stringTuningOffsetCents[index]);
         params.stringEnabled[index] = apvts.getRawParameterValue(ID::stringEnabled[index]);
+        params.stringOpenNote[index] = apvts.getRawParameterValue(ID::stringOpenNote[index]);
+        params.stringZoneLowNote[index] = apvts.getRawParameterValue(ID::stringZoneLowNote[index]);
+        params.stringZoneHighNote[index] = apvts.getRawParameterValue(ID::stringZoneHighNote[index]);
     }
 
     return params;
@@ -249,11 +277,30 @@ Snapshot snapshotParameters(const RawParameterPointers& params) noexcept {
     // a Snapshot that carries an out-of-range count would put the burden on every future consumer.
     snapshot.numStrings =
         std::clamp(static_cast<int>(std::lround(params.numStrings->load())), 1, cnpg::dsp::kMaxStrings);
+
+    // Allocation (Task P2.6). The mode and the two tables; the count and the per-string mute are
+    // MIRRORED from the same values StringNetwork gets, in the loop below, so the allocator and the
+    // network cannot disagree about which strings exist.
+    snapshot.noteAllocator.mode = params.allocationMode->load() >= 0.5f ? cnpg::dsp::AllocationMode::FreeZones
+                                                                        : cnpg::dsp::AllocationMode::GuitarFingering;
+    snapshot.noteAllocator.activeStringCount = snapshot.numStrings;
+
     for (int s = 0; s < cnpg::dsp::kMaxStrings; ++s) {
         const auto index = static_cast<std::size_t>(s);
         snapshot.stringNetwork.perString[index].tuningOffsetCents = params.stringTuningOffsetCents[index]->load();
         // AudioParameterBool reports 0.0f/1.0f via getRawParameterValue().
         snapshot.stringNetwork.perString[index].enabled = params.stringEnabled[index]->load() >= 0.5f;
+        snapshot.noteAllocator.stringEnabled[index] = snapshot.stringNetwork.perString[index].enabled;
+
+        // AudioParameterInt reports its DENORMALISED integer value, so these are plain rounds.
+        // Clamped into 0..127 anyway: a Snapshot carrying an out-of-range MIDI note would push the
+        // burden onto every future consumer, and NoteAllocatorParams stores them as std::uint8_t.
+        const auto toNote = [](float raw) {
+            return static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(raw)), 0, 127));
+        };
+        snapshot.noteAllocator.openStringMidiNote[index] = toNote(params.stringOpenNote[index]->load());
+        snapshot.noteAllocator.zones[index].lowNote = toNote(params.stringZoneLowNote[index]->load());
+        snapshot.noteAllocator.zones[index].highNote = toNote(params.stringZoneHighNote[index]->load());
     }
 
     return snapshot;

@@ -1,5 +1,8 @@
 #include "cnpg/dsp/NoteAllocator.h"
 
+#include <algorithm>
+#include <limits>
+
 namespace cnpg::dsp {
 
 namespace {
@@ -14,80 +17,251 @@ float velocityToUnit(std::uint8_t data2) noexcept { return static_cast<float>(da
 } // namespace
 
 void NoteAllocator::prepare(int numStrings) {
-    numStrings_ = numStrings; // P1 scope: full per-string sizing arrives with P2.6
+    capacityStrings_ = std::clamp(numStrings, 1, kMaxStrings);
     reset();
 }
 
 void NoteAllocator::reset() noexcept {
-    stringSounding_ = false;
-    soundingChannel_ = 0;
-    soundingNote_ = 0;
+    owned_.fill(false);
+    ownerChannel_.fill(0);
+    ownerNote_.fill(0);
+    heldNoteOff_.fill(false);
+    heldVelocity_.fill(0);
+    lastTriggerSequence_.fill(0);
+    triggerSequence_ = 0;
+    sustainDown_ = false;
+    unassignableNoteCount_ = 0;
+    queueOverflowCount_ = 0;
 }
 
 void NoteAllocator::setParams(const NoteAllocatorParams& p) noexcept { params_ = p; }
+
+int NoteAllocator::effectiveStringCount() const noexcept {
+    return std::clamp(std::min(capacityStrings_, params_.activeStringCount), 1, kMaxStrings);
+}
+
+bool NoteAllocator::stringCanPlay(int stringIndex, int midiNote) const noexcept {
+    const auto index = static_cast<std::size_t>(stringIndex);
+    if (params_.mode == AllocationMode::GuitarFingering) {
+        const int open = static_cast<int>(params_.openStringMidiNote[index]);
+        return midiNote >= open && midiNote <= open + kFingeringFretSpan;
+    }
+    // FreeZones: inclusive, and a zone whose low is above its high is simply empty -- no note
+    // satisfies both halves, which is the natural spelling of "this string is not in the map".
+    const StringZone zone = params_.zones[index];
+    return midiNote >= static_cast<int>(zone.lowNote) && midiNote <= static_cast<int>(zone.highNote);
+}
+
+int NoteAllocator::chooseString(std::uint8_t channel, std::uint8_t midiNote) const noexcept {
+    // 1. AT MOST ONE STRING OWNS A GIVEN (channel, note). If one already does, the NoteOn goes back
+    //    there -- it is a retrigger, and StringNetwork's RetriggerMode is what decides what that
+    //    sounds like. Searched over every slot rather than only the in-count ones so the invariant
+    //    survives a count change: a second string owning the same (channel, note) would make both
+    //    stringForNote() and NoteOff matching ambiguous, and the ambiguity would show up as a note
+    //    that never stops.
+    for (int s = 0; s < kMaxStrings; ++s) {
+        const auto index = static_cast<std::size_t>(s);
+        if (owned_[index] && ownerChannel_[index] == channel && ownerNote_[index] == midiNote)
+            return s;
+    }
+
+    const int count = effectiveStringCount();
+    const int note = static_cast<int>(midiNote);
+
+    int bestIdle = -1;
+    int bestIdleFret = std::numeric_limits<int>::max();
+    std::uint64_t bestIdleSequence = 0;
+
+    int bestSteal = -1;
+    std::uint64_t bestStealSequence = 0;
+
+    for (int s = 0; s < count; ++s) {
+        const auto index = static_cast<std::size_t>(s);
+        if (!params_.stringEnabled[index])
+            continue;
+        if (!stringCanPlay(s, note))
+            continue;
+
+        if (!owned_[index]) {
+            // GuitarFingering picks the lowest fret position; FreeZones has no fret, so every
+            // candidate ties at 0 and the LRU tie-break decides on its own -- which is exactly what
+            // makes overlapping zones alternate under repeated notes.
+            const int fret = (params_.mode == AllocationMode::GuitarFingering)
+                                 ? note - static_cast<int>(params_.openStringMidiNote[index])
+                                 : 0;
+            if (bestIdle < 0 || fret < bestIdleFret ||
+                (fret == bestIdleFret && lastTriggerSequence_[index] < bestIdleSequence)) {
+                bestIdle = s;
+                bestIdleFret = fret;
+                bestIdleSequence = lastTriggerSequence_[index];
+            }
+        } else if (bestSteal < 0 || lastTriggerSequence_[index] < bestStealSequence) {
+            // The steal policy is LRU only: a candidate that is already playing has no fret
+            // preference to express, and displacing the note the player struck longest ago is the
+            // one choice that does not depend on where the new note happens to sit.
+            bestSteal = s;
+            bestStealSequence = lastTriggerSequence_[index];
+        }
+    }
+
+    return bestIdle >= 0 ? bestIdle : bestSteal;
+}
+
+void NoteAllocator::emitNoteOn(int stringIndex, const RawMidiEvent& raw, BlockEventQueue& outEvents) noexcept {
+    NoteEvent event{};
+    event.type = NoteEventType::NoteOn;
+    event.sampleOffset = raw.sampleOffset;
+    event.stringIndex = static_cast<std::uint8_t>(stringIndex);
+    event.channel = raw.channel;
+    event.midiNote = raw.data1;
+    event.velocity = velocityToUnit(raw.data2);
+    // Nothing in plain MIDI note-on carries a pluck position or hardness, so the event says so
+    // explicitly instead of inventing a value: StringNetwork then resolves both against
+    // PluckExciterParams::defaultPosition / ::defaultHardness, which is what makes the APVTS
+    // Exciter Position / Exciter Hardness knobs audible. A per-note source (P5 MPE) fills these in
+    // with real values without touching this contract.
+    event.pluckPosition = kUnspecifiedNoteParam;
+    event.hardness = kUnspecifiedNoteParam;
+
+    if (!outEvents.push(event))
+        ++queueOverflowCount_;
+}
+
+void NoteAllocator::emitNoteOff(int stringIndex, std::int32_t sampleOffset, BlockEventQueue& outEvents) noexcept {
+    const auto index = static_cast<std::size_t>(stringIndex);
+
+    NoteEvent event{};
+    event.type = NoteEventType::NoteOff;
+    event.sampleOffset = sampleOffset;
+    event.stringIndex = static_cast<std::uint8_t>(stringIndex);
+    event.channel = ownerChannel_[index];
+    event.midiNote = ownerNote_[index];
+    event.velocity = velocityToUnit(heldVelocity_[index]);
+    event.pluckPosition = kUnspecifiedNoteParam; // NoteOff excites nothing; both are unused
+    event.hardness = kUnspecifiedNoteParam;
+
+    if (!outEvents.push(event))
+        ++queueOverflowCount_;
+}
 
 void NoteAllocator::allocate(const RawMidiEvent* events, int numEvents, BlockEventQueue& outEvents) noexcept {
     for (int i = 0; i < numEvents; ++i) {
         const RawMidiEvent& raw = events[i];
         const std::uint8_t statusType = static_cast<std::uint8_t>(raw.status & kStatusTypeMask);
 
-        if (statusType == kControlChangeStatus)
-            continue; // every CC, including CC64, is a no-op until P2.6
+        if (statusType == kControlChangeStatus) {
+            if (raw.data1 != kSustainPedalController)
+                continue; // every other CC is somebody else's business
+
+            const bool down = raw.data2 >= kSustainPedalDownThreshold;
+            if (down == sustainDown_)
+                continue; // a pedal that did not move changes nothing, and re-emitting would double
+            sustainDown_ = down;
+
+            if (!down) {
+                // PEDAL UP. Every held NoteOff fires at the pedal-release offset, ascending by
+                // string index -- one deterministic order, so a six-string chord under the pedal
+                // damps in the same order every time and the queue's non-decreasing contract is
+                // trivially satisfied (they all share one offset). Iterated over every slot rather
+                // than the in-count ones: a string that left the active count while holding a note
+                // still has to give it back, or the note is stuck for the life of the instance.
+                for (int s = 0; s < kMaxStrings; ++s) {
+                    const auto index = static_cast<std::size_t>(s);
+                    if (!owned_[index] || !heldNoteOff_[index])
+                        continue;
+                    emitNoteOff(s, raw.sampleOffset, outEvents);
+                    owned_[index] = false;
+                    heldNoteOff_[index] = false;
+                }
+            }
+            continue;
+        }
 
         const bool isNoteOff = statusType == kNoteOffStatus || (statusType == kNoteOnStatus && raw.data2 == 0);
         const bool isNoteOn = statusType == kNoteOnStatus && raw.data2 != 0;
 
         if (isNoteOn) {
             if (raw.data1 < kMinMidiNote || raw.data1 > kMaxMidiNote)
-                continue; // outside the playable range: rejected, no NoteEvent emitted
+                continue; // outside the design envelope: rejected, no NoteEvent emitted
 
-            NoteEvent event{};
-            event.type = NoteEventType::NoteOn;
-            event.sampleOffset = raw.sampleOffset;
-            event.stringIndex = 0; // P1 scope: single monophonic string
-            event.channel = raw.channel;
-            event.midiNote = raw.data1;
-            event.velocity = velocityToUnit(raw.data2);
-            // Nothing in plain MIDI note-on carries a pluck position or hardness, so the event
-            // says so explicitly instead of inventing a value: StringNetwork then resolves both
-            // against PluckExciterParams::defaultPosition / ::defaultHardness, which is what
-            // makes the APVTS Exciter Position / Exciter Hardness knobs audible. A per-note
-            // source (P5 MPE) fills these in with real values without touching this contract.
-            event.pluckPosition = kUnspecifiedNoteParam;
-            event.hardness = kUnspecifiedNoteParam;
-
-            outEvents.push(event);
-
-            stringSounding_ = true;
-            soundingChannel_ = raw.channel;
-            soundingNote_ = raw.data1;
-        } else if (isNoteOff) {
-            // Monophonic last-note priority: only a NoteOff matching the (channel, midiNote)
-            // that currently owns string 0 engages the damper; a stale NoteOff -- the note was
-            // already displaced by a later NoteOn -- is dropped (docs/plan.md section 2.12).
-            if (!stringSounding_ || soundingChannel_ != raw.channel || soundingNote_ != raw.data1)
+            const int target = chooseString(raw.channel, raw.data1);
+            if (target < 0) {
+                // Unassignable: no enabled in-count string can play this note. Dropped silently and
+                // COUNTED -- see unassignableNoteCount().
+                ++unassignableNoteCount_;
                 continue;
+            }
 
-            NoteEvent event{};
-            event.type = NoteEventType::NoteOff;
-            event.sampleOffset = raw.sampleOffset;
-            event.stringIndex = 0;
-            event.channel = raw.channel;
-            event.midiNote = raw.data1;
-            event.velocity = velocityToUnit(raw.data2);
-            event.pluckPosition = kUnspecifiedNoteParam; // NoteOff excites nothing; both are unused
-            event.hardness = kUnspecifiedNoteParam;
+            const auto index = static_cast<std::size_t>(target);
+            emitNoteOn(target, raw, outEvents);
 
-            outEvents.push(event);
-            stringSounding_ = false;
+            // Ownership moves to the new note. If a note was displaced (a steal) it loses its
+            // ownership here and no NoteOff is synthesized for it, so its own later NoteOff -- and
+            // any CC64-held NoteOff it had -- becomes stale and is dropped. If the SAME note is
+            // being restruck under the pedal, this is what cancels its pending NoteOff.
+            owned_[index] = true;
+            ownerChannel_[index] = raw.channel;
+            ownerNote_[index] = raw.data1;
+            heldNoteOff_[index] = false;
+            heldVelocity_[index] = 0;
+            lastTriggerSequence_[index] = ++triggerSequence_;
+        } else if (isNoteOff) {
+            const int owner = stringForNote(raw.channel, raw.data1);
+            if (owner < 0)
+                continue; // stale: the note no longer owns a string (stolen, or never assigned)
+
+            const auto index = static_cast<std::size_t>(owner);
+            if (sustainDown_) {
+                // Held, not emitted. The string stays OWNED: the note is still ringing, which is
+                // what the pedal is for, so the string is not free for a later NoteOn to take
+                // without stealing it.
+                heldNoteOff_[index] = true;
+                heldVelocity_[index] = raw.data2;
+                continue;
+            }
+
+            heldVelocity_[index] = raw.data2;
+            emitNoteOff(owner, raw.sampleOffset, outEvents);
+            owned_[index] = false;
+            heldNoteOff_[index] = false;
         }
     }
 }
 
 int NoteAllocator::stringForNote(std::uint8_t channel, std::uint8_t midiNote) const noexcept {
-    return (stringSounding_ && soundingChannel_ == channel && soundingNote_ == midiNote) ? 0 : -1;
+    for (int s = 0; s < kMaxStrings; ++s) {
+        const auto index = static_cast<std::size_t>(s);
+        if (owned_[index] && ownerChannel_[index] == channel && ownerNote_[index] == midiNote)
+            return s;
+    }
+    return -1;
 }
 
-bool NoteAllocator::sustainActive() const noexcept { return false; }
+bool NoteAllocator::sustainActive() const noexcept { return sustainDown_; }
+
+std::uint32_t NoteAllocator::unassignableNoteCount() const noexcept { return unassignableNoteCount_; }
+
+std::uint32_t NoteAllocator::queueOverflowCount() const noexcept { return queueOverflowCount_; }
+
+int NoteAllocator::ownedNote(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return -1;
+    const auto index = static_cast<std::size_t>(stringIndex);
+    return owned_[index] ? static_cast<int>(ownerNote_[index]) : -1;
+}
+
+int NoteAllocator::ownedChannel(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return -1;
+    const auto index = static_cast<std::size_t>(stringIndex);
+    return owned_[index] ? static_cast<int>(ownerChannel_[index]) : -1;
+}
+
+bool NoteAllocator::sustainHoldPending(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return false;
+    const auto index = static_cast<std::size_t>(stringIndex);
+    return owned_[index] && heldNoteOff_[index];
+}
 
 } // namespace cnpg::dsp

@@ -47,11 +47,15 @@
 //     it exists because a humbucker is a true two-coil construction -- two spatial taps with real
 //     spacing, aperture and polarity -- and because widening the storage is cheap inside the task
 //     that is already rewriting it.
-//   - Retrigger. A same-pitch retrigger plucks over the ringing state; a pitch-changing retrigger
-//     re-initializes the string at the new pitch. retriggerMode is accepted and stored, and the
-//     full Physical (damper choke -> retune ramp -> re-excite) and Synth (<= 5 ms fade) semantics
-//     complete in Task P2.6, which is also where the fade that belongs in front of that
-//     re-initialization lands.
+//   - Retrigger (P2.6). Both RetriggerMode states are real, and both act only on a string that
+//     OWNS A NOTE (sounding or releasing). Physical: a same-pitch restrike plucks over the ringing
+//     state; a pitch change retargets f0 and glides it with WaveguideString's one-shot retune ramp
+//     while the RAILS ARE KEPT, which is what makes the old note continue into the new one --
+//     "emergent legato" is the preserved state, not a slide effect. Synth: a kSynthFadeSeconds
+//     fade to silence, a full state clear, then re-init and re-excite at the new pitch, so nothing
+//     of the old note survives. A NoteOn on a string that owns NO note is not a retrigger at all
+//     and takes neither path -- see the note-ownership paragraph in handleEvent().
+//     The plan's "damper choke" clause is REFUSED with a derivation; see handleEvent().
 //   - NoteOff (P2.2). PHYSICS, not an envelope any more: the note-off engages the string's
 //     DamperJunction with the felt time constant and the string is damped by a real resistive
 //     two-port at damperPosition01. Nothing multiplies the tap. The P1 stand-in -- a one-pole
@@ -80,9 +84,39 @@
 namespace cnpg::dsp {
 
 enum class RetriggerMode : std::uint8_t {
-    Physical, // same pitch: pluck over ringing state; new pitch: damper choke -> retune ramp -> re-excite
+    Physical, // same pitch: pluck over ringing state; new pitch: retune ramp, rails kept (legato)
     Synth     // fast fade, full state reset, instant re-init at new pitch
 };
+
+// The Physical retrigger's retune ramp and the Synth retrigger's fade, both named here so tests
+// reference them rather than restating numbers, and both DEFAULTS rather than constants: the ramp
+// length is a legato-speed voicing choice (StringNetwork::setRetuneRampSeconds) and the fade is
+// what the [contract] gate measures.
+//
+// 30 ms: the plan's own figure, and it is the figure BECAUSE OF A MEASUREMENT rather than because
+// it was written down. A retune ramp does not remove motion, it turns a step into a glide, and a
+// glide of a full rail has motion of its own -- while the rails shorten the read position sweeps
+// through the buffer faster than one sample per sample, which is the pitch change and which reads
+// on a peak-|dx| metric as motion a fresh pluck does not have. That reading falls with the ramp
+// length rather than vanishing at any length. Measured against a fresh pluck at MIDI 45 -> 51
+// (tests/dsp/RetriggerModeTests.cpp, printed every run):
+//
+//     ramp        0.02 ms   2 ms      8 ms      16 ms     30 ms
+//     excess      14.04 dB  18.78 dB  10.43 dB  6.52 dB   1.69 dB
+//
+// so the plan's 3 dB click criterion is met at the plan's own 30 ms and at nothing shorter. A
+// shorter ramp was tried first (8 ms, on the argument that 30 ms of glide is the audible-slide mode
+// Q3 defers) and is refused BY ITS OWN GATE at 10.43 dB. Whether 30 ms of glide reads as a
+// hammer-on or as a slide is an ear question and is on the P2.8 checklist; the knob to answer it
+// with is StringNetwork::setRetuneRampSeconds.
+inline constexpr double kRetuneRampSeconds = 0.030;
+
+// 2 ms, under the plan's "<= 5 ms fade" by 2.5x. The fade is the only thing standing between a
+// full rail and a state clear, so it exists to make that clear click-free and nothing more; its
+// length is therefore pure latency (the re-excitation waits for it) and the shortest duration that
+// does the job is the right one. 96 samples at 48 kHz, and only on a retrigger over a string that
+// is already sounding -- a fresh note on an idle string is not delayed at all.
+inline constexpr double kSynthFadeSeconds = 0.002;
 
 struct StringNetworkParams {
     RetriggerMode retriggerMode = RetriggerMode::Physical;
@@ -328,6 +362,36 @@ template <typename SampleT> class StringNetwork {
     float damperLossDepth(int stringIndex) const noexcept;
     float damperPosition01(int stringIndex) const noexcept;
 
+    // ---- retrigger diagnostics (Task P2.6) -----------------------------------------------------
+    // The whole of what a retrigger changes, observable directly rather than inferred from audio.
+    // The P2.1 ruling in one line: a state change covered only by a click test is not tested.
+
+    // The per-sample smoothed fundamental string `stringIndex` is synthesizing right now -- the
+    // quantity the "f0 reaches the new pitch within 30 ms" criterion is about. 0 for an
+    // out-of-range index or an unprepared network.
+    float stringF0Hz(int stringIndex) const noexcept;
+
+    // Samples left in that string's Physical retune ramp, 0 when none is in flight. Exposed so a
+    // test asserts the ramp IS running at the moment it claims to measure it, and asserts the exact
+    // landing sample instead of sampling a tolerance around an asymptote.
+    int retuneRampSamplesRemaining(int stringIndex) const noexcept;
+
+    // The Synth retrigger fade's gain for `stringIndex`: 1 when no fade is in flight, gliding
+    // linearly to exactly 0 across kSynthFadeSeconds and back to 1 on the sample the state is
+    // cleared and the pending note fires. It multiplies the tap AND the string's bridge incident
+    // wave, so a string fading out under a retrigger stops driving its neighbours too.
+    float retriggerFadeGain(int stringIndex) const noexcept;
+    bool retriggerFadeActive(int stringIndex) const noexcept;
+
+    // The Physical retune ramp's length in seconds, default kRetuneRampSeconds. A LEGATO SPEED, so
+    // it is a voicing control rather than a test hook -- how long a fretted pitch change takes to
+    // arrive is exactly the kind of question the P2.8 listening pass exists to answer, and it is
+    // also what lets a [contract] case measure what the ramp buys by shortening it to one sample.
+    // Realtime-safe; clamped to at least one sample by WaveguideString::beginRetuneRamp. Applies to
+    // ramps STARTED after the call; one already in flight keeps the length it was given.
+    void setRetuneRampSeconds(double seconds) noexcept;
+    double retuneRampSeconds() const noexcept { return retuneRampSeconds_; }
+
     // ---- bridge diagnostics (Task P2.4) --------------------------------------------------------
 
     // ONE string's contribution to the storage functional. The whole point of bidirectional
@@ -358,6 +422,8 @@ template <typename SampleT> class StringNetwork {
 
   private:
     void handleEvent(const NoteEvent& event) noexcept;
+    void excite(int stringIndex, const NoteEvent& event) noexcept;
+    void landSynthFade(int stringIndex) noexcept;
     void applyStringParams(int stringIndex) noexcept;
     void refreshEnableTargets() noexcept;
     void snapPositionSmoothers(int stringIndex) noexcept;
@@ -391,6 +457,16 @@ template <typename SampleT> class StringNetwork {
         return slots;
     }
     static constexpr double kDefaultTapPosition01 = 0.5;
+
+    // Same argument as filledTapSlots above, for the Synth retrigger fade: an array of zeros would
+    // mean "every string is fully faded out" on an instance nobody has reset yet, and the diagnostic
+    // accessor would report it.
+    static constexpr std::array<float, kMaxStrings> filledStrings(float value) noexcept {
+        std::array<float, kMaxStrings> values{};
+        for (float& slot : values)
+            slot = value;
+        return values;
+    }
 
     // The silence watchdog that replaced P1's release envelope (Task P2.2). A released string is
     // damped by physics now, so nothing counts it down: it leaves the loop when it is OBSERVED
@@ -456,6 +532,19 @@ template <typename SampleT> class StringNetwork {
     std::array<float, kMaxStrings> portImpedance_{};
     std::array<SampleT, kMaxStrings> portIncident_{};
     std::array<SampleT, kMaxStrings> portOutgoing_{};
+
+    // The Synth retrigger's fade (Task P2.6), one per string. `fadeGain_` multiplies the tap AND
+    // the bridge incident wave; `fadeSteps_` counts down to the sample the state is cleared and
+    // `pendingNote_` fires. `pendingNoteOff_` covers the case that would otherwise be a stuck note:
+    // a host sending a note-off inside the 2 ms fade, for the note that has not started yet.
+    std::array<float, kMaxStrings> fadeGain_ = filledStrings(1.0f);
+    std::array<int, kMaxStrings> fadeSteps_{};
+    std::array<bool, kMaxStrings> fadeActive_{};
+    std::array<bool, kMaxStrings> pendingNoteOff_{};
+    std::array<NoteEvent, kMaxStrings> pendingNote_{};
+    int synthFadeSamples_ = 1;
+    float synthFadeStep_ = 1.0f;
+    double retuneRampSeconds_ = kRetuneRampSeconds;
 
     // Domain-boundary buffers: kMaxStrings * kMaxTapsPerString contiguous runs of maxBlockSize_
     // samples laid out (string, tap, sample), plus the bridge feed.
