@@ -288,8 +288,8 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     // Until fixes wave 3 this case struck at sample 25600 -- kRingBlocks * kBlock, a round number of
     // blocks and therefore an ARBITRARY PHASE of the 110 Hz note being replaced. tests/support/
     // ClickMetric.h states the rule that forbids it, in the form that covers negative controls and
-    // perturbations alike; this site was the fourth place in the project to break it and the first
-    // where the broken axis was inside the GATE.
+    // perturbations alike, and lists every site in the project that has broken it. This one is the
+    // latest, and it is the first where the blind axis was inside the GATE rather than beside it.
     //
     // MEASURED, because the argument for the gate's shape depended on it. Recomputing the whole
     // 28..32 ms neighbourhood at ten re-strike phases spanning one period of the old note (436
@@ -473,7 +473,7 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     // the constant. The reference is a FRESH PLUCK, which contains no glide at all, so every
     // millisecond of glide is excess by construction and a longer ramp always reads better -- the
     // statistic's minimum is at "no legato", which is not an available answer. It also oscillates by
-    // up to 2.4 dB between adjacent millisecond values (below), because it is a peak taken over a
+    // up to 3.0 dB between adjacent millisecond values (below), because it is a peak taken over a
     // 40-block window and a glide moves the phase at which the loudest transition lands. It is a
     // check that the transition is not a STEP; it is not a preference ordering over ramp lengths.
     // The real decider is whether 30 ms of glide reads as a hammer-on or as a slide, which is
@@ -522,7 +522,7 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     REQUIRE(std::fabs(sweptExcess[kShippedIndex] - excessDb) < 1.0e-9);
 
     // THE GATE, TAKEN OVER A NEIGHBOURHOOD OF RAMP LENGTHS RATHER THAN AT ONE POINT, and the reason
-    // is in the sweep above. The statistic swings by up to 2.4 dB between adjacent millisecond
+    // is in the sweep above. The statistic swings by up to 3.0 dB between adjacent millisecond
     // values, so a single-point gate with a decibel of margin is decided by which side of one local
     // oscillation the shipped value lands on, and a different note pair, a change to the
     // fractional-delay solve or a different toolchain could flip it red for no musical reason at

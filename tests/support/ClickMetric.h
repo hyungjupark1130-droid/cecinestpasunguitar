@@ -115,16 +115,23 @@
 //   reading is one sample of a distribution the test never characterised, and the test cannot then
 //   tell a regression from a shift in phase. This is the sharper half and it took longer to see.
 //
-// FIVE OCCURRENCES SO FAR, all in P2, all found by review rather than by the suite: P2.2's
-// six-damper pedal-release control (0.265 dB blind -- it PASSED -- against 32.04 dB placed); P2.4's
-// sympathetic-truncation control; P2.6 fixes wave 1's four controls (+5.90 / +6.61 / +18.89 /
-// +24.07 dB); P2.6 fixes wave 2's note-off-age PERTURBATION (a round 20 ms landed on a zero crossing
-// and reported exactly 0.00 dB while the discarded peak was -28.8 dBFS); and P2.6 fixes wave 3's
-// cross-pitch re-strike, where the perturbation sat at a block boundary INSIDE A GATE -- recomputing
-// that gate at ten re-strike phases across one period of the old note swung its median from 0.111 to
-// 3.199 dB, i.e. across the 3 dB criterion, on identical code.
+// EVERY OCCURRENCE SO FAR, all in P2, every one found by review rather than by the suite:
 //
-// THE PROCEDURE, so the sixth occurrence has something specific to violate:
+//   - P2.2, where the lesson originated: a control placed at the state-change sample rather than by
+//     level (tests/dsp/SustainPedalTests.cpp still cites it as "the P2.2 lesson").
+//   - P2.6's six-damper pedal-release control, the same defect in a new file: 0.27 dB placed blind
+//     at the pedal sample -- i.e. the control PASSED the gate it exists to fail -- against 32.04 dB
+//     placed by level. Its sympathetic-truncation control was fixed in the same round (30.70 dB).
+//   - P2.6 fixes wave 1, FOUR negative controls at once: +5.90 / +6.61 / +18.89 / +24.07 dB. This
+//     is where the rule was first written down -- for controls only.
+//   - P2.6 fixes wave 2, the note-off-age PERTURBATION, which is where the rule was found to bind
+//     perturbations too: a round 20 ms landed on a zero crossing and the row reported exactly
+//     0.00 dB while the discarded peak was -28.8 dBFS. Fixed there and not carried back.
+//   - P2.6 fixes wave 3, the cross-pitch re-strike -- a perturbation at a block boundary INSIDE A
+//     GATE. Recomputing that gate at ten re-strike phases across one period of the old note swung
+//     its median from 0.111 to 3.199 dB, i.e. across the 3 dB criterion, on identical code.
+//
+// THE PROCEDURE, so the next occurrence has something specific to violate:
 //
 //   1. Search a window of the relevant waveform for the extremum of |x|, and place there (for a cut,
 //      whose peak |dx| IS the sample it lands on) or on the sample AFTER it (for a perturbation
