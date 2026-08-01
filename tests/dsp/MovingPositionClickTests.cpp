@@ -70,6 +70,15 @@ struct Spec {
     double seconds = 10.0;
     int heldStrings = kChordStrings; // [0, heldStrings) stay sounding; the rest get a NoteOff
     double retriggerPeriod = 0.0;    // 0 = none; same-pitch NoteOns on the HELD strings
+
+    // Re-strike the RELEASED strings on the same period and release them again shortly after, so
+    // that a damper is coming down on a freshly plucked string inside every retrigger interval
+    // rather than only inside the first. Without it a released string is damped to the silence
+    // watchdog's floor within a few hundred milliseconds and the rest of the render is pickup-only
+    // -- which is exactly what the first version of the combined 5 Hz case measured while calling
+    // itself a test of both positions moving together.
+    bool restrikeDamped = false;
+    double damperHoldSeconds = 0.15; // pluck -> NoteOff gap for the re-struck strings: a chug
 };
 
 struct Render {
@@ -83,6 +92,12 @@ struct Render {
     // report "engagement 0" for a render whose audible content is entirely damped strings.
     std::vector<float> engagement;
     std::vector<float> lossDepth;
+
+    // Per block, the STRONGEST junction anywhere in the network: max over strings of
+    // engagement * lossDepth, which is the `s` in g = s/(s+1) and therefore the whole of how much
+    // damping is in force. Per block and over all strings because "is the damper doing anything
+    // during THIS segment" is a question about the segment, not about one string at one instant.
+    std::vector<float> strongestDamperProduct;
     std::vector<std::size_t> retriggerSamples;
 };
 
@@ -132,6 +147,7 @@ Render renderChord(const Spec& spec) {
     const auto releaseBlock = static_cast<int>(kReleaseSeconds * kRate / kBlock);
     const int retriggerBlocks =
         (spec.retriggerPeriod > 0.0) ? static_cast<int>(spec.retriggerPeriod * kRate / kBlock) : 0;
+    const int damperHoldBlocks = std::max(1, static_cast<int>(spec.damperHoldSeconds * kRate / kBlock));
 
     Render out;
     out.mix.assign(static_cast<std::size_t>(totalBlocks) * static_cast<std::size_t>(kBlock), 0.0f);
@@ -156,11 +172,24 @@ Render renderChord(const Spec& spec) {
         if (b == releaseBlock)
             for (int s = spec.heldStrings; s < kChordStrings; ++s)
                 events.push(noteOff(0, kChord[s], s));
-        if (retriggerBlocks > 0 && b > 0 && (b % retriggerBlocks) == 0 && spec.heldStrings > 0) {
+        if (retriggerBlocks > 0 && b > 0 && (b % retriggerBlocks) == 0) {
             for (int s = 0; s < spec.heldStrings; ++s)
                 events.push(noteOn(0, kChord[s], s)); // SAME pitch: pluck over the ringing state
+            if (spec.restrikeDamped) {
+                // The released strings are silent and watchdog-cleared by now (a fully engaged
+                // damper at depth 0.5 takes a string under -100 dBFS inside a few hundred ms), so
+                // this NoteOn's re-init runs over zeroed rails -- the one condition under which
+                // clearStringState() is inaudible. It also lands on the retrigger sample, which
+                // every analysed segment already excludes its first 50 ms of.
+                for (int s = spec.heldStrings; s < kChordStrings; ++s)
+                    events.push(noteOn(0, kChord[s], s));
+            }
             out.retriggerSamples.push_back(static_cast<std::size_t>(b) * static_cast<std::size_t>(kBlock));
         }
+        if (spec.restrikeDamped && retriggerBlocks > 0 && b > damperHoldBlocks &&
+            (b % retriggerBlocks) == (damperHoldBlocks % retriggerBlocks))
+            for (int s = spec.heldStrings; s < kChordStrings; ++s)
+                events.push(noteOff(0, kChord[s], s)); // the felt comes down inside every segment
 
         network.process(events, kBlock);
 
@@ -177,6 +206,10 @@ Render renderChord(const Spec& spec) {
         out.tapPosition.push_back(network.tapPosition01(0, 0));
         out.engagement.push_back(network.damperEngagement(0));
         out.lossDepth.push_back(network.damperLossDepth(0));
+        float strongest = 0.0f;
+        for (int s = 0; s < kChordStrings; ++s)
+            strongest = std::max(strongest, network.damperEngagement(s) * network.damperLossDepth(s));
+        out.strongestDamperProduct.push_back(strongest);
     }
     return out;
 }
@@ -340,9 +373,18 @@ TEST_CASE("CONTRACT: MovingPosition -- both positions at 5 Hz across a Physical 
     sweptSpec.pickup = Lane{0.5f, 0.45f, 5.0};
     sweptSpec.damper = Lane{0.5f, 0.4f, 5.0};
     sweptSpec.maxLoss = 0.5f;
-    sweptSpec.heldStrings = 3; // 0..2 held and retriggered; 3..5 released, so their dampers engage
+    sweptSpec.heldStrings = 3; // 0..2 held and retriggered; 3..5 chugged, so their dampers engage
     sweptSpec.retriggerPeriod = 1.0;
     sweptSpec.seconds = 6.0;
+    // Strings 3..5 are re-struck and released again on the retrigger period. Without this the
+    // criterion's "both positions swept simultaneously" is a lie after the first second: a fully
+    // engaged damper at depth 0.5 takes a string under the silence watchdog's floor in a few
+    // hundred milliseconds, so the damper lane stops affecting anything and the case becomes a
+    // pickup-only test wearing the combined name. The first version of this case measured exactly
+    // that -- its own printed decomposition read `damper-only 0.0005 dB` in the segment that set
+    // the gate -- and disclosed it in prose instead of asserting against it. The per-segment
+    // assertions below are what make the disclosure binding.
+    sweptSpec.restrikeDamped = true;
     Spec frozenSpec = sweptSpec;
     frozenSpec.pickup = Lane{0.5f, 0.0f, 5.0};
     frozenSpec.damper = Lane{0.5f, 0.0f, 5.0};
@@ -391,7 +433,9 @@ TEST_CASE("CONTRACT: MovingPosition -- both positions at 5 Hz across a Physical 
     double worstFamilyExcessDb = -1000.0;
     double worstFamilyLevelDb = -1000.0;
     double worstMotionExcessDb = -1000.0; // swept excess ABOVE the family's own spread
+    double weakestSegmentDamper = 1000.0; // the LEAST damped segment; the gate is on this one
     std::size_t worstAt = 0;
+    int segments = 0;
     long long nonFinite = 0;
     long long subnormal = 0;
     const auto skip = static_cast<std::size_t>(0.050 * kRate);
@@ -401,6 +445,22 @@ TEST_CASE("CONTRACT: MovingPosition -- both positions at 5 Hz across a Physical 
             (k + 1 < swept.retriggerSamples.size()) ? swept.retriggerSamples[k + 1] : swept.mix.size();
         if (to <= from + 16)
             continue;
+        ++segments;
+
+        // THE DAMPER IS DOING SOMETHING IN THIS SEGMENT, asserted rather than assumed. Same
+        // discipline as the 2 Hz damper case above, applied where it was missing: the strongest
+        // junction anywhere in the network across this segment's blocks, and separately that the
+        // damper lane alone measurably changes the render over this exact span. Without both, a
+        // segment in which every damped string had already decayed to silence would still be
+        // reported as evidence about "both positions swept simultaneously".
+        float segmentDamper = 0.0f;
+        for (std::size_t b = from / kBlock; b < std::min(to / kBlock, swept.strongestDamperProduct.size()); ++b)
+            segmentDamper = std::max(segmentDamper, swept.strongestDamperProduct[b]);
+        weakestSegmentDamper = std::min(weakestSegmentDamper, static_cast<double>(segmentDamper));
+        INFO("segment " << k << " strongest junction s = " << segmentDamper);
+        REQUIRE(segmentDamper > 0.4f); // depth 0.5 with the felt essentially all the way down
+        REQUIRE(rendersDiffer(damperOnly.mix, frozen.mix, from, to));
+
         const cnpg::test::ClickMeasurement reference = cnpg::test::measureClick(frozen.mix, kRate, from, to);
         const cnpg::test::ClickMeasurement test = cnpg::test::measureClick(swept.mix, kRate, from, to);
         REQUIRE(reference.metric(reference) > 0.0);
@@ -445,7 +505,9 @@ TEST_CASE("CONTRACT: MovingPosition -- both positions at 5 Hz across a Physical 
               << " (level-normalised " << worstLevelDb << " dB); the static-position family alone spans "
               << worstFamilyExcessDb << " dB (level-normalised " << worstFamilyLevelDb
               << " dB), so the MOTION accounts for " << worstMotionExcessDb << " dB (limit "
-              << cnpg::test::kClickMetricToleranceDb << ")\n";
+              << cnpg::test::kClickMetricToleranceDb
+              << "). Least-damped segment: strongest junction s = " << weakestSegmentDamper << " over " << segments
+              << " segments\n";
 
     INFO("worst excess " << worstExcessDb << " dB over the frozen-0.5 reference; static family spans "
                          << worstFamilyExcessDb << " dB; motion accounts for " << worstMotionExcessDb << " dB");
@@ -829,6 +891,211 @@ TEST_CASE("CONTRACT: MovingPosition -- reading a moving seam twice in one sample
         string.tick();
     }
     REQUIRE(sawFade); // non-vacuous: the idempotence was exercised WHILE a crossfade was in flight
+}
+
+TEST_CASE("CONTRACT: MovingPosition -- the applied crossfade weights sum to exactly one", "[contract]") {
+    // THE LOCKED LAW, asserted on the weights the read ACTUALLY APPLIES rather than on the ramp
+    // that feeds them. Everything else in this file pins `crossfade01` -- that it is linear, that
+    // it steps by exactly 1/128, that it lands on 1 -- and none of it would notice an
+    // implementation that kept that ramp and applied sin(pi/2 g2) / cos(pi/2 g2) INSIDE the read.
+    // That is precisely the equal-power law the ADR forbids, it would put up to +3 dB into
+    // correlated mid-fade content, and the only current check that would catch it is the energy
+    // gate -- indirectly, and in a different file.
+    //
+    // The construction is exact. Driving railAcceptFromBridge(c) every tick fills the dn rail with
+    // c; the nut's rigid inversion then writes up_ = -toNut, so the up rail fills with -c. A
+    // CONSTANT rail reads as that constant through any interpolation whose weights sum to one, at
+    // every position -- so mid-crossfade,
+    //
+    //     fromNut = (g1 + g2) * (-c)     and     fromBridge = (g1 + g2) * (+c)
+    //
+    // and the two arriving waves are exactly -c and +c if and only if the applied weights sum to
+    // exactly one. An equal-power law reads (sin + cos) * c, i.e. up to 41% high.
+    //
+    // Deliberately measured on the junction seam and not on readTapAt: the tap SUMS the two rails,
+    // which under this fill are -c and +c, so the tap is identically 0 whatever the weights sum to.
+    // The tap's own weights are pinned by the decomposition case below instead.
+    constexpr double kFill = 0.375; // exactly representable, so "equals the constant" can be exact
+    for (FractionalDelayKind kind : {FractionalDelayKind::Lagrange3, FractionalDelayKind::Thiran1}) {
+        WaveguideString<double> string;
+        string.prepare(kRate, kBlock, kind);
+        WaveguideStringParams params;
+        params.f0Hz = 110.0f;
+        string.setParams(params);
+        string.setAnalyticTuningCompensation(0.0f);
+        string.reset();
+        string.setLossBypassed(true); // so the loop chain cannot colour the constant on its way round
+
+        // Fill both rails. The dn rail is driven directly; the up rail fills from the nut inversion,
+        // so it needs a full rail length to converge -- 2000 ticks is far more than the longest rail
+        // at 110 Hz / 48 kHz.
+        for (int n = 0; n < 2000; ++n) {
+            string.railAcceptFromBridge(kFill);
+            string.tick();
+        }
+
+        int midFadeSamples = 0;
+        double worstNutError = 0.0;
+        double worstBridgeError = 0.0;
+        double worstWeightSumError = 0.0;
+        for (int n = 0; n < 24000; ++n) {
+            string.railAcceptFromBridge(kFill); // keep the rails constant while the seam moves
+            const auto p = static_cast<float>(0.5 + 0.4 * std::sin(kTwoPi * 5.0 * static_cast<double>(n) / kRate));
+
+            double fromNut = 0.0;
+            double fromBridge = 0.0;
+            string.readJunctionInputs(p, fromNut, fromBridge);
+            const auto crossfade = string.junctionCrossfade();
+            if (crossfade.crossfade01 > 0.0f && crossfade.crossfade01 < 1.0f)
+                ++midFadeSamples;
+
+            INFO("sample " << n << ", g2 " << crossfade.crossfade01 << ", fromNut " << fromNut << ", fromBridge "
+                           << fromBridge);
+            worstNutError = std::max(worstNutError, std::fabs(fromNut - (-kFill)));
+            worstBridgeError = std::max(worstBridgeError, std::fabs(fromBridge - kFill));
+            // The implied weight sum, reported as the number the law is actually about.
+            worstWeightSumError = std::max(worstWeightSumError, std::fabs(fromBridge / kFill - 1.0));
+
+            // A transparent junction, so the rails stay constant for the next sample.
+            string.writeJunctionOutputs(p, fromNut, fromBridge);
+            string.tick();
+        }
+
+        std::cout << "[contract] crossfade weight sum ("
+                  << (kind == FractionalDelayKind::Lagrange3 ? "lagrange3" : "thiran1") << "): " << midFadeSamples
+                  << " of 24000 samples strictly mid-fade; worst |g1 + g2 - 1| " << worstWeightSumError
+                  << ", worst |fromNut + " << kFill << "| " << worstNutError << ", worst |fromBridge - " << kFill
+                  << "| " << worstBridgeError << " (an equal-power law would read up to 0.414)\n";
+
+        // IN the state this case claims to test: it really was crossfading for most of the render.
+        REQUIRE(midFadeSamples > 12000);
+        // The weights sum to one to the float64 floor -- three orders of magnitude tighter than the
+        // 1e-9 the rest of this project uses for "exactly", and eleven orders under the 0.414 an
+        // equal-power law would show.
+        REQUIRE(worstWeightSumError < 1.0e-12);
+        REQUIRE(worstNutError < 1.0e-12);
+        REQUIRE(worstBridgeError < 1.0e-12);
+    }
+}
+
+TEST_CASE("CONTRACT: MovingPosition -- the tap applies exactly (1 - g2, g2) to its two anchors", "[contract]") {
+    // The same law on the tap, where the constant-rail construction above is degenerate (the tap
+    // sums the two rails, which that fill makes -c and +c). Instead the mix is DECOMPOSED: two
+    // further tap slots are parked at the two anchor positions the crossfade is between, and the
+    // fading slot's output must equal (1 - g2) * one + g2 * the other.
+    //
+    // Two passes, because the anchor positions are not known until the sweep has been run once and
+    // parking a slot on a moving target would make it fade too. Pass 1 finds the first strictly
+    // mid-fade sample and records the state there; pass 2 re-runs the identical string -- the tap is
+    // a pure read, so the rails evolve identically -- with slots 1 and 2 held at those two constant
+    // positions from sample 0, where they snap on first read and never move.
+    constexpr int kSamples = 24000;
+    auto positionAt = [](int n) { return 0.5 + 0.45 * std::sin(kTwoPi * 5.0 * static_cast<double>(n) / kRate); };
+
+    auto makeString = [](WaveguideString<double>& string) {
+        string.prepare(kRate, kBlock, FractionalDelayKind::Lagrange3);
+        WaveguideStringParams params;
+        params.f0Hz = 110.0f;
+        params.stringMaterial.lossGainLow = 1.0f;
+        params.stringMaterial.lossGainHigh = 1.0f;
+        string.setParams(params);
+        string.setAnalyticTuningCompensation(0.0f);
+        string.reset();
+    };
+
+    // ---- pass 1: find the LOUDEST genuinely mid-fade sample, and record the state there --------
+    // The loudest rather than the first, and that is not cosmetic. Both candidate laws agree
+    // exactly when the two anchor reads are near zero, so the FIRST mid-fade sample can easily be
+    // one where equal-power and amplitude-complementary differ by 3e-6 -- a difference that would
+    // still satisfy a relative discrimination check while demonstrating nothing. Picking the sample
+    // where the tap is largest is what gives the two laws room to disagree.
+    int probeSample = -1;
+    double probeMagnitude = 0.0;
+    WaveguideString<double>::PositionCrossfade probeState{};
+    {
+        WaveguideString<double> string;
+        makeString(string);
+        cnpg::dsp::PluckExciter<double> exciter;
+        exciter.prepare(kRate, kBlock);
+        exciter.trigger(0.8f, 0.28f, 0.5f);
+        for (int n = 0; n < kSamples; ++n) {
+            const double excitation = exciter.renderSample();
+            if (excitation != 0.0)
+                string.injectAt(exciter.latchedPosition01(), excitation);
+            const double tap = string.readTapAt(0, static_cast<float>(positionAt(n)));
+            const auto state = string.tapCrossfade(0);
+            // Far enough in that the pluck has filled the rails, and strictly between the anchors so
+            // the decomposition is not a one-term identity.
+            if (n > 4000 && state.crossfade01 > 0.2f && state.crossfade01 < 0.8f && state.anchor01 != state.pending01 &&
+                std::fabs(tap) > probeMagnitude) {
+                probeSample = n;
+                probeMagnitude = std::fabs(tap);
+                probeState = state;
+            }
+            string.tick();
+        }
+    }
+    REQUIRE(probeSample > 0);
+    REQUIRE(probeMagnitude > 0.001); // the probe really is on a live part of the waveform
+
+    // ---- pass 2: decompose the fading read against two parked ones ----------------------------
+    WaveguideString<double> string;
+    makeString(string);
+    cnpg::dsp::PluckExciter<double> exciter;
+    exciter.prepare(kRate, kBlock);
+    exciter.trigger(0.8f, 0.28f, 0.5f);
+
+    double faded = 0.0;
+    double atAnchor = 0.0;
+    double atPending = 0.0;
+    for (int n = 0; n <= probeSample; ++n) {
+        const double excitation = exciter.renderSample();
+        if (excitation != 0.0)
+            string.injectAt(exciter.latchedPosition01(), excitation);
+        faded = string.readTapAt(0, static_cast<float>(positionAt(n)));
+        // Constant from sample 0, so these two never arm a fade of their own.
+        atAnchor = string.readTapAt(1, probeState.anchor01);
+        atPending = string.readTapAt(2, probeState.pending01);
+        if (n < probeSample)
+            string.tick();
+    }
+
+    // Pass 2 really did reproduce pass 1's state, and the two reference slots really are parked
+    // exactly where the fading slot's anchors are -- both anchors came in as floats, so the stored
+    // doubles are exactly those floats and there is no conversion slack here.
+    const auto state = string.tapCrossfade(0);
+    REQUIRE(state.anchor01 == probeState.anchor01);
+    REQUIRE(state.pending01 == probeState.pending01);
+    REQUIRE(state.crossfade01 == probeState.crossfade01);
+    REQUIRE(string.tapCrossfade(1).crossfade01 == 0.0f);
+    REQUIRE(string.tapCrossfade(1).anchor01 == probeState.anchor01);
+    REQUIRE(string.tapCrossfade(2).crossfade01 == 0.0f);
+    REQUIRE(string.tapCrossfade(2).anchor01 == probeState.pending01);
+    // Non-vacuous: the two anchors really do read different values, so the weights are load-bearing.
+    REQUIRE(atAnchor != atPending);
+
+    const double g2 = static_cast<double>(state.crossfade01);
+    const double linear = (1.0 - g2) * atAnchor + g2 * atPending;
+    const double equalPower =
+        std::cos(0.5 * kTwoPi * 0.5 * g2) * atAnchor + std::sin(0.5 * kTwoPi * 0.5 * g2) * atPending;
+    const double linearError = std::fabs(faded - linear);
+    const double equalPowerError = std::fabs(faded - equalPower);
+
+    std::cout << "[contract] tap crossfade decomposition at sample " << probeSample << " (g2 " << g2 << ", tap "
+              << faded << ", anchors " << atAnchor << " / " << atPending << "): |applied - amplitude-complementary| "
+              << linearError << ", |applied - equal-power| " << equalPowerError << "\n";
+
+    INFO("linear error " << linearError << ", equal-power error " << equalPowerError << ", tap " << faded);
+    // The applied weights ARE (1 - g2, g2). Measured at exactly 0: the fade accumulates in steps of
+    // 1/128, a power of two, so the reported float crossfade01 is the double the read applied, bit
+    // for bit. The tolerance rather than == 0 is for the rates where the fade length is not a power
+    // of two, and for FMA contraction differing between this expression and the one in the read.
+    REQUIRE(linearError < 1.0e-9 * std::max(1.0, std::fabs(atAnchor) + std::fabs(atPending)));
+    // ...and the equal-power law the ADR forbids is nowhere near. Stated ABSOLUTELY as well as
+    // relatively: a purely relative bound is satisfied for free when linearError is 0, which says
+    // nothing about whether the two laws were distinguishable at this sample at all.
+    REQUIRE(equalPowerError > 0.01 * std::fabs(faded));
+    REQUIRE(equalPowerError > 1.0e-4);
 }
 
 TEST_CASE("CONTRACT: MovingPosition -- a transparent junction is free even mid-crossfade", "[contract]") {

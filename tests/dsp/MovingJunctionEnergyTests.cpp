@@ -166,7 +166,15 @@ struct GrowthReport {
     std::size_t worstAt = 0;
     double maximum = 0.0;
     std::size_t maximumAt = 0;
-    double overshootAboveMaximum = 0.0; // (max after the first block) / (running max before it) - 1
+    // The plan's cumulative criterion: max over k of energy[k] / energy[0] - 1, i.e. how far the
+    // trace ever rises above the POST-EXCITATION MAXIMUM. The denominator is FROZEN at energy[0] --
+    // the first block sampled after the excitation has finished, which for a passive system is that
+    // maximum. An earlier version of this walked the denominator up to each new high-water mark,
+    // which measures the largest INCREMENTAL step above a moving reference and is a strictly weaker
+    // statement: a trace creeping up by 1e-12 per block forever would report 1e-12 and pass while
+    // the energy doubled. Non-binding at the measured 0, and it is still not the guard it claimed.
+    double overshootAbovePostExcitation = 0.0;
+    std::size_t overshootAt = 0;
 };
 
 GrowthReport measureGrowth(const std::vector<double>& energy) {
@@ -174,7 +182,7 @@ GrowthReport measureGrowth(const std::vector<double>& energy) {
     if (energy.empty())
         return out;
     out.maximum = energy.front();
-    double runningMaximum = energy.front();
+    const double postExcitationMaximum = energy.front();
     for (std::size_t k = 1; k < energy.size(); ++k) {
         const double previous = energy[k - 1];
         const double growth = (previous > 0.0) ? (energy[k] / previous - 1.0) : 0.0;
@@ -186,12 +194,12 @@ GrowthReport measureGrowth(const std::vector<double>& energy) {
             out.maximum = energy[k];
             out.maximumAt = k;
         }
-        // "Never exceeds the POST-EXCITATION maximum" is a statement about the running maximum: the
-        // first sampled block is the post-excitation peak of a passive system, so anything later that
-        // rises above what has been seen so far is cumulative growth however slowly it accrued.
-        if (energy[k] > runningMaximum) {
-            out.overshootAboveMaximum = std::max(out.overshootAboveMaximum, energy[k] / runningMaximum - 1.0);
-            runningMaximum = energy[k];
+        if (postExcitationMaximum > 0.0) {
+            const double overshoot = energy[k] / postExcitationMaximum - 1.0;
+            if (overshoot > out.overshootAbovePostExcitation) {
+                out.overshootAbovePostExcitation = overshoot;
+                out.overshootAt = k;
+            }
         }
     }
     return out;
@@ -233,7 +241,7 @@ TEST_CASE("ENERGY/T2: a lossless network is inert to a damper-position sweep", "
             const GrowthReport report = measureGrowth(swept.energy);
             INFO(kindName(kind) << " @ " << sampleRate << ": worst growth " << report.worstGrowth);
             REQUIRE(report.worstGrowth <= kMotionGrowthTolerance);
-            REQUIRE(report.overshootAboveMaximum <= kMotionGrowthTolerance);
+            REQUIRE(report.overshootAbovePostExcitation <= kMotionGrowthTolerance);
         }
     }
     std::cout << "[energy] T2 lossless network, damperPosition01 swept 0.1 -> 0.9: BIT-IDENTICAL to the frozen run at "
@@ -266,7 +274,7 @@ TEST_CASE("ENERGY/T2: a lossless network gains nothing from a pickup-position sw
 
             const GrowthReport report = measureGrowth(swept.energy);
             REQUIRE(report.worstGrowth <= kMotionGrowthTolerance);
-            REQUIRE(report.overshootAboveMaximum <= kMotionGrowthTolerance);
+            REQUIRE(report.overshootAbovePostExcitation <= kMotionGrowthTolerance);
         }
     }
     std::cout << "[energy] T2 lossless network, pickupPosition01 swept 0.1 -> 0.9: energy trace BIT-IDENTICAL to the "
@@ -431,16 +439,17 @@ TEST_CASE("ENERGY/T2: a moving dissipative junction on a lossless string never c
 
             std::cout << "[energy] T2 moving damper " << kindName(kind) << " @ " << sampleRate
                       << " Hz: worst per-block growth " << moving.worstGrowth << " at block " << moving.worstAt
-                      << ", cumulative overshoot above the post-excitation maximum " << moving.overshootAboveMaximum
-                      << " (limit " << kMotionGrowthTolerance << "); " << swept.midFadeSamples
-                      << " samples mid-crossfade, worst seam deposit " << swept.worstDeposit << ", energy "
-                      << swept.energy.front() << " -> " << swept.energy.back() << ". Static counterpart: worst growth "
-                      << stationary.worstGrowth << " (limit " << kStaticGrowthTolerance << ")\n";
+                      << ", cumulative overshoot above the post-excitation maximum "
+                      << moving.overshootAbovePostExcitation << " (limit " << kMotionGrowthTolerance << "); "
+                      << swept.midFadeSamples << " samples mid-crossfade, worst seam deposit " << swept.worstDeposit
+                      << ", energy " << swept.energy.front() << " -> " << swept.energy.back()
+                      << ". Static counterpart: worst growth " << stationary.worstGrowth << " (limit "
+                      << kStaticGrowthTolerance << ")\n";
 
             // BOUNDED GROWTH for the motion run (docs/plan.md section 4.2), both halves of it.
-            INFO("moving worst growth " << moving.worstGrowth << ", overshoot " << moving.overshootAboveMaximum);
+            INFO("moving worst growth " << moving.worstGrowth << ", overshoot " << moving.overshootAbovePostExcitation);
             REQUIRE(moving.worstGrowth <= kMotionGrowthTolerance);
-            REQUIRE(moving.overshootAboveMaximum <= kMotionGrowthTolerance);
+            REQUIRE(moving.overshootAbovePostExcitation <= kMotionGrowthTolerance);
             // ...and the STRICT non-increase for the static counterpart, which is what says the
             // motion tolerance above is not quietly absorbing a defect the static case would catch.
             REQUIRE(stationary.worstGrowth <= kStaticGrowthTolerance);
@@ -472,10 +481,10 @@ TEST_CASE("ENERGY/T2: a moving junction stays passive at full depth and full cro
     const GrowthReport report = measureGrowth(swept.energy);
     std::cout << "[energy] T2 moving damper at full depth, 5 Hz sweep: " << swept.midFadeSamples << " of "
               << static_cast<int>(kSeconds * 48000.0) << " samples mid-crossfade; worst per-block growth "
-              << report.worstGrowth << ", overshoot " << report.overshootAboveMaximum << " (limit "
+              << report.worstGrowth << ", overshoot " << report.overshootAbovePostExcitation << " (limit "
               << kMotionGrowthTolerance << "), worst seam deposit " << swept.worstDeposit << ", energy "
               << swept.energy.front() << " -> " << swept.energy.back() << "\n";
-    INFO("worst growth " << report.worstGrowth << ", overshoot " << report.overshootAboveMaximum);
+    INFO("worst growth " << report.worstGrowth << ", overshoot " << report.overshootAbovePostExcitation);
     REQUIRE(report.worstGrowth <= kMotionGrowthTolerance);
-    REQUIRE(report.overshootAboveMaximum <= kMotionGrowthTolerance);
+    REQUIRE(report.overshootAbovePostExcitation <= kMotionGrowthTolerance);
 }
