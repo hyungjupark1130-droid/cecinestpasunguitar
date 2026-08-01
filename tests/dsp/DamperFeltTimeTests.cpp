@@ -447,7 +447,9 @@ struct ClickReadings {
     double residualExcessDb = 0.0;
     double levelExcessDb = 0.0;
     double hardCutExcessDb = 0.0;
-    double residualLevelDropDb = 0.0; // how much level the change took out of the residual span
+    std::size_t hardCutOffsetSamples = 0; // where the negative control's cut landed, past the note-off
+    double hardCutLevel = 0.0;            // ...and the sample value it landed on
+    double residualLevelDropDb = 0.0;     // how much level the change took out of the residual span
     long long nonFinite = 0;
     long long subnormal = 0;
 };
@@ -494,9 +496,25 @@ ClickReadings measureNoteOffClick(float maxLoss, double postSeconds) {
 
     // NEGATIVE CONTROL, so the gate provably has teeth on THIS render rather than only on the one
     // it was calibrated against in P2.1: the P1 behaviour taken to its crude limit, an instant
-    // mute at the note-off. It must fail the same criterion the felt ramp passes.
+    // mute. It must fail the same criterion the felt ramp passes.
+    //
+    // LEVEL-PLACED inside the post-note-off window rather than pinned to the note-off sample itself,
+    // which is the P2.2 lesson (tests/dsp/SustainPedalTests.cpp states it in full). A hard cut's
+    // peak |dx| IS the sample value it lands on, and the note-off sample is an arbitrary phase of a
+    // ringing string -- land it near a zero crossing and the control is a cut of almost nothing,
+    // i.e. the control passes the gate it exists to fail and the gate is provably toothless. This
+    // one site gates three depths, so a weak placement here would have taken all three with it.
+    std::size_t cutSample = damped.noteOffSample;
+    float cutLevel = 0.0f;
+    for (std::size_t i = damped.noteOffSample; i < std::min(spanEnd, reference.tap.size()); ++i) {
+        if (std::fabs(reference.tap[i]) > cutLevel) {
+            cutLevel = std::fabs(reference.tap[i]);
+            cutSample = i;
+        }
+    }
+    REQUIRE(cutLevel > 0.0f);
     std::vector<float> hardCut = reference.tap;
-    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(damped.noteOffSample), hardCut.end(), 0.0f);
+    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(cutSample), hardCut.end(), 0.0f);
     const cnpg::test::ClickMeasurement hardCutMeasurement =
         cnpg::test::measureClick(hardCut, kRate, spanBegin, spanEnd);
 
@@ -515,6 +533,8 @@ ClickReadings measureNoteOffClick(float maxLoss, double postSeconds) {
                                                                     referenceMeasurement, referenceResidual);
     out.levelExcessDb = cnpg::test::clickExcessAgainstLevelDb(dampedAfter, referenceAfter);
     out.hardCutExcessDb = cnpg::test::clickExcessDb(hardCutMeasurement, referenceMeasurement);
+    out.hardCutOffsetSamples = cutSample - damped.noteOffSample;
+    out.hardCutLevel = static_cast<double>(cutLevel);
     out.residualLevelDropDb = (referenceResidual.medianAbsDiff > 0.0 && dampedResidual.medianAbsDiff > 0.0)
                                   ? 20.0 * std::log10(dampedResidual.medianAbsDiff / referenceResidual.medianAbsDiff)
                                   : -300.0;
@@ -571,8 +591,9 @@ TEST_CASE("CONTRACT: DamperFeltTime -- damper engagement passes the click metric
                   << readings.levelExcessDb << " dB (limit " << cnpg::test::kClickMetricToleranceDb
                   << " dB); the change took " << readings.residualLevelDropDb
                   << " dB out of the residual span, which is what the residual-normalised reading reports ("
-                  << readings.residualExcessDb << " dB, not a click); hard-mute negative control "
-                  << readings.hardCutExcessDb << " dB\n";
+                  << readings.residualExcessDb << " dB, not a click); level-placed hard-mute negative control "
+                  << readings.hardCutExcessDb << " dB at sample +" << readings.hardCutOffsetSamples << " (level "
+                  << readings.hardCutLevel << ")\n";
 
         INFO(depth.name << ": absolute " << readings.excessDb << " dB, level " << readings.levelExcessDb
                         << " dB; hard-mute control " << readings.hardCutExcessDb << " dB");

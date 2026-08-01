@@ -168,8 +168,13 @@ TEST_CASE("NoteAllocator: notes outside kMinMidiNote..kMaxMidiNote are rejected"
 
     // A rejected note is NOT an unassignable one, and the counters say so: an out-of-envelope note
     // never reaches the assignment policy at all, so the counter that reports "the policy had
-    // nowhere to put this" must stay at zero.
+    // nowhere to put this" must stay at zero. That distinction is exactly why the rejection has a
+    // counter OF ITS OWN rather than sharing one -- and it must have one, because a rejection that
+    // counted nothing was a NoteOn that vanished with every diagnostic reading healthy. This zone
+    // table spans all of MIDI, so nothing here could be unassignable even in principle; both
+    // rejections are the envelope check and the second counter is where they land.
     REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.outOfRangeNoteCount() == 2);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 

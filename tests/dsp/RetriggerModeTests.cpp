@@ -130,6 +130,22 @@ std::vector<double> toDouble(const std::vector<float>& samples, std::size_t begi
 
 double dbOf(double linear) { return 20.0 * std::log10(std::max(linear, 1e-30)); }
 
+// The index of the loudest sample in [begin, end). Pure mechanics; WHY a hard-cut negative control
+// has to be placed there rather than at the event is stated at each call site, because the reason is
+// a claim about that call site's own signal.
+std::size_t loudestSample(const std::vector<float>& samples, std::size_t begin, std::size_t end) {
+    end = std::min(end, samples.size());
+    std::size_t best = begin;
+    float bestLevel = -1.0f;
+    for (std::size_t i = begin; i < end; ++i) {
+        if (std::fabs(samples[i]) > bestLevel) {
+            bestLevel = std::fabs(samples[i]);
+            best = i;
+        }
+    }
+    return best;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -197,11 +213,22 @@ TEST_CASE("CONTRACT: Physical same-pitch restrike is click-free and never lets t
     REQUIRE(freshMeasurement.nonFiniteSamples == 0);
     const double excessDb = cnpg::test::clickExcessDb(measured, freshMeasurement);
 
-    // NEGATIVE CONTROL, carried inside the gate: the test render hard-cut 10 blocks into the span,
-    // i.e. a real discontinuity in the same signal over the same window. If the metric ever stops
+    // NEGATIVE CONTROL, carried inside the gate: the test render hard-cut inside the span, i.e. a
+    // real discontinuity in the same signal over the same window. If the metric ever stops
     // discriminating, this fails first.
+    //
+    // LEVEL-PLACED, not placed at a fixed offset, and that is the P2.2 lesson rather than a
+    // convenience (tests/dsp/SustainPedalTests.cpp states it in full). A hard cut's peak |dx| IS the
+    // sample value it lands on, so a cut taken at an arbitrary offset can land near a zero crossing
+    // and be a cut of almost nothing -- the control then PASSES the gate it exists to fail and the
+    // gate is left provably toothless. Placing it at the loudest sample in the window it is allowed
+    // to use is the largest discontinuity this signal can be given there, so the control is as
+    // strong as the signal permits rather than as strong as an arbitrary index happened to make it.
+    const std::size_t cutSample = loudestSample(test, spanBegin, spanEnd);
+    const float cutLevel = std::fabs(test[cutSample]);
+    REQUIRE(cutLevel > 0.0f);
     std::vector<float> hardCut = test;
-    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(restrikeSample + 10 * kBlock), hardCut.end(), 0.0f);
+    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(cutSample), hardCut.end(), 0.0f);
     const cnpg::test::ClickMeasurement hardCutMeasurement =
         cnpg::test::measureClick(hardCut, kRate, spanBegin, spanEnd);
     const double hardCutExcessDb = cnpg::test::clickExcessDb(hardCutMeasurement, freshMeasurement);
@@ -220,8 +247,9 @@ TEST_CASE("CONTRACT: Physical same-pitch restrike is click-free and never lets t
     }
 
     std::cout << "[contract] Physical same-pitch restrike: click excess " << excessDb << " dB (limit "
-              << cnpg::test::kClickMetricToleranceDb << "), hard-cut control " << hardCutExcessDb
-              << " dB; worst 10 ms RMS between the attacks " << worstWindowDb << " dBFS (floor -60)\n";
+              << cnpg::test::kClickMetricToleranceDb << "), level-placed hard-cut control " << hardCutExcessDb
+              << " dB at sample +" << (cutSample - restrikeSample) << " (level " << cutLevel
+              << "); worst 10 ms RMS between the attacks " << worstWindowDb << " dBFS (floor -60)\n";
 
     INFO("excess " << excessDb << " dB, hard-cut control " << hardCutExcessDb << " dB");
     REQUIRE(hardCutExcessDb > cnpg::test::kClickMetricToleranceDb);
@@ -318,9 +346,15 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     const double excessDb = cnpg::test::clickExcessDb(measured, freshMeasurement);
 
     // NEGATIVE CONTROL ONE: a hard cut inside the span, the standing check that the metric still
-    // discriminates a real discontinuity in this signal over this window.
+    // discriminates a real discontinuity in this signal over this window. LEVEL-PLACED at the
+    // loudest sample in the span for the reason the same-pitch case above states in full: a cut's
+    // peak |dx| is the sample value it lands on, so a cut at an arbitrary offset can land near a
+    // zero crossing and pass the gate it exists to fail.
+    const std::size_t cutSample = loudestSample(test, spanBegin, spanEnd);
+    const float cutLevel = std::fabs(test[cutSample]);
+    REQUIRE(cutLevel > 0.0f);
     std::vector<float> hardCut = test;
-    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(restrikeSample + 10 * kBlock), hardCut.end(), 0.0f);
+    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(cutSample), hardCut.end(), 0.0f);
     const double hardCutExcessDb =
         cnpg::test::clickExcessDb(cnpg::test::measureClick(hardCut, kRate, spanBegin, spanEnd), freshMeasurement);
 
@@ -329,8 +363,17 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     // shorten, the read position sweeps through the buffer faster than one sample per sample, which
     // is a real and intended pitch change and reads on a peak-|dx| metric as extra motion that a
     // fresh pluck does not have. The excess against a fresh pluck therefore falls with the ramp
-    // length rather than vanishing at any length, and the shape of that fall is what the constant
-    // has to be chosen against. Measured here rather than assumed.
+    // length rather than vanishing at any length. Measured here rather than assumed.
+    //
+    // WHAT THIS STATISTIC CANNOT DO, stated before anything is concluded from it: it cannot choose
+    // the constant. The reference is a FRESH PLUCK, which contains no glide at all, so every
+    // millisecond of glide is excess by construction and a longer ramp always reads better -- the
+    // statistic's minimum is at "no legato", which is not an available answer. It also oscillates by
+    // up to 2.4 dB between adjacent millisecond values (below), because it is a peak taken over a
+    // 40-block window and a glide moves the phase at which the loudest transition lands. It is a
+    // check that the transition is not a STEP; it is not a preference ordering over ramp lengths.
+    // The real decider is whether 30 ms of glide reads as a hammer-on or as a slide, which is
+    // docs/listening/physical-plausibility-checklist.md item 17 and has no headless answer.
     auto excessForRamp = [&](double rampSeconds) {
         StringNetwork<float> variant;
         configure(variant, paramsFor(RetriggerMode::Physical));
@@ -346,42 +389,96 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
         return cnpg::test::clickExcessDb(cnpg::test::measureClick(render, kRate, spanBegin, spanEnd), freshMeasurement);
     };
 
-    static const double kSweptRamps[] = {1.0 / kRate, 0.002, 0.008, 0.016, 0.030};
-    double sweptExcess[5] = {};
+    // Three coarse points, a 1 ms-resolution fan from 16 ms to 26 ms, and the 28..32 ms neighbourhood
+    // the gate below is taken over. The fan exists because the five-point sweep this file shipped
+    // with was too coarse to see what the statistic actually does between its samples, and a claim
+    // was drawn from it that a finer sweep falsifies.
+    static const double kSweptRamps[] = {1.0 / kRate, 0.002, 0.008, 0.016, 0.017, 0.018, 0.019, 0.020, 0.021, 0.022,
+                                         0.023,       0.024, 0.025, 0.026, 0.028, 0.029, 0.030, 0.031, 0.032};
+    constexpr std::size_t kSweptCount = sizeof(kSweptRamps) / sizeof(kSweptRamps[0]);
+    constexpr std::size_t kFastPoints = 3;     // <= 8 ms
+    constexpr std::size_t kShippedIndex = 16;  // 30 ms, the shipped kRetuneRampSeconds
+    constexpr std::size_t kNeighbourhood = 14; // first index of the 28..32 ms neighbourhood
+    double sweptExcess[kSweptCount] = {};
     std::cout << "[contract] Physical retune ramp length vs click excess against a fresh pluck:";
-    for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t i = 0; i < kSweptCount; ++i) {
         sweptExcess[i] = excessForRamp(kSweptRamps[i]);
         std::cout << "  " << (kSweptRamps[i] * 1000.0) << " ms -> " << sweptExcess[i] << " dB";
     }
     std::cout << "\n";
+    REQUIRE(kSweptRamps[kShippedIndex] == cnpg::dsp::kRetuneRampSeconds);
+    // The sweep really re-measures the SHIPPED configuration at its shipped index, rather than
+    // running beside the gate and agreeing with it by coincidence.
+    REQUIRE(std::fabs(sweptExcess[kShippedIndex] - excessDb) < 1.0e-9);
+
+    // THE GATE, TAKEN OVER A NEIGHBOURHOOD OF RAMP LENGTHS RATHER THAN AT ONE POINT, and the reason
+    // is in the sweep above. The statistic swings by up to 2.4 dB between adjacent millisecond
+    // values -- 26 ms reads 1.90, 28 ms reads 4.13, 29 ms reads 1.19 -- so a single-point gate with
+    // 1.3 dB of margin is decided by which side of one local oscillation the shipped value lands on,
+    // and a different note pair, a change to the fractional-delay solve or a different toolchain
+    // could flip it red for no musical reason at all. It would also flip GREEN for none.
+    //
+    // The physical claim is about a retune ramp of ORDER 30 ms, not about 1440 samples exactly, so
+    // the criterion is applied to the MEDIAN of the shipped value plus and minus 2 ms. A median of
+    // five is unmoved by up to two outlying points, so no single oscillation can decide the gate;
+    // a real regression -- anything that makes the retune transition itself a step -- moves every
+    // point in the neighbourhood together and is caught. Three of five points would have to fail
+    // before this line does, against one for the point gate it replaces, at the same margin.
+    std::vector<double> neighbourhood(std::begin(sweptExcess) + kNeighbourhood, std::end(sweptExcess));
+    REQUIRE(neighbourhood.size() == 5);
+    std::sort(neighbourhood.begin(), neighbourhood.end());
+    const double neighbourhoodMedianDb = neighbourhood[2];
 
     std::cout << "[contract] Physical cross-pitch restrike: ramp " << rampSamples << " samples ("
               << (landedSeconds * 1000.0) << " ms, criterion " << (kCriterionSeconds * 1000.0)
               << "); measured f0 after the ramp " << measuredHz << " Hz vs target " << targetHz << " (" << centsOff
               << " cents); click excess " << excessDb << " dB (peak |dx| " << measured.peakWindowAbsDiff << " vs "
               << freshMeasurement.peakWindowAbsDiff << " for the fresh pluck), one-sample-ramp control "
-              << sweptExcess[0] << " dB, hard-cut control " << hardCutExcessDb << " dB\n";
+              << sweptExcess[0] << " dB, level-placed hard-cut control " << hardCutExcessDb << " dB at sample +"
+              << (cutSample - restrikeSample) << " (level " << cutLevel << ")\n";
 
     INFO("excess " << excessDb << " dB, hard-cut " << hardCutExcessDb << " dB, snapped " << sweptExcess[0] << " dB");
     REQUIRE(hardCutExcessDb > cnpg::test::kClickMetricToleranceDb); // the metric still discriminates
     REQUIRE(std::fabs(centsOff) < 20.0); // the audio really is at the new pitch, not merely the state
 
-    // THE CRITERION AS WRITTEN, met at the plan's own ramp length. The sweep above is what chose
-    // that length: a shorter ramp reads worse and 8 ms -- tried first, on the argument that 30 ms of
-    // glide is the audible-slide mode Q3 defers -- FAILS THIS LINE at 10.43 dB. The plan's number is
-    // not a ceiling that happened to be generous; on this measurement it is the smallest ramp that
-    // clears the criterion, and the shipping default is set to it.
-    REQUIRE(excessDb <= cnpg::test::kClickMetricToleranceDb);
+    // THE CRITERION AS WRITTEN, at the shipped ramp length, read over its neighbourhood.
+    std::cout << "[contract] Physical retune ramp click gate over the 28..32 ms neighbourhood: median "
+              << neighbourhoodMedianDb << " dB (limit " << cnpg::test::kClickMetricToleranceDb
+              << "), shipped 30 ms point " << excessDb << " dB, neighbourhood spread " << neighbourhood.front() << ".."
+              << neighbourhood.back() << " dB\n";
+    INFO("neighbourhood median " << neighbourhoodMedianDb << " dB, shipped point " << excessDb << " dB");
+    REQUIRE(neighbourhoodMedianDb <= cnpg::test::kClickMetricToleranceDb);
 
-    // ...and the reading really is measuring the glide rather than something incidental: a ramp
-    // 1440x shorter is far worse, and lengthening the ramp monotonically improves it over the top
-    // half of the sweep. (The 2 ms point is WORSE than the one-sample point -- printed, not
-    // asserted: a one-sample retune re-solves the loop once, while a 2 ms one sweeps hard for 96
-    // samples, so the peak-|dx| statistic is not monotone at the fast end and the constant must not
-    // be chosen from it.)
+    // ...and the reading really is measuring the glide rather than something incidental: every ramp
+    // at or above 16 ms reads strictly better than every ramp at or below 8 ms. That is the trend
+    // the constant leans on, and it is the only monotone statement the data supports.
+    const double worstSlow = *std::max_element(std::begin(sweptExcess) + kFastPoints, std::end(sweptExcess));
+    const double bestFast = *std::min_element(std::begin(sweptExcess), std::begin(sweptExcess) + kFastPoints);
+    REQUIRE(worstSlow < bestFast);
     REQUIRE(excessDb < sweptExcess[0]);
-    REQUIRE(sweptExcess[4] < sweptExcess[3]);
-    REQUIRE(sweptExcess[3] < sweptExcess[2]);
+
+    // THE STATISTIC IS NOT MONOTONE, and that is asserted rather than merely printed, because the
+    // claim it replaces was. This file previously asserted a three-point descent over the top of a
+    // five-point sweep and read it as "30 ms is the shortest ramp that clears the criterion". At
+    // 1 ms resolution that is false in both halves: the sequence inverts repeatedly across the WHOLE
+    // range (not only at the fast end), and 22 ms clears the criterion at 1.70 dB while 28 ms FAILS
+    // it at 4.13 dB sitting between two passing neighbours. A sampled statistic that jumps like that
+    // between adjacent values cannot order ramp lengths, and no constant may be chosen from it.
+    int inversions = 0;
+    int shorterRampsThatClear = 0;
+    for (std::size_t i = kFastPoints; i < kSweptCount; ++i) {
+        if (i > kFastPoints && sweptExcess[i] > sweptExcess[i - 1])
+            ++inversions; // a LONGER ramp reading WORSE than the one before it
+        if (kSweptRamps[i] < cnpg::dsp::kRetuneRampSeconds && sweptExcess[i] <= cnpg::test::kClickMetricToleranceDb)
+            ++shorterRampsThatClear;
+    }
+    std::cout << "[contract] Physical retune ramp sweep shape: " << inversions
+              << " points where a LONGER ramp read worse, and " << shorterRampsThatClear
+              << " ramps shorter than the shipped 30 ms that clear the " << cnpg::test::kClickMetricToleranceDb
+              << " dB criterion -- so 30 ms is NOT the shortest ramp that clears it, and this statistic does not "
+                 "order ramp lengths\n";
+    REQUIRE(inversions > 0);
+    REQUIRE(shorterRampsThatClear > 0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -736,14 +833,21 @@ TEST_CASE("CONTRACT: a retrigger damper choke buys suppression only with elapsed
     // branch). docs/plan.md P2.6 asks a pitch-changing retrigger to perform a "damper choke (fast
     // engage())" before re-exciting. It is refused, and this case is the measurement.
     //
-    // A damper is a LINEAR two-port. After the retune ramp the old note's surviving motion and the
-    // new pluck occupy the SAME modal series of the SAME string and pass the SAME junction, so a
-    // damper acting from the re-excitation onward attenuates them together: it moves the level of
-    // the whole result and not the balance inside it. The one thing it can do is act FIRST, on the
-    // old content alone, before the pluck exists -- which is exactly what the plan's own ordering
-    // ("choke, ramp, THEN re-excitation") describes, and its entire currency is elapsed time, up to
-    // the 30 ms the plan itself budgets. 30 ms of latency on every legato note is not a playable
-    // instrument, and Q3 defers audible-slide behaviour besides.
+    // A damper is a LINEAR two-port, so the output after the note-on is the free response of the
+    // circulating state PLUS the response to the pluck -- superposition gives additivity, and that
+    // is all it gives. It does not by itself give equal attenuation: a damper attenuates per PASS
+    // through the junction, and for the first round trip (9.1 ms at 110 Hz) the fresh injection has
+    // made fewer passes than the content already going round, so the balance really does shift for
+    // that long. TO FIRST ORDER, ONCE ONE ROUND TRIP HAS ELAPSED, both occupy the same modal series
+    // of the same string at the same rate and a damper acting from the re-excitation onward moves
+    // the level of the whole result rather than the balance inside it. The transient is why this
+    // case measures the balance instead of arguing it.
+    //
+    // The one thing a damper can do outright is act FIRST, on the old content alone, before the
+    // pluck exists -- which is exactly what the plan's own ordering ("choke, ramp, THEN
+    // re-excitation") describes, and its entire currency is elapsed time, up to the 30 ms the plan
+    // itself budgets. 30 ms of latency on every legato note is not a playable instrument, and Q3
+    // defers audible-slide behaviour besides.
     //
     // Measured with the SHIPPED machinery rather than with code kept alive to be measured: a
     // note-off placed 10.7 ms before the restrike engages the felt for real. Two numbers come out

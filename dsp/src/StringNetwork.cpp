@@ -528,14 +528,19 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
         // A damper is a LINEAR two-port (DamperJunction.h derives its 2x2 S from Kirchhoff; there is
         // no nonlinearity anywhere in this loop). The string's output after the note-on is, by
         // superposition, the free response of the state that was already circulating plus the
-        // response to the exciter's injection. A time-varying LINEAR operator applied to that sum
-        // attenuates both components -- and both are distributed around the same loop passing the
-        // same junction at the same rate, so it attenuates them by the same factor. A choke applied
-        // at or after the re-excitation therefore cannot make the old content quieter RELATIVE to
-        // the new note, which is the only thing "choke" could mean here. All it can do is make the
-        // whole re-attack quieter. The only asymmetry available is TIME -- choke first, excite
-        // afterwards -- and the plan's own "then" reads that way, at a cost of up to 30 ms of
-        // latency on every legato note, which is not a playable instrument.
+        // response to the exciter's injection -- superposition gives ADDITIVITY, and that is all it
+        // gives. Equal attenuation does not follow from it, and is not exactly true here: a damper
+        // attenuates per PASS through its junction, and during the first round trip (9.1 ms at
+        // 110 Hz) the fresh injection has passed fewer times than the content already circulating,
+        // so the balance does shift for that long. TO FIRST ORDER, once a round trip has elapsed,
+        // both are distributed around the same loop passing the same junction at the same rate and
+        // the attenuation they see is the same. So a choke applied at or after the re-excitation
+        // cannot make the old content quieter RELATIVE to the new note in any lasting way, which is
+        // the only thing "choke" could mean here; all it can do is make the whole re-attack quieter.
+        // The transient is real and is exactly why the refusal below rests on a MEASUREMENT of the
+        // balance rather than on this paragraph. The only asymmetry available outright is TIME --
+        // choke first, excite afterwards -- and the plan's own "then" reads that way, at a cost of
+        // up to 30 ms of latency on every legato note, which is not a playable instrument.
         //
         // Measured rather than argued in tests/dsp/RetriggerModeTests.cpp ("a damper choke cannot
         // make the old note quieter relative to the new one"), using a real engaged damper produced

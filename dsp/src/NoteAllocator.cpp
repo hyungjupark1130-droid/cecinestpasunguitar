@@ -31,6 +31,7 @@ void NoteAllocator::reset() noexcept {
     triggerSequence_ = 0;
     sustainDown_ = false;
     unassignableNoteCount_ = 0;
+    outOfRangeNoteCount_ = 0;
     queueOverflowCount_ = 0;
 }
 
@@ -38,6 +39,15 @@ void NoteAllocator::setParams(const NoteAllocatorParams& p) noexcept { params_ =
 
 int NoteAllocator::effectiveStringCount() const noexcept {
     return std::clamp(std::min(capacityStrings_, params_.activeStringCount), 1, kMaxStrings);
+}
+
+bool NoteAllocator::stringAddressable(int stringIndex) const noexcept {
+    // The one predicate that has to agree with StringNetwork::handleEvent's own two early returns
+    // (dsp/src/StringNetwork.cpp: `stringIndex >= numStrings_` and `!perString[i].enabled`). A
+    // NoteEvent addressed to a string that fails either is dropped THERE, silently and with no
+    // counter anywhere, so this class must never emit one.
+    return stringIndex >= 0 && stringIndex < effectiveStringCount() &&
+           params_.stringEnabled[static_cast<std::size_t>(stringIndex)];
 }
 
 bool NoteAllocator::stringCanPlay(int stringIndex, int midiNote) const noexcept {
@@ -53,17 +63,21 @@ bool NoteAllocator::stringCanPlay(int stringIndex, int midiNote) const noexcept 
 }
 
 int NoteAllocator::chooseString(std::uint8_t channel, std::uint8_t midiNote) const noexcept {
-    // 1. AT MOST ONE STRING OWNS A GIVEN (channel, note). If one already does, the NoteOn goes back
-    //    there -- it is a retrigger, and StringNetwork's RetriggerMode is what decides what that
-    //    sounds like. Searched over every slot rather than only the in-count ones so the invariant
-    //    survives a count change: a second string owning the same (channel, note) would make both
-    //    stringForNote() and NoteOff matching ambiguous, and the ambiguity would show up as a note
-    //    that never stops.
-    for (int s = 0; s < kMaxStrings; ++s) {
-        const auto index = static_cast<std::size_t>(s);
-        if (owned_[index] && ownerChannel_[index] == channel && ownerNote_[index] == midiNote)
-            return s;
-    }
+    // 1. AT MOST ONE STRING OWNS A GIVEN (channel, note). If one already does AND that string can
+    //    still be addressed, the NoteOn goes back there -- it is a retrigger, and StringNetwork's
+    //    RetriggerMode is what decides what that sounds like.
+    //
+    //    "AND CAN STILL BE ADDRESSED" is the whole of the second clause, and it is not defensive
+    //    programming. numStrings and stringEnabled[i] are both automatable APVTS parameters, so the
+    //    owning string can leave the active count or be muted between the note-on and its restrike
+    //    (docs/listening/P2.6-ableton-checks.md Check B is exactly that gesture). Returning it here
+    //    put a NoteEvent on a string StringNetwork::handleEvent then dropped, with NEITHER counter
+    //    moving -- the silent drop this class exists to make impossible. allocate() releases such a
+    //    stale ownership before calling here, so the reassignment below cannot produce a second
+    //    owner and the "at most one" invariant that makes NoteOff matching well defined still holds.
+    const int owner = stringForNote(channel, midiNote);
+    if (stringAddressable(owner))
+        return owner;
 
     const int count = effectiveStringCount();
     const int note = static_cast<int>(midiNote);
@@ -181,8 +195,29 @@ void NoteAllocator::allocate(const RawMidiEvent* events, int numEvents, BlockEve
         const bool isNoteOn = statusType == kNoteOnStatus && raw.data2 != 0;
 
         if (isNoteOn) {
-            if (raw.data1 < kMinMidiNote || raw.data1 > kMaxMidiNote)
-                continue; // outside the design envelope: rejected, no NoteEvent emitted
+            if (raw.data1 < kMinMidiNote || raw.data1 > kMaxMidiNote) {
+                // Outside the design envelope: rejected, no NoteEvent emitted -- and COUNTED, on its
+                // own counter. Counted because "everything it cannot do it COUNTS" has to include
+                // this one: cnpg_render fails a corpus on a non-zero drop counter, and before this
+                // counter existed a corpus containing MIDI 20 or 109 would have rendered clean.
+                // On its OWN counter because the fix a reader has to make differs: this says the
+                // INPUT is outside the instrument's 21..108 design envelope, while
+                // unassignableNoteCount() says the note was inside it and the tuning or zone table
+                // had nowhere to put it.
+                ++outOfRangeNoteCount_;
+                continue;
+            }
+
+            // A stale ownership held by a string that can no longer be addressed is released here,
+            // BEFORE the choice, so chooseString() reassigns the note somewhere audible instead of
+            // handing it back to a string StringNetwork will drop it on. Releasing first is what
+            // keeps "at most one string owns a given (channel, note)" true across the reassignment.
+            const int staleOwner = stringForNote(raw.channel, raw.data1);
+            if (staleOwner >= 0 && !stringAddressable(staleOwner)) {
+                const auto staleIndex = static_cast<std::size_t>(staleOwner);
+                owned_[staleIndex] = false;
+                heldNoteOff_[staleIndex] = false;
+            }
 
             const int target = chooseString(raw.channel, raw.data1);
             if (target < 0) {
@@ -240,6 +275,8 @@ int NoteAllocator::stringForNote(std::uint8_t channel, std::uint8_t midiNote) co
 bool NoteAllocator::sustainActive() const noexcept { return sustainDown_; }
 
 std::uint32_t NoteAllocator::unassignableNoteCount() const noexcept { return unassignableNoteCount_; }
+
+std::uint32_t NoteAllocator::outOfRangeNoteCount() const noexcept { return outOfRangeNoteCount_; }
 
 std::uint32_t NoteAllocator::queueOverflowCount() const noexcept { return queueOverflowCount_; }
 

@@ -93,22 +93,31 @@ enum class RetriggerMode : std::uint8_t {
 // length is a legato-speed voicing choice (StringNetwork::setRetuneRampSeconds) and the fade is
 // what the [contract] gate measures.
 //
-// 30 ms: the plan's own figure, and it is the figure BECAUSE OF A MEASUREMENT rather than because
-// it was written down. A retune ramp does not remove motion, it turns a step into a glide, and a
-// glide of a full rail has motion of its own -- while the rails shorten the read position sweeps
-// through the buffer faster than one sample per sample, which is the pitch change and which reads
-// on a peak-|dx| metric as motion a fresh pluck does not have. That reading falls with the ramp
-// length rather than vanishing at any length. Measured against a fresh pluck at MIDI 45 -> 51
-// (tests/dsp/RetriggerModeTests.cpp, printed every run):
+// 30 ms: the plan's own figure. A retune ramp does not remove motion, it turns a step into a glide,
+// and a glide of a full rail has motion of its own -- while the rails shorten the read position
+// sweeps through the buffer faster than one sample per sample, which is the pitch change and which
+// reads on a peak-|dx| metric as motion a fresh pluck does not have. Measured against a fresh pluck
+// at MIDI 45 -> 51 (tests/dsp/RetriggerModeTests.cpp, printed every run, 19 points):
 //
-//     ramp        0.02 ms   2 ms      8 ms      16 ms     30 ms
-//     excess      14.04 dB  18.78 dB  10.43 dB  6.52 dB   1.69 dB
+//     ramp     0.02 ms  2 ms   8 ms   16 ms  17 ms  18 ms  19 ms  20 ms  21 ms  22 ms
+//     excess   14.04    18.78  10.43  6.52   5.36   3.32   3.05   3.05   3.96   1.70
+//     ramp     23 ms    24 ms  25 ms  26 ms  28 ms  29 ms  30 ms  31 ms  32 ms
+//     excess   2.34     2.00   2.29   1.90   4.13   1.19   1.69   1.76   1.77
 //
-// so the plan's 3 dB click criterion is met at the plan's own 30 ms and at nothing shorter. A
-// shorter ramp was tried first (8 ms, on the argument that 30 ms of glide is the audible-slide mode
-// Q3 defers) and is refused BY ITS OWN GATE at 10.43 dB. Whether 30 ms of glide reads as a
-// hammer-on or as a slide is an ear question and is on the P2.8 checklist; the knob to answer it
-// with is StringNetwork::setRetuneRampSeconds.
+// 30 ms clears the 3 dB criterion, AND THAT IS ALL THIS STATISTIC SAYS. It does not say 30 ms is the
+// shortest ramp that clears it -- 22 ms clears it at 1.70 dB and five other sub-30 ms points do too
+// -- and it cannot order ramp lengths at all: 28 ms FAILS at 4.13 dB sitting between two passing
+// neighbours, and the sequence inverts at eight of the sampled points. An earlier revision of this
+// comment claimed "at nothing shorter" from a five-point sweep too coarse to see any of that.
+//
+// The statistic is also STRUCTURALLY BIASED against legato and cannot choose this constant even in
+// principle: its reference is a fresh pluck, which contains no glide, so every millisecond of glide
+// is excess by construction and a longer ramp always reads better. Its minimum is at "no legato".
+// What it is for is refusing a ramp so short that the retune is a STEP -- 8 ms was tried first, on
+// the argument that 30 ms of glide is the audible-slide mode Q3 defers, and is refused by this gate
+// at 10.43 dB. Whether 30 ms of glide reads as a hammer-on or as a slide is an ear question, it is
+// docs/listening/physical-plausibility-checklist.md item 17, it is UNANSWERED, and it is what
+// actually decides this number. The knob to answer it with is StringNetwork::setRetuneRampSeconds.
 inline constexpr double kRetuneRampSeconds = 0.030;
 
 // 2 ms, under the plan's "<= 5 ms fade" by 2.5x. The fade is the only thing standing between a

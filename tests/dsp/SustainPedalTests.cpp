@@ -73,6 +73,7 @@ std::vector<NoteEvent> drain(BlockEventQueue& queue) {
 
 void requireNoDrops(const NoteAllocator& allocator) {
     REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.outOfRangeNoteCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 

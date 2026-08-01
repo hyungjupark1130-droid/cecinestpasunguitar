@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <type_traits>
 
 #include "cnpg/dsp/CabFilter.h"
@@ -144,15 +145,49 @@ inline constexpr const char* stringZoneHighNote[cnpg::dsp::kMaxStrings] = {
 inline constexpr float kStringTuningOffsetRangeCents = 50.0f;
 
 // Shipped default active string count (cnpg/dsp/Common.h: "active count configurable 1..8,
-// default 6"). NOTE for the reader wondering why six strings sound like one today: NoteAllocator's
-// multi-string assignment modes are Task P2.6, so every host note still lands on string 0 and the
-// other five idle. They cost almost nothing while idle (StringNetwork skips a string with no state
-// rather than ticking zeros through it), and shipping the designed count now means the parameter's
-// default does not move again after saved state starts carrying it.
+// default 6"). All six are played from Task P2.6: NoteAllocator's GuitarFingering mode spreads host
+// notes across them over the open tuning below, so the count is now audible rather than latent. (It
+// was latent through P2.1..P2.5, when every host note landed on string 0 and the other five idled;
+// shipping the designed count then meant the parameter's default did not have to move once saved
+// state started carrying it, and it has not.)
 inline constexpr int kDefaultNumStrings = 6;
 
-// Builds the full P1 APVTS parameter layout (docs/plan.md Task P1.1 step 1). Message-thread
-// only; called once from PluginProcessor's member-initializer list.
+// ---------------------------------------------------------------------------------------------
+// THE SHIPPED PARAMETER COUNT, PINNED
+// ---------------------------------------------------------------------------------------------
+// createParameterLayout() adds kFixedParameterCount parameters once, plus kPerStringParameterCount
+// for every one of the kMaxStrings slots. Both halves are spelled out rather than a single total, so
+// a reader can check the number against the function by counting two things instead of sixty-five.
+//
+// Task P2.6 took this from 40 to 65: +1 for allocationMode, and +3 per slot for stringOpenNote,
+// stringZoneLowNote and stringZoneHighNote (24 = 3 x 8). The task report's original "47 -> 72" was
+// simply miscounted, in both totals and by the same 7; the +25 delta was right.
+//
+// WHERE THIS IS ENFORCED, and where it is not. The pin is checked in three places, none of which is
+// a [contract] case in cnpg_tests -- that suite links cnpg_dsp and Catch2 only and JUCE is not on
+// its include path (tests/CMakeLists.txt; docs/plan.md Task P1.1: "no test links JUCE", and the
+// ubuntu CI job configures -DCNPG_BUILD_PLUGIN=OFF so JUCE is never even fetched there), and
+// juce::AudioProcessorValueTreeState::ParameterLayout keeps its parameter vector private, so the
+// count is only observable through a constructed AudioProcessor. Instead:
+//   1. the static_assert on RawParameterPointers below -- COMPILE TIME, every configuration, every
+//      platform that builds the plugin: the reader side must carry exactly one pointer per shipped
+//      parameter;
+//   2. collectRawParameterPointers() resolves every one of those pointers by ID and
+//      snapshotParameters() dereferences every one of them on every block, so a parameter this
+//      table names and the layout does not have is a null dereference on the first block -- which
+//      is what CI's pluginval run at strictness 10 exercises, in Release;
+//   3. a jassert in PluginProcessor's constructor comparing the real layout's size against this
+//      constant, which is the only place the LAYOUT's own count can be read at all. That one is
+//      Debug-only, and it is the direction (2) cannot catch: a parameter added to the layout that
+//      nothing ever reads.
+inline constexpr int kFixedParameterCount = 25;
+inline constexpr int kPerStringParameterCount = 5;
+inline constexpr int kParameterCount = kFixedParameterCount + kPerStringParameterCount * cnpg::dsp::kMaxStrings;
+static_assert(kParameterCount == 65, "The shipped APVTS parameter count changed; update the pin deliberately.");
+
+// Builds the full APVTS parameter layout (docs/plan.md Task P1.1 step 1). Message-thread
+// only; called once from PluginProcessor's member-initializer list. Adds exactly kParameterCount
+// parameters.
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
 // One cached std::atomic<float>* per APVTS parameter, captured once (message thread, after
@@ -200,6 +235,15 @@ struct RawParameterPointers {
     std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringZoneLowNote{};
     std::array<std::atomic<float>*, cnpg::dsp::kMaxStrings> stringZoneHighNote{};
 };
+
+// THE COMPILE-TIME HALF OF THE PARAMETER-COUNT PIN (see kParameterCount above). Every member of
+// this struct is a std::atomic<float>* or an array of them, so there is no padding and the size is
+// exactly one pointer per parameter this table reads. A parameter added to createParameterLayout()
+// and not read here -- or read here and not added there -- moves one of the two sides and this line
+// fails the build in every configuration on every platform that compiles the plugin.
+static_assert(sizeof(RawParameterPointers) == sizeof(std::atomic<float>*) * static_cast<std::size_t>(kParameterCount),
+              "RawParameterPointers must carry exactly one pointer per shipped APVTS parameter. If you added or "
+              "removed a parameter, update cnpg::params::kFixedParameterCount / kPerStringParameterCount too.");
 
 // Message-thread only; must run after the APVTS (and therefore every parameter in
 // createParameterLayout()) exists. Every pointer returned by

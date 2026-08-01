@@ -142,7 +142,8 @@ class NoteAllocator {
     // sampleOffset. Never allocates, never blocks; everything it cannot do it COUNTS (see the
     // diagnostics below).
     //
-    // NoteOn. Notes outside kMinMidiNote..kMaxMidiNote are rejected outright. Otherwise the
+    // NoteOn. Notes outside kMinMidiNote..kMaxMidiNote are rejected outright and counted
+    // (outOfRangeNoteCount()). Otherwise the
     // candidate set is every enabled in-count string that can play the note -- GuitarFingering:
     // openStringMidiNote[i] <= note <= openStringMidiNote[i] + kFingeringFretSpan; FreeZones: the
     // note lies inside the inclusive zone. Among candidates that own no note, the one with the
@@ -155,7 +156,12 @@ class NoteAllocator {
     //
     // A NoteOn for a (channel, note) some string already owns goes back to THAT string, wherever it
     // is, rather than opening a second copy elsewhere: at most one string may own a given
-    // (channel, note), and that invariant is what makes NoteOff matching well defined.
+    // (channel, note), and that invariant is what makes NoteOff matching well defined. The one
+    // exception is an owner that can no longer be ADDRESSED -- it left the active count, or its
+    // enable went false, both of which are automatable while the note is held. That ownership is
+    // released and the note is reassigned like any other, because StringNetwork::handleEvent drops
+    // every event addressed to such a string and a restrike handed back to it would vanish with no
+    // counter moving anywhere. Releasing before reassigning is what keeps the invariant.
     //
     // NoteOff (including a NoteOn with velocity 0). Emitted only if the (channel, note) still owns
     // a string. With the pedal down it is HELD instead, and the string stays owned.
@@ -175,17 +181,30 @@ class NoteAllocator {
     bool sustainActive() const noexcept;
 
     // ---- diagnostics ---------------------------------------------------------------------------
-    // Both are cumulative since construction, prepare() or the last reset(), matching
+    // All three are cumulative since construction, prepare() or the last reset(), matching
     // EventQueue::droppedCount()'s convention. They exist because every failure mode this class has
     // is SILENT -- a note that produces no NoteEvent sounds exactly like a note that was never
     // played -- and a counter nobody reads is a counter that lies, so every [contract] case in the
-    // suite asserts both, zero everywhere except where the case is about the drop itself.
+    // suite asserts all three, zero everywhere except where the case is about the drop itself.
+    //
+    // THREE counters, not one, because the three failures need three different fixes: the note was
+    // outside the instrument's design envelope (fix the input), the note was inside it and the
+    // tuning or zone table had nowhere to put it (fix the table), or the allocation succeeded and
+    // the destination queue was full (a note that never stops).
 
     // NoteOns that no enabled, in-count string could play (outside every fingering span, or outside
     // every zone). The mode's designed-in failure, not a bug: a 6-string EADGBE instrument cannot
     // play MIDI 30, and saying so is better than transposing it somewhere the player did not ask
     // for.
     std::uint32_t unassignableNoteCount() const noexcept;
+
+    // NoteOns outside kMinMidiNote..kMaxMidiNote, rejected before the assignment policy ever sees
+    // them. Separate from unassignableNoteCount() because the assignment policy genuinely never ran:
+    // a FreeZones table spanning all of MIDI has somewhere to put every note and still cannot accept
+    // MIDI 20, since WaveguideString's rails are sized for the design envelope and nothing outside
+    // it could sound. Counted rather than dropped in silence so cnpg_render fails a corpus that
+    // contains one instead of reporting every statistic as healthy.
+    std::uint32_t outOfRangeNoteCount() const noexcept;
 
     // NoteEvents this class produced and the destination queue refused because it was full
     // (BlockEventQueue holds 256 per block, shared with everything else the host sent). Distinct
@@ -210,6 +229,9 @@ class NoteAllocator {
   private:
     // -1 if the note is unassignable. Realtime-safe, allocation-free, O(kMaxStrings).
     int chooseString(std::uint8_t channel, std::uint8_t midiNote) const noexcept;
+    // "StringNetwork would accept an event for this string": in the active count AND enabled. The
+    // same two questions StringNetwork::handleEvent asks before dropping an event on the floor.
+    bool stringAddressable(int stringIndex) const noexcept;
     bool stringCanPlay(int stringIndex, int midiNote) const noexcept;
     void emitNoteOn(int stringIndex, const RawMidiEvent& raw, BlockEventQueue& outEvents) noexcept;
     void emitNoteOff(int stringIndex, std::int32_t sampleOffset, BlockEventQueue& outEvents) noexcept;
@@ -239,6 +261,7 @@ class NoteAllocator {
     bool sustainDown_ = false;
 
     std::uint32_t unassignableNoteCount_ = 0;
+    std::uint32_t outOfRangeNoteCount_ = 0;
     std::uint32_t queueOverflowCount_ = 0;
 };
 

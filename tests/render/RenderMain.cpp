@@ -902,6 +902,10 @@ struct RenderStats {
     // misconfigured allocator is now a way for this tool to render a corpus phrase with notes
     // missing and still report every other statistic as healthy.
     std::uint32_t unassignableNotes = 0;
+    // ...and the third one, which is about the CORPUS rather than about the allocator's tables: a
+    // NoteOn outside kMinMidiNote..kMaxMidiNote. Reported separately because the fix differs -- this
+    // one says the .mid file asks for a note the instrument was never designed to sound.
+    std::uint32_t outOfRangeNotes = 0;
 };
 
 // MIDI status nibbles this layer reads directly, exactly as plugin/src/PluginProcessor.cpp does:
@@ -1001,6 +1005,7 @@ void renderPhrase(const MidiFileContents& midi, const RenderSpec& spec, std::vec
         allocator.allocate(rawEvents.data(), static_cast<int>(rawEvents.size()), noteEvents);
         stats.droppedNoteEvents += noteEvents.droppedCount();
         stats.unassignableNotes = allocator.unassignableNoteCount(); // cumulative; not a per-block sum
+        stats.outOfRangeNotes = allocator.outOfRangeNoteCount();     // cumulative; not a per-block sum
 
         {
             // Exactly the guard PluginProcessor::processBlock() engages around the identical calls.
@@ -1200,8 +1205,9 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
     std::printf("    %lld samples (%.3f s), %lld MIDI event(s), peak %.2f dBFS, rms %.2f dBFS, dc %.2f dBFS\n",
                 stats.numSamples, stats.durationSeconds, stats.midiEvents, dbOf(stats.peak), dbOf(stats.rms),
                 dbOf(std::fabs(stats.dcOffset)));
-    std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u unassignableNotes=%u%s\n",
+    std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u unassignableNotes=%u outOfRangeNotes=%u%s\n",
                 stats.nonFiniteSamples, stats.subnormalSamples, stats.droppedNoteEvents, stats.unassignableNotes,
+                stats.outOfRangeNotes,
                 verifyDeterminism ? " determinism=verified(2 in-process renders bit-identical)" : "");
     std::fflush(stdout);
 
@@ -1220,6 +1226,13 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
                      "cnpg_render: %s left %u note(s) unassigned -- NoteAllocator had no string that could play "
                      "them, so the render is missing notes the phrase contains\n",
                      label.c_str(), stats.unassignableNotes);
+        return false;
+    }
+    if (stats.outOfRangeNotes > 0) {
+        std::fprintf(stderr,
+                     "cnpg_render: %s contains %u note(s) outside the instrument's MIDI %d..%d design envelope, "
+                     "which were rejected before allocation -- the render is missing notes the phrase contains\n",
+                     label.c_str(), stats.outOfRangeNotes, cnpg::dsp::kMinMidiNote, cnpg::dsp::kMaxMidiNote);
         return false;
     }
 

@@ -163,18 +163,37 @@ TEST_CASE("CONTRACT: StringNetwork ramps a disabled string silent without a clic
 
     // NEGATIVE CONTROL, and the reason this gate can be trusted. The pre-P2.1 behaviour was a HARD
     // CUT: a disabled string's channel went to exact zeros on the sample the parameter changed.
-    // That is modelled exactly by zeroing the reference render from the toggle onward, and it must
-    // FAIL the same criterion the ramp passes -- otherwise the criterion is measuring nothing.
+    // That is modelled by zeroing the reference render from inside the post-toggle window onward,
+    // and it must FAIL the same criterion the ramp passes -- otherwise the criterion is measuring
+    // nothing.
+    //
+    // LEVEL-PLACED rather than pinned to the toggle sample, which is the P2.2 lesson
+    // (tests/dsp/SustainPedalTests.cpp states it in full). A hard cut's peak |dx| IS the sample
+    // value it lands on, and the toggle sample is an arbitrary phase of a ringing string: land it
+    // near a zero crossing and the control is a cut of almost nothing, i.e. the control passes the
+    // gate it exists to fail. This site matters more than most, because tests/support/ClickMetric.h
+    // quotes THIS control's figure as the measured sensitivity floor of the whole suite -- a floor
+    // read off a blindly placed cut would understate the metric across every case that cites it.
+    std::size_t cutSample = toggleSample;
+    float cutLevel = 0.0f;
+    for (std::size_t i = toggleSample; i < std::min(spanEnd, reference.size()); ++i) {
+        if (std::fabs(reference[i]) > cutLevel) {
+            cutLevel = std::fabs(reference[i]);
+            cutSample = i;
+        }
+    }
+    REQUIRE(cutLevel > 0.0f);
     std::vector<float> hardCut = reference;
-    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(toggleSample), hardCut.end(), 0.0f);
+    std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(cutSample), hardCut.end(), 0.0f);
     const cnpg::test::ClickMeasurement hardCutMeasurement =
         cnpg::test::measureClick(hardCut, kRate, spanBegin, spanEnd);
     const double hardCutExcessDb = cnpg::test::clickExcessDb(hardCutMeasurement, referenceMeasurement);
 
     std::cout << "[contract] enable-toggle click metric: ramp " << mutedMeasurement.metric(referenceMeasurement)
               << " vs reference " << referenceMeasurement.metric(referenceMeasurement) << " -> excess " << excessDb
-              << " dB (limit " << cnpg::test::kClickMetricToleranceDb << " dB); hard-cut negative control "
-              << hardCutMeasurement.metric(referenceMeasurement) << " -> excess " << hardCutExcessDb << " dB\n";
+              << " dB (limit " << cnpg::test::kClickMetricToleranceDb << " dB); level-placed hard-cut negative control "
+              << hardCutMeasurement.metric(referenceMeasurement) << " -> excess " << hardCutExcessDb
+              << " dB at sample +" << (cutSample - toggleSample) << " (level " << cutLevel << ")\n";
 
     REQUIRE(referenceMeasurement.metric(referenceMeasurement) > 0.0);
     INFO("ramp excess " << excessDb << " dB, hard-cut control " << hardCutExcessDb << " dB");

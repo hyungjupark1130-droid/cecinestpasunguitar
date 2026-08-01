@@ -40,6 +40,14 @@ PluginProcessor::PluginProcessor()
                                .withOutput("Output", juce::AudioChannelSet::stereo(), true)
                                .withInput("Sidechain", juce::AudioChannelSet::stereo(), false)),
       apvts(*this, nullptr, "PARAMETERS", cnpg::params::createParameterLayout()) {
+    // THE ONLY PLACE THE LAYOUT'S OWN PARAMETER COUNT IS OBSERVABLE. ParameterLayout keeps its
+    // vector private, so this -- after the APVTS has consumed it -- is where the shipped count can
+    // be compared against the pin in Parameters.h. See kParameterCount there for why the pin is
+    // enforced here and by a static_assert rather than by a [contract] case: no test in this project
+    // links JUCE. This direction catches the one failure the static_assert cannot: a parameter added
+    // to the layout that nothing ever reads.
+    jassert(getParameters().size() == cnpg::params::kParameterCount);
+
     // Message thread, after apvts finishes constructing: see the RawParameterPointers doc
     // comment in Parameters.h for why caching these once here (rather than looking parameters
     // up by ID on the audio thread) is required for the once-per-block snapshot to be

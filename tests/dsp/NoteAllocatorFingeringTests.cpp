@@ -21,9 +21,10 @@
 // distinct strings at minimal fret positions; a seventh simultaneous note has to take a string off
 // somebody, and it takes it off whoever struck longest ago.
 //
-// Every case in this file also asserts BOTH diagnostics counters. They are the only evidence a drop
-// ever leaves -- a NoteOn that produced no NoteEvent sounds exactly like a note nobody played -- so
-// a counter that is only ever read in the one case that expects it is a counter nobody is checking.
+// Every case in this file also asserts ALL THREE diagnostics counters. They are the only evidence a
+// drop ever leaves -- a NoteOn that produced no NoteEvent sounds exactly like a note nobody played
+// -- so a counter that is only ever read in the one case that expects it is a counter nobody is
+// checking.
 
 namespace {
 
@@ -63,6 +64,7 @@ NoteAllocatorParams sixStringGuitar() {
 // The one thing that must be true of every case that is not about a drop.
 void requireNoDrops(const NoteAllocator& allocator) {
     REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.outOfRangeNoteCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 
@@ -458,6 +460,156 @@ TEST_CASE("CONTRACT: a disabled string is not a candidate", "[contract]") {
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 
+TEST_CASE("CONTRACT: a restrike whose string left the count is reassigned, never dropped in silence", "[contract]") {
+    // THE FAILURE THIS PINS, and it shipped. "At most one string owns a given (channel, note)" was
+    // implemented by searching every slot and returning the owner WHEREVER it was -- including a
+    // slot outside the active count or behind a false stringEnabled. StringNetwork::handleEvent
+    // drops such an event on the floor (its `stringIndex >= numStrings_` and `!perString[i].enabled`
+    // early returns), so the restrike produced no sound and NEITHER counter moved: a NoteOn that
+    // vanished with every diagnostic reading healthy, which is precisely what this class's whole
+    // diagnostics surface exists to make impossible.
+    //
+    // Reachable by ordinary use rather than by a contrived state. `numStrings` and `stringEnabled[i]`
+    // are both shipped automatable APVTS parameters, and docs/listening/P2.6-ableton-checks.md
+    // Check B is a count-riding gesture over held notes.
+    //
+    // The fix is not "count it as a drop": it is to RELEASE the unreachable ownership and reassign,
+    // because a string the player can no longer hear is not a string that still owns a note. The
+    // drop counter is the answer only when no reachable string can play the note at all -- the third
+    // section below.
+    SECTION("the active count shrinks under a held note") {
+        NoteAllocator allocator;
+        allocator.prepare(cnpg::dsp::kMaxStrings);
+        NoteAllocatorParams params; // the 8-string default table
+        allocator.setParams(params);
+
+        const RawMidiEvent first[] = {noteOn(0, 60)};
+        BlockEventQueue firstOut;
+        allocator.allocate(first, 1, firstOut);
+        const std::vector<NoteEvent> firstEmitted = drain(firstOut);
+        REQUIRE(firstEmitted.size() == 1);
+        REQUIRE(firstEmitted[0].stringIndex == 4); // fret 1 on the B string of the 8-string default
+        REQUIRE(allocator.ownedNote(4) == 60);
+
+        // The count rides down while the note is held -- Check B's gesture.
+        params.activeStringCount = 3;
+        allocator.setParams(params);
+        // NON-VACUITY: the owning string really is outside the count now, which is the whole
+        // premise. Asserted before the restrike, not inferred from its result.
+        REQUIRE(allocator.effectiveStringCount() == 3);
+        REQUIRE(4 >= allocator.effectiveStringCount());
+
+        const RawMidiEvent restrike[] = {noteOn(64, 60)};
+        BlockEventQueue restrikeOut;
+        allocator.allocate(restrike, 1, restrikeOut);
+        const std::vector<NoteEvent> emitted = drain(restrikeOut);
+        REQUIRE(emitted.size() == 1);
+        // Reassigned to the cheapest fingering INSIDE the count (fret 10 on string 2), and the
+        // unreachable ownership is gone -- so the "at most one string owns a (channel, note)"
+        // invariant that makes NoteOff matching well defined still holds.
+        REQUIRE(emitted[0].stringIndex == 2);
+        REQUIRE(allocator.ownedNote(4) == -1);
+        REQUIRE(allocator.ownedNote(2) == 60);
+        REQUIRE(allocator.stringForNote(0, 60) == 2);
+        requireNoDrops(allocator);
+
+        // THE DROP WAS REAL, not notional. The same NoteOn addressed to string 4 -- which is exactly
+        // what the pre-fix path emitted -- is silently discarded by a three-string network, while
+        // the reassigned one sounds. Same event, same network configuration, one field different.
+        auto renderOne = [](const NoteEvent& event) {
+            StringNetworkParams networkParams;
+            networkParams.bridge.couplingStrength = 0.0f;
+            StringNetwork<float> network;
+            network.prepare(kRate, kBlock, FractionalDelayKind::Lagrange3);
+            network.setNumStrings(3);
+            network.setParams(networkParams);
+            network.reset();
+            BlockEventQueue queue;
+            queue.push(event);
+            for (int b = 0; b < 40; ++b)
+                network.process(queue, kBlock);
+            return network.energyEstimate();
+        };
+        NoteEvent addressedToTheLostString = emitted[0];
+        addressedToTheLostString.stringIndex = 4;
+        REQUIRE(renderOne(addressedToTheLostString) == 0.0); // what shipped: nothing at all
+        REQUIRE(renderOne(emitted[0]) > 0.0);                // what ships now
+
+        // ...and the note can still be stopped. A restrike that vanished also took its NoteOff with
+        // it, because the NoteOff would have gone to the same unreachable string.
+        const RawMidiEvent release[] = {noteOff(96, 60)};
+        BlockEventQueue releaseOut;
+        allocator.allocate(release, 1, releaseOut);
+        const std::vector<NoteEvent> released = drain(releaseOut);
+        REQUIRE(released.size() == 1);
+        REQUIRE(released[0].stringIndex == 2);
+        REQUIRE(allocator.stringForNote(0, 60) == -1);
+        requireNoDrops(allocator);
+    }
+
+    SECTION("the owning string is muted under a held note") {
+        // The same failure through the other automatable door. NOTE that the pre-existing "a
+        // disabled string is not a candidate" case calls reset() before flipping the flag, which is
+        // what kept this path unexercised: reset() drops the ownership the bug needed.
+        NoteAllocator allocator;
+        allocator.prepare(cnpg::dsp::kMaxStrings);
+        NoteAllocatorParams params = sixStringGuitar();
+        allocator.setParams(params);
+
+        const RawMidiEvent first[] = {noteOn(0, 60)};
+        BlockEventQueue firstOut;
+        allocator.allocate(first, 1, firstOut);
+        REQUIRE(drain(firstOut)[0].stringIndex == 4);
+        REQUIRE(allocator.ownedNote(4) == 60);
+
+        params.stringEnabled[4] = false; // no reset(): the ownership survives the mute
+        allocator.setParams(params);
+
+        const RawMidiEvent restrike[] = {noteOn(64, 60)};
+        BlockEventQueue restrikeOut;
+        allocator.allocate(restrike, 1, restrikeOut);
+        const std::vector<NoteEvent> emitted = drain(restrikeOut);
+        REQUIRE(emitted.size() == 1);
+        REQUIRE(emitted[0].stringIndex == 3); // fret 5 on the G string, the next cheapest
+        REQUIRE(allocator.ownedNote(4) == -1);
+        REQUIRE(allocator.stringForNote(0, 60) == 3);
+        requireNoDrops(allocator);
+    }
+
+    SECTION("no reachable string can play it -- then, and only then, it is a counted drop") {
+        // The reassignment is not a licence to put the note anywhere. MIDI 88 is the 24th fret of
+        // the high E and nothing else on a six-string EADGBE can reach it, so when the count leaves
+        // that string behind there is genuinely nowhere to go -- and the answer is the counter, not
+        // silence.
+        NoteAllocator allocator;
+        allocator.prepare(cnpg::dsp::kMaxStrings);
+        NoteAllocatorParams params = sixStringGuitar();
+        allocator.setParams(params);
+
+        const RawMidiEvent first[] = {noteOn(0, 88)};
+        BlockEventQueue firstOut;
+        allocator.allocate(first, 1, firstOut);
+        REQUIRE(drain(firstOut)[0].stringIndex == 5);
+        REQUIRE(allocator.ownedNote(5) == 88);
+
+        params.activeStringCount = 3;
+        allocator.setParams(params);
+
+        const RawMidiEvent restrike[] = {noteOn(64, 88)};
+        BlockEventQueue restrikeOut;
+        allocator.allocate(restrike, 1, restrikeOut);
+        REQUIRE(restrikeOut.empty());
+        REQUIRE(allocator.unassignableNoteCount() == 1);
+        REQUIRE(allocator.outOfRangeNoteCount() == 0); // 88 is well inside 21..108
+        REQUIRE(allocator.queueOverflowCount() == 0);
+        REQUIRE(allocator.stringForNote(0, 88) == -1);
+        REQUIRE(allocator.ownedNote(5) == -1);
+        std::cout << "[contract] restrike onto a string the count left behind: MIDI 60 reassigned inside the count, "
+                     "MIDI 88 counted unassignable (counter reads "
+                  << allocator.unassignableNoteCount() << ")\n";
+    }
+}
+
 TEST_CASE("CONTRACT: a full event queue is counted, never blocked on", "[contract]") {
     // The other drop, and the more dangerous one: the allocation SUCCEEDED and the event was lost
     // anyway because BlockEventQueue's 256 slots were full. For a NoteOff that is a note that never
@@ -487,10 +639,32 @@ TEST_CASE("CONTRACT: allocate() performs no heap allocation in either mode", "[c
     // docs/plan.md Task P2.6: "All allocator paths are alloc-free after prepare (debug allocation
     // guard) and drop-counted, never blocking." Every path is exercised inside the measured region:
     // both modes, an idle assignment, a steal, a NoteOff, a pedal press, a pedal release that emits
-    // six held NoteOffs at once, an unassignable note, and a queue overflow.
+    // six held NoteOffs at once, an out-of-envelope note, an unassignable note, and a queue overflow.
+    //
+    // "IN EITHER MODE" IS DRIVEN, NOT ASSERTED FROM THE OUTSIDE. The first version of this case said
+    // "either mode" in its title and only ever configured GuitarFingering. The claim happened to be
+    // true -- FreeZones differs from GuitarFingering only in two integer comparisons inside
+    // stringCanPlay(), and neither branch touches memory -- but "true and untested" is what the
+    // title was quietly asserting, so the same event stream now runs a second time under FreeZones
+    // INSIDE the same guarded region.
     NoteAllocator allocator;
     allocator.prepare(cnpg::dsp::kMaxStrings);
-    allocator.setParams(sixStringGuitar());
+
+    // The two configurations, differing ONLY in the mode and its table. Both are six strings over
+    // the same span, so the same event stream exercises the same paths in each: the zones below are
+    // exactly the 24-fret spans GuitarFingering derives from the same open notes, which is what
+    // makes the two runs comparable rather than merely both present.
+    NoteAllocatorParams fingering = sixStringGuitar();
+    NoteAllocatorParams freeZones = sixStringGuitar();
+    freeZones.mode = AllocationMode::FreeZones;
+    for (int s = 0; s < cnpg::dsp::kMaxStrings; ++s) {
+        const auto index = static_cast<std::size_t>(s);
+        const int open = static_cast<int>(fingering.openStringMidiNote[index]);
+        freeZones.zones[index].lowNote = static_cast<std::uint8_t>(open);
+        freeZones.zones[index].highNote =
+            static_cast<std::uint8_t>(std::min(open + cnpg::dsp::kFingeringFretSpan, 127));
+    }
+    allocator.setParams(fingering);
 
     std::vector<RawMidiEvent> events;
     events.push_back(noteOn(0, 40));
@@ -508,23 +682,75 @@ TEST_CASE("CONTRACT: allocate() performs no heap allocation in either mode", "[c
     events.push_back(noteOff(12, 64));
     events.push_back(RawMidiEvent{13, 0xB0u, cnpg::dsp::kSustainPedalController, 0, 0}); // pedal up: six NoteOffs
     events.push_back(noteOn(14, 30));                                                    // unassignable
-    events.push_back(noteOn(15, 57));                                                    // idle assignment
-    events.push_back(noteOn(16, 57));                                                    // same-note retrigger
+    events.push_back(noteOn(15, 20));                                                    // out of envelope
+    events.push_back(noteOn(16, 57));                                                    // idle assignment
+    events.push_back(noteOn(17, 57));                                                    // same-note retrigger
     for (int i = 0; i < 300; ++i)
-        events.push_back(noteOn(17, 60)); // overflow the queue
+        events.push_back(noteOn(18, 60)); // overflow the queue
 
     BlockEventQueue out;
 
-    // Warm-up so the measured call is not the first invocation of any path.
+    // Warm-up so the measured call is not the first invocation of any path, in EITHER mode: a first
+    // call under FreeZones inside the measured region would be measuring cold code rather than the
+    // steady state, which is the whole reason the warm-up exists.
     allocator.allocate(events.data(), static_cast<int>(events.size()), out);
     out.clear();
     allocator.reset();
+    allocator.setParams(freeZones);
+    allocator.allocate(events.data(), static_cast<int>(events.size()), out);
+    out.clear();
+    allocator.reset();
+    allocator.setParams(fingering);
+
+    struct Exercised {
+        std::uint32_t unassignable = 0;
+        std::uint32_t outOfRange = 0;
+        std::uint32_t overflow = 0;
+        int ownerOf57 = -1;
+    };
 
     cnpg::test::resetAllocationCount();
+
+    // Pass one: GuitarFingering.
     allocator.allocate(events.data(), static_cast<int>(events.size()), out);
+    const Exercised guitar{allocator.unassignableNoteCount(), allocator.outOfRangeNoteCount(),
+                           allocator.queueOverflowCount(), allocator.stringForNote(0, 57)};
+
+    // Pass two: the SAME stream under FreeZones, inside the SAME guarded region. clear(), reset()
+    // and setParams() are each realtime-safe by their own contracts, so putting them here measures
+    // them rather than hiding them outside the region.
+    out.clear();
+    allocator.reset();
+    allocator.setParams(freeZones);
+    allocator.allocate(events.data(), static_cast<int>(events.size()), out);
+    const Exercised zones{allocator.unassignableNoteCount(), allocator.outOfRangeNoteCount(),
+                          allocator.queueOverflowCount(), allocator.stringForNote(0, 57)};
+
     REQUIRE(cnpg::test::allocationCount() == 0);
 
-    // ...and the paths really were exercised, rather than the counter merely staying at zero.
-    REQUIRE(allocator.unassignableNoteCount() > 0);
-    REQUIRE(allocator.queueOverflowCount() > 0);
+    // ...and BOTH passes really exercised the paths, rather than the allocation counter merely
+    // staying at zero because the second mode declined everything early. Each mode is asserted to
+    // have dropped on all three counters AND to have assigned: MIDI 57 lies inside the D string's
+    // 24-fret span and inside the zone derived from it, so an owner of -1 in either pass would mean
+    // that pass never reached the assignment policy at all.
+    for (const Exercised& pass : {guitar, zones}) {
+        REQUIRE(pass.unassignable > 0);
+        REQUIRE(pass.outOfRange > 0);
+        REQUIRE(pass.overflow > 0);
+        REQUIRE(pass.ownerOf57 >= 0);
+    }
+    // The two tables describe the same candidate set over this note stream, so the modes must agree
+    // about what they could NOT place.
+    REQUIRE(zones.unassignable == guitar.unassignable);
+    REQUIRE(zones.outOfRange == guitar.outOfRange);
+
+    // They are not required to agree about WHERE a placeable note went, and they do not -- which is
+    // the whole difference between them, and it is what makes the second pass a test of FreeZones
+    // rather than a second copy of the first. GuitarFingering breaks ties by fret position (MIDI 57
+    // is fret 2 on the D string, the cheapest of the four candidates); FreeZones has no fret to
+    // prefer, so every candidate ties and least-recently-used decides. Asserted rather than glossed
+    // over: a build in which setParams() silently failed to take the new mode would otherwise pass
+    // this case as "both modes ran".
+    REQUIRE(guitar.ownerOf57 == 3);
+    REQUIRE(zones.ownerOf57 != guitar.ownerOf57);
 }

@@ -56,7 +56,7 @@
 //       must not grow by more than 3 dB. That is exactly what a click is.
 //
 // Reading (b) keeps every tooth: on that same P2.1 case a HARD CUT (the pre-ramp behaviour) still
-// fails by ~9 dB, and the test that gates the ramp carries that hard cut as a standing negative
+// fails by ~32 dB, and the test that gates the ramp carries that hard cut as a standing negative
 // control so the gate can never quietly go vacuous.
 //
 // -----------------------------------------------------------------------------------------------
@@ -81,10 +81,21 @@
 // engagement, P2.6's <= 5 ms Synth fade, P2.4's coupling. This is not a hypothetical.
 //
 // Its sensitivity floor is worth stating in the same breath, since it is measurable rather than
-// notional. On the P2.1 enable case the hard-cut negative control fails by 8.29 dB against a 3 dB
-// limit, i.e. it clears the bar by 5.29 dB -- so a cut taken at roughly 55% of the sample value
-// (20*log10(0.55) = -5.2 dB) would have passed. The gate catches a full-amplitude discontinuity
-// comfortably and a small one not at all.
+// notional. On the P2.1 enable case (tests/dsp/StringNetworkScaleTests.cpp, "ramps a disabled string
+// silent without a click") the hard-cut negative control fails by 32.50 dB against a 3 dB limit,
+// i.e. it clears the bar by 29.50 dB -- so a discontinuity worth about 3.4% of that control's jump
+// (20*log10(0.0335) = -29.5 dB) is where the criterion breaks even. The gate catches a
+// full-amplitude discontinuity by a very wide margin, and a discontinuity worth a few percent of the
+// signal's loudest sample marginally.
+//
+// THAT FLOOR WAS UNDERSTATED BY 24 dB UNTIL THE CONTROL WAS PLACED BY LEVEL, and the correction is
+// the point rather than a footnote. This paragraph previously read 8.29 dB, from a control cut at
+// the toggle sample -- an arbitrary phase of a ringing string. A hard cut's peak |dx| IS the sample
+// value it lands on, so a blindly placed cut measures the waveform's phase at one index and not the
+// metric's sensitivity at all; the same cut placed at the loudest sample in the same window reads
+// 32.50 dB. Every negative control in this suite is therefore level-placed, and any new one must be:
+// a control that lands near a zero crossing can PASS the gate it exists to fail, which leaves the
+// gate provably toothless while looking healthy.
 //
 // THE COMPANION MEASUREMENT. Where a change materially reduces level without silencing the signal,
 // measure clickExcessAgainstResidualDb() as well (below). It normalises the test render's peak by
