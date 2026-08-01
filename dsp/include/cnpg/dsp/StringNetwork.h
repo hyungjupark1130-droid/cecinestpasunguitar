@@ -78,11 +78,21 @@ enum class RetriggerMode : std::uint8_t {
 
 struct StringNetworkParams {
     RetriggerMode retriggerMode = RetriggerMode::Physical;
-    float pitchBendSemitones = 0.0f;     // global bend, +/-kPitchBendRangeSemitones (Common.h); not an APVTS
-                                         // parameter -- the plugin drives it from the MIDI pitch
-                                         // wheel via pitchWheelToSemitones() (MidiTranslation.h)
-    float pickupPosition01 = 0.5f;       // tap position; continuously modulatable while ringing
-    float damperPosition01 = 0.15f;      // junction position; continuously modulatable while ringing
+    float pitchBendSemitones = 0.0f; // global bend, +/-kPitchBendRangeSemitones (Common.h); not an APVTS
+                                     // parameter -- the plugin drives it from the MIDI pitch
+                                     // wheel via pitchWheelToSemitones() (MidiTranslation.h)
+    float pickupPosition01 = 0.5f;   // tap position; continuously modulatable while ringing
+
+    // Junction position, 0 = nut, 1 = bridge. LIVE from Task P2.2 but NOT YET SMOOTHED: a change
+    // takes effect on the next block boundary, and the click-free machinery (per-sample smoothing
+    // here, dual-anchor amplitude-complementary crossfade inside WaveguideString's junction seam)
+    // is Task P2.3. What that costs today is bounded and worth stating rather than discovering: at
+    // engagement 0 the junction is bit-exactly transparent AT EVERY POSITION, so moving this while
+    // no damper is engaged cannot produce a click at all. The exposure is only audible while a
+    // damper IS engaged -- during a note-off tail, or with a partial maxLoss held down -- and that
+    // is precisely the case P2.3's click test gates ("damperPosition01 swept 0.1->0.9 at 2 Hz with
+    // engagement held at 0.5").
+    float damperPosition01 = 0.15f;
     StringMaterialParams stringMaterial; // one global shared physics set
     BridgeAdmittanceParams bridge;       // consumed by BridgeJunction (P2.4)
     PluckExciterParams exciter;
