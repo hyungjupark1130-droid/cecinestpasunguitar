@@ -571,14 +571,28 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
         // the attenuation they see is the same. So a choke applied at or after the re-excitation
         // cannot make the old content quieter RELATIVE to the new note in any lasting way, which is
         // the only thing "choke" could mean here; all it can do is make the whole re-attack quieter.
-        // The transient is real and is exactly why the refusal below rests on a MEASUREMENT of the
-        // balance rather than on this paragraph. The only asymmetry available outright is TIME --
-        // choke first, excite afterwards -- and the plan's own "then" reads that way, at a cost of
-        // up to 30 ms of latency on every legato note, which is not a playable instrument.
+        // The transient is real, which is why this paragraph is not the whole refusal. The only
+        // asymmetry available outright is TIME -- choke first, excite afterwards -- and the plan's
+        // own "then" reads that way, at a cost of up to 30 ms of latency on every legato note, which
+        // is not a playable instrument.
         //
-        // Measured rather than argued in tests/dsp/RetriggerModeTests.cpp ("a damper choke cannot
-        // make the old note quieter relative to the new one"), using a real engaged damper produced
-        // by the shipped note-off path rather than by code kept alive to be measured.
+        // *** THE REFUSAL RESTS ON COST AND LATENCY, and its evidence is thinner than it was. ***
+        // The original form measured both halves of the trade on one pair of renders: the felt took
+        // 1.4925 dB (amplitude) out of the old note and charged the re-attack 1.22328 dB for it,
+        // netting 0.269221 dB on the balance -- the only quantity a "choke" could be for. Wave 2's
+        // ownership ruling makes a released note OVER, so the arms of that comparison stopped
+        // differing only in the felt; the attack-cost and net-balance figures were taken at 0eb52b9
+        // and are NOT reproducible in this tree. What is still measured, in
+        // tests/dsp/RetriggerModeTests.cpp ("a retrigger damper choke has no state left to act on,
+        // and buying one costs elapsed time"), is the suppression half -- 10.67 ms of felt takes
+        // -1.4925 dB out of a ringing string, reproduced exactly -- which is what the plan would
+        // have to spend latency on every legato note to obtain. That, plus the latency, is the
+        // refusal. The same case asserts the engagement is 0 across this branch, which is a
+        // REGRESSION GUARD (a build inserting the choke fails on the sample it was inserted) and
+        // NOT an argument against the clause: the clause proposes to add the engagement, so
+        // observing that there is none today restates this control flow rather than refuting it.
+        // Fixes wave 2 characterised that observation as "stronger than refusing it on cost"; fixes
+        // wave 3 withdraws the characterisation and leaves the guard.
         //
         // What the choke was reaching for is real -- a fast retune of a full rail sweeps the old
         // content -- and it is handled where it belongs: by the ramp being short and landing, and by

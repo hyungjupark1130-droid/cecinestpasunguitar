@@ -93,9 +93,57 @@
 // the toggle sample -- an arbitrary phase of a ringing string. A hard cut's peak |dx| IS the sample
 // value it lands on, so a blindly placed cut measures the waveform's phase at one index and not the
 // metric's sensitivity at all; the same cut placed at the loudest sample in the same window reads
-// 32.50 dB. Every negative control in this suite is therefore level-placed, and any new one must be:
-// a control that lands near a zero crossing can PASS the gate it exists to fail, which leaves the
-// gate provably toothless while looking healthy.
+// 32.50 dB.
+//
+// -----------------------------------------------------------------------------------------------
+// *** THE PLACEMENT RULE. IT BINDS CONTROLS AND PERTURBATIONS ALIKE. ***
+// -----------------------------------------------------------------------------------------------
+//
+//   EVERY SAMPLE INDEX AT WHICH THIS SUITE INSERTS, REMOVES OR TRIGGERS A STATE CHANGE MUST BE
+//   CHOSEN FROM THE WAVEFORM, NEVER FROM THE CLOCK.
+//
+// "From the clock" means a round number of samples, blocks, milliseconds or event offsets. Any such
+// index is an ARBITRARY PHASE of whatever the instrument is doing there, and every statistic in this
+// file is a function of that phase. The rule is stated for BOTH roles because the defect is one
+// defect and it has now appeared in both:
+//
+//   THE NEGATIVE CONTROL -- the artificial discontinuity a gate carries to prove it still
+//   discriminates. Placed blind it can land near a zero crossing, read as a cut of almost nothing,
+//   and PASS the gate it exists to fail, leaving the gate provably toothless while looking healthy.
+//
+//   THE PERTURBATION -- the real state change the gate exists to judge. Placed blind, the gate's own
+//   reading is one sample of a distribution the test never characterised, and the test cannot then
+//   tell a regression from a shift in phase. This is the sharper half and it took longer to see.
+//
+// FIVE OCCURRENCES SO FAR, all in P2, all found by review rather than by the suite: P2.2's
+// six-damper pedal-release control (0.265 dB blind -- it PASSED -- against 32.04 dB placed); P2.4's
+// sympathetic-truncation control; P2.6 fixes wave 1's four controls (+5.90 / +6.61 / +18.89 /
+// +24.07 dB); P2.6 fixes wave 2's note-off-age PERTURBATION (a round 20 ms landed on a zero crossing
+// and reported exactly 0.00 dB while the discarded peak was -28.8 dBFS); and P2.6 fixes wave 3's
+// cross-pitch re-strike, where the perturbation sat at a block boundary INSIDE A GATE -- recomputing
+// that gate at ten re-strike phases across one period of the old note swung its median from 0.111 to
+// 3.199 dB, i.e. across the 3 dB criterion, on identical code.
+//
+// THE PROCEDURE, so the sixth occurrence has something specific to violate:
+//
+//   1. Search a window of the relevant waveform for the extremum of |x|, and place there (for a cut,
+//      whose peak |dx| IS the sample it lands on) or on the sample AFTER it (for a perturbation
+//      whose step replaces that sample).
+//   2. THE WINDOW IS ONE FULL PERIOD of the component whose phase is arbitrary. A full period is the
+//      shortest window guaranteed to contain the cycle's GLOBAL extremum, so every anchor inside the
+//      period resolves to the same phase. A shorter window finds whatever local extremum happens to
+//      be inside it, which is a different phase depending on where the window fell: measured on the
+//      wave-3 site, a half-period window left the gate's median ranging 0.141 to 3.147 dB across
+//      anchors -- barely better than no placement at all -- while a full-period window collapsed all
+//      ten anchors onto one phase and a range of 0.017 dB. Use a shorter window ONLY when a SWEEP
+//      needs adjacent placements to stay distinct (wave 2's age sweep did, and says so), and then
+//      assert the distinctness.
+//   3. ASSERT THE PLACEMENT WAS READ OFF THE RENDER BEING MEASURED -- bit-identity over the searched
+//      window between the render the search ran on and the arm under test. Without it the placement
+//      is a claim about a different waveform.
+//   4. WHERE THE PLACEMENT DECIDES A GATE, assert the phase axis is closed: re-measure the gate at a
+//      second placement one period away and require the two to agree. That is the only form in which
+//      "the phase no longer matters" is evidence rather than an assertion.
 //
 // THE COMPANION MEASUREMENT. Where a change materially reduces level without silencing the signal,
 // measure clickExcessAgainstResidualDb() as well (below). It normalises the test render's peak by

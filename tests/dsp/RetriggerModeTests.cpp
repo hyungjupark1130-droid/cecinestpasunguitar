@@ -265,13 +265,105 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     constexpr int kRingBlocks = 200;
     constexpr int kTailBlocks = 320;            // enough for the 30 ms offset plus a 2^15 analysis window
     constexpr double kCriterionSeconds = 0.030; // docs/plan.md P2.6: "within 30 ms"
+    constexpr int kNominalRestrike = kRingBlocks * kBlock;
+
+    // Renders an arbitrary NUMBER OF SAMPLES rather than a whole number of blocks, because the
+    // re-strike below is placed by level and a level placement does not land on a block boundary.
+    auto renderSamplesInto = [](StringNetwork<float>& network, BlockEventQueue& events, int samples,
+                                std::vector<float>& out) {
+        int done = 0;
+        while (done < samples) {
+            const int chunk = std::min(kBlock, samples - done);
+            network.process(events, chunk);
+            const float* channel = network.tapBuffers().channel(0, 0);
+            REQUIRE(channel != nullptr);
+            out.insert(out.end(), channel, channel + chunk);
+            done += chunk;
+        }
+    };
+
+    // ---------------------------------------------------------------------------------------------
+    // *** THE RE-STRIKE IS PLACED BY LEVEL. A BLOCK BOUNDARY IS A BLIND PLACEMENT. ***
+    // ---------------------------------------------------------------------------------------------
+    // Until fixes wave 3 this case struck at sample 25600 -- kRingBlocks * kBlock, a round number of
+    // blocks and therefore an ARBITRARY PHASE of the 110 Hz note being replaced. tests/support/
+    // ClickMetric.h states the rule that forbids it, in the form that covers negative controls and
+    // perturbations alike; this site was the fourth place in the project to break it and the first
+    // where the broken axis was inside the GATE.
+    //
+    // MEASURED, because the argument for the gate's shape depended on it. Recomputing the whole
+    // 28..32 ms neighbourhood at ten re-strike phases spanning one period of the old note (436
+    // samples), same code and same spans, gave medians of 0.111, 1.078, 1.711, 1.714, 1.764, 1.941,
+    // 2.253, 2.426, 2.539 and 3.199 dB. The last one FAILS the 3 dB criterion -- three of the five
+    // neighbourhood points fail there -- and it fails for no reason but a 3 ms shift in when the
+    // second note arrives. The median-of-five removed the RAMP-LENGTH oscillation and left a second
+    // arbitrary axis whose swing (3.09 dB) was larger than the gate's own margin (1.24 dB), which
+    // destroys the discrimination the median was adopted for: "every point moved together" no longer
+    // distinguishes a regression from a phase change.
+    //
+    // THE FIX IS THE ONE WAVE 2 ALREADY APPLIED TO ITS OWN PERTURBATION: search the old note's
+    // waveform for its loudest sample and strike on the sample after it. The phase then stops being
+    // a free parameter and becomes a property of the signal -- the peak of the cycle -- which is
+    // both reproducible and the worst case available.
+    //
+    // *** THE SEARCH WINDOW IS A FULL PERIOD HERE, WHERE WAVE 2 USED HALF, AND THE DIFFERENCE IS
+    // MEASURED RATHER THAN STYLISTIC. *** A window of one full period contains the cycle's GLOBAL
+    // |x| extremum, so every anchor inside the period finds the same phase; a half-period window
+    // contains only some local extremum, which for this waveform is a different phase depending on
+    // where the window fell. Measured across the same ten anchors: with a half-period window the
+    // placements landed on five different phases and the neighbourhood median still ranged 0.141 to
+    // 3.147 dB -- the axis was NOT closed. With a full-period window all ten anchors collapse onto
+    // one phase (two distinct samples, exactly one period apart) and the medians read 0.959 and
+    // 0.976 dB. Wave 2 needed the shorter window because its sweep had seven ages that had to stay
+    // distinct; this case places once, so the full period is available and it is the one that works.
+    const int kOldPeriodSamples = static_cast<int>(std::ceil(kRate / cnpg::test::midiNoteToHz(kOldNote)));
+
+    // THE RING-ONLY RENDER: the old note and nothing else. It is the shared pre-re-strike history of
+    // every arm below, so it is both the waveform the placement is read off and the render the
+    // bit-identity guard checks against.
+    std::vector<float> ringOnly;
+    {
+        StringNetwork<float> ring;
+        configure(ring, paramsFor(RetriggerMode::Physical));
+        BlockEventQueue ringNote;
+        ringNote.push(noteOn(0, kOldNote));
+        renderSamplesInto(ring, ringNote, kNominalRestrike + 3 * kOldPeriodSamples, ringOnly);
+    }
+    auto placeRestrike = [&](int anchor) {
+        return static_cast<int>(loudestSample(ringOnly, static_cast<std::size_t>(anchor),
+                                              static_cast<std::size_t>(anchor + kOldPeriodSamples))) +
+               1;
+    };
+    const int restrikeSample = placeRestrike(kNominalRestrike);
+    // The same placement rule anchored one period later. It is a DIFFERENT SAMPLE AT THE SAME PHASE,
+    // which is what makes it the guard the gate needs: if the placement really has closed the phase
+    // axis, the whole neighbourhood measured there must agree with the one measured here. Asserted
+    // below as an agreement in dB, not merely printed. (Wave 2's "adjacent placements are distinct"
+    // guard, in the form this case can carry: it places once, so what has to be shown is not that
+    // two rows differ but that two placements one cycle apart do not.)
+    const int nextCyclePlacement = placeRestrike(kNominalRestrike + kOldPeriodSamples);
+    REQUIRE(restrikeSample > kNominalRestrike);
+    REQUIRE(nextCyclePlacement > restrikeSample);
+    REQUIRE(nextCyclePlacement - restrikeSample >= kOldPeriodSamples - 2);
+    REQUIRE(nextCyclePlacement - restrikeSample <= kOldPeriodSamples + 2);
 
     StringNetwork<float> network;
     configure(network, paramsFor(RetriggerMode::Physical));
     std::vector<float> test;
     BlockEventQueue first;
     first.push(noteOn(0, kOldNote));
-    renderInto(network, first, kRingBlocks, test);
+    renderSamplesInto(network, first, restrikeSample, test);
+
+    // THE PLACEMENT WAS READ OFF THE WAVEFORM BEING MEASURED, asserted rather than assumed (wave 2's
+    // second guard). Without this the level placement would be a claim about a different render.
+    REQUIRE(std::equal(test.begin() + kNominalRestrike, test.begin() + restrikeSample,
+                       ringOnly.begin() + kNominalRestrike));
+    // ...and the placement DID something: the sample the re-strike lands on top of is at least as
+    // large as the one the old block-boundary placement would have used. That is what "worst case
+    // available" means here, and it is the non-vacuity of the search.
+    const double placedLevel = std::fabs(static_cast<double>(test[static_cast<std::size_t>(restrikeSample) - 1]));
+    const double blindLevel = std::fabs(static_cast<double>(test[kNominalRestrike - 1]));
+    REQUIRE(placedLevel >= blindLevel);
 
     const double energyBefore = network.energyEstimate();
     REQUIRE(energyBefore > 0.0);
@@ -299,7 +391,7 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     REQUIRE(network.energyEstimate() > 0.0);
     REQUIRE_FALSE(network.retriggerFadeActive(0));
 
-    renderInto(network, restrike, kTailBlocks, test);
+    renderSamplesInto(network, restrike, kTailBlocks * kBlock, test);
 
     // THE CRITERION, on the direct state: f0 IS the new note -- exactly, to the last bit -- and it
     // got there well inside 30 ms.
@@ -311,8 +403,8 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
 
     // ...and on the AUDIO, which is the claim a listener could check: the tap's measured
     // fundamental, over a window that starts once the ramp is spent, is the new note.
-    const std::size_t restrikeSample = static_cast<std::size_t>(kRingBlocks * kBlock);
-    const std::size_t analysisBegin = restrikeSample + static_cast<std::size_t>(kCriterionSeconds * kRate);
+    const std::size_t analysisBegin =
+        static_cast<std::size_t>(restrikeSample) + static_cast<std::size_t>(kCriterionSeconds * kRate);
     const std::size_t analysisLength = 1u << 15;
     REQUIRE(test.size() >= analysisBegin + analysisLength);
     const std::vector<double> analysed = toDouble(test, analysisBegin, analysisLength);
@@ -322,22 +414,34 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     const double centsOff = cnpg::test::centsBetween(measuredHz, targetHz);
 
     // CLICK. Reference: the same note plucked on a string that was not already ringing, i.e. the
-    // same render differing only in whether there was an old note to retune.
-    StringNetwork<float> reference;
-    configure(reference, paramsFor(RetriggerMode::Physical));
-    std::vector<float> control;
-    BlockEventQueue idle;
-    renderInto(reference, idle, kRingBlocks, control);
-    BlockEventQueue freshPluck;
-    freshPluck.push(noteOn(0, kNewNote));
-    renderInto(reference, freshPluck, kTailBlocks + 1, control);
+    // same render differing only in whether there was an old note to retune. Built by a lambda
+    // because the phase-invariance guard below needs the SAME construction at a second placement,
+    // and two hand-written copies of it would not be comparable evidence.
+    auto freshRenderAt = [&](int placement) {
+        StringNetwork<float> reference;
+        configure(reference, paramsFor(RetriggerMode::Physical));
+        std::vector<float> tap;
+        BlockEventQueue idle;
+        renderSamplesInto(reference, idle, placement, tap);
+        BlockEventQueue freshPluck;
+        freshPluck.push(noteOn(0, kNewNote));
+        renderSamplesInto(reference, freshPluck, (kTailBlocks + 1) * kBlock, tap);
+        return tap;
+    };
+    const std::vector<float> control = freshRenderAt(restrikeSample);
     REQUIRE(control.size() == test.size());
 
-    // The span starts AT the restrike: the reference render is silent before its own pluck, so a
-    // span reaching backwards would hand it a median |dx| of exactly zero and every comparison
-    // against it would read infinity (ClickMetric.h's documented degeneracy).
-    const std::size_t spanBegin = restrikeSample;
-    const std::size_t spanEnd = restrikeSample + static_cast<std::size_t>(40 * kBlock);
+    // THE SPAN STARTS ONE SAMPLE BEFORE THE RE-STRIKE, and it did not until fixes wave 3. The same
+    // correction wave 2 made at two other sites in this file applies here for the same reason:
+    // measureClick forms its first difference from samples[begin + 1] - samples[begin], so a span
+    // beginning AT the re-strike skips the one difference that spans the transition -- which is
+    // exactly the difference the level placement above exists to make worst-case. Reaching back
+    // further is what is forbidden, not reaching back one sample: the reference render is silent
+    // before its own pluck, so a long backward span hands it a median |dx| of zero and every
+    // comparison against it reads infinity (ClickMetric.h's documented degeneracy). One sample adds
+    // exactly one zero difference to a 5 120-sample span and moves no median.
+    const auto spanBegin = static_cast<std::size_t>(restrikeSample - 1);
+    const auto spanEnd = static_cast<std::size_t>(restrikeSample + 40 * kBlock);
     const cnpg::test::ClickMeasurement freshMeasurement = cnpg::test::measureClick(control, kRate, spanBegin, spanEnd);
     const cnpg::test::ClickMeasurement measured = cnpg::test::measureClick(test, kRate, spanBegin, spanEnd);
     REQUIRE(freshMeasurement.medianAbsDiff > 0.0);
@@ -374,19 +478,25 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     // check that the transition is not a STEP; it is not a preference ordering over ramp lengths.
     // The real decider is whether 30 ms of glide reads as a hammer-on or as a slide, which is
     // docs/listening/physical-plausibility-checklist.md item 17 and has no headless answer.
-    auto excessForRamp = [&](double rampSeconds) {
+    auto excessForRampAt = [&](int placement, const cnpg::test::ClickMeasurement& reference, double rampSeconds) {
         StringNetwork<float> variant;
         configure(variant, paramsFor(RetriggerMode::Physical));
         variant.setRetuneRampSeconds(rampSeconds);
         std::vector<float> render;
         BlockEventQueue firstNote;
         firstNote.push(noteOn(0, kOldNote));
-        renderInto(variant, firstNote, kRingBlocks, render);
+        renderSamplesInto(variant, firstNote, placement, render);
         BlockEventQueue secondNote;
         secondNote.push(noteOn(0, kNewNote));
-        renderInto(variant, secondNote, kTailBlocks + 1, render);
+        renderSamplesInto(variant, secondNote, (kTailBlocks + 1) * kBlock, render);
         REQUIRE(variant.retuneRampSamplesRemaining(0) == 0);
-        return cnpg::test::clickExcessDb(cnpg::test::measureClick(render, kRate, spanBegin, spanEnd), freshMeasurement);
+        return cnpg::test::clickExcessDb(cnpg::test::measureClick(render, kRate,
+                                                                  static_cast<std::size_t>(placement - 1),
+                                                                  static_cast<std::size_t>(placement + 40 * kBlock)),
+                                         reference);
+    };
+    auto excessForRamp = [&](double rampSeconds) {
+        return excessForRampAt(restrikeSample, freshMeasurement, rampSeconds);
     };
 
     // Three coarse points, a 1 ms-resolution fan from 16 ms to 26 ms, and the 28..32 ms neighbourhood
@@ -413,21 +523,42 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
 
     // THE GATE, TAKEN OVER A NEIGHBOURHOOD OF RAMP LENGTHS RATHER THAN AT ONE POINT, and the reason
     // is in the sweep above. The statistic swings by up to 2.4 dB between adjacent millisecond
-    // values -- 26 ms reads 1.90, 28 ms reads 4.13, 29 ms reads 1.19 -- so a single-point gate with
-    // 1.3 dB of margin is decided by which side of one local oscillation the shipped value lands on,
-    // and a different note pair, a change to the fractional-delay solve or a different toolchain
-    // could flip it red for no musical reason at all. It would also flip GREEN for none.
+    // values, so a single-point gate with a decibel of margin is decided by which side of one local
+    // oscillation the shipped value lands on, and a different note pair, a change to the
+    // fractional-delay solve or a different toolchain could flip it red for no musical reason at
+    // all. It would also flip GREEN for none.
     //
     // The physical claim is about a retune ramp of ORDER 30 ms, not about 1440 samples exactly, so
     // the criterion is applied to the MEDIAN of the shipped value plus and minus 2 ms. A median of
     // five is unmoved by up to two outlying points, so no single oscillation can decide the gate;
     // a real regression -- anything that makes the retune transition itself a step -- moves every
     // point in the neighbourhood together and is caught. Three of five points would have to fail
-    // before this line does, against one for the point gate it replaces, at the same margin.
+    // before this line does, against one for the point gate it replaces.
+    //
+    // *** THAT ARGUMENT ONLY HOLDS ONCE THE RE-STRIKE PHASE IS ALSO PINNED, WHICH IS WHY THE
+    // PLACEMENT ABOVE IS PART OF THIS GATE AND NOT A TIDYING-UP. *** With the re-strike at a block
+    // boundary, three of five points DID fail at one arbitrary phase (median 3.199 dB, 3 ms from the
+    // shipped one), so "every point moved together" no longer distinguished a regression from a
+    // shift in when the second note arrived -- which was the whole of the median's justification.
+    // Level-placing closes that axis, and the closure is asserted immediately below rather than
+    // argued: the entire neighbourhood is re-measured at the placement ONE PERIOD LATER -- a
+    // different sample, the same phase -- and the two medians must agree. A build that reintroduced
+    // a phase dependence would separate them.
     std::vector<double> neighbourhood(std::begin(sweptExcess) + kNeighbourhood, std::end(sweptExcess));
     REQUIRE(neighbourhood.size() == 5);
     std::sort(neighbourhood.begin(), neighbourhood.end());
     const double neighbourhoodMedianDb = neighbourhood[2];
+
+    const std::vector<float> nextCycleControl = freshRenderAt(nextCyclePlacement);
+    const cnpg::test::ClickMeasurement nextCycleFresh =
+        cnpg::test::measureClick(nextCycleControl, kRate, static_cast<std::size_t>(nextCyclePlacement - 1),
+                                 static_cast<std::size_t>(nextCyclePlacement + 40 * kBlock));
+    REQUIRE(nextCycleFresh.medianAbsDiff > 0.0);
+    std::vector<double> nextCycleNeighbourhood;
+    for (std::size_t i = kNeighbourhood; i < kSweptCount; ++i)
+        nextCycleNeighbourhood.push_back(excessForRampAt(nextCyclePlacement, nextCycleFresh, kSweptRamps[i]));
+    std::sort(nextCycleNeighbourhood.begin(), nextCycleNeighbourhood.end());
+    const double nextCycleMedianDb = nextCycleNeighbourhood[2];
 
     std::cout << "[contract] Physical cross-pitch restrike: ramp " << rampSamples << " samples ("
               << (landedSeconds * 1000.0) << " ms, criterion " << (kCriterionSeconds * 1000.0)
@@ -435,7 +566,11 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
               << " cents); click excess " << excessDb << " dB (peak |dx| " << measured.peakWindowAbsDiff << " vs "
               << freshMeasurement.peakWindowAbsDiff << " for the fresh pluck), one-sample-ramp control "
               << sweptExcess[0] << " dB, level-placed hard-cut control " << hardCutExcessDb << " dB at sample +"
-              << (cutSample - restrikeSample) << " (level " << cutLevel << ")\n";
+              << (static_cast<int>(cutSample) - restrikeSample) << " (level " << cutLevel << ")\n";
+    std::cout << "[contract] the re-strike is LEVEL-PLACED, not struck at a block boundary: sample +"
+              << (restrikeSample - kNominalRestrike) << " past the nominal one, on the loudest sample of the "
+              << kOldPeriodSamples << "-sample period after it (level " << placedLevel << " vs " << blindLevel
+              << " where a block boundary would have struck)\n";
 
     INFO("excess " << excessDb << " dB, hard-cut " << hardCutExcessDb << " dB, snapped " << sweptExcess[0] << " dB");
     REQUIRE(hardCutExcessDb > cnpg::test::kClickMetricToleranceDb); // the metric still discriminates
@@ -449,6 +584,23 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     INFO("neighbourhood median " << neighbourhoodMedianDb << " dB, shipped point " << excessDb << " dB");
     REQUIRE(neighbourhoodMedianDb <= cnpg::test::kClickMetricToleranceDb);
 
+    // *** THE PHASE AXIS IS CLOSED, ASSERTED. *** The same neighbourhood, measured with the
+    // re-strike placed one period later -- a different sample of the render, the same phase of the
+    // old note. Before the placement landed, moving the re-strike by 3 ms moved this median by up to
+    // 3.09 dB, which is more than the gate's margin; after it, one whole period moves it by a
+    // fraction of a decibel. The 0.5 dB bound is 30x the measured difference and a quarter of the
+    // gate's own margin, so it is a real constraint rather than a formality: a change that made this
+    // statistic phase-dependent again would have to keep the dependence under a quarter of the
+    // margin to escape, at which point it cannot decide the gate either.
+    std::cout << "[contract] the gate no longer depends on WHEN the re-strike lands: the same 28..32 ms "
+                 "neighbourhood level-placed one period later (sample +"
+              << (nextCyclePlacement - kNominalRestrike) << ", " << (nextCyclePlacement - restrikeSample)
+              << " samples on) reads median " << nextCycleMedianDb << " dB against " << neighbourhoodMedianDb
+              << " dB here -- a difference of " << std::fabs(nextCycleMedianDb - neighbourhoodMedianDb)
+              << " dB, where a 3 ms shift of a BLINDLY placed re-strike moved it by up to 3.09 dB\n";
+    INFO("median here " << neighbourhoodMedianDb << " dB, one period later " << nextCycleMedianDb << " dB");
+    REQUIRE(std::fabs(nextCycleMedianDb - neighbourhoodMedianDb) < 0.5);
+
     // ...and the reading really is measuring the glide rather than something incidental: every ramp
     // at or above 16 ms reads strictly better than every ramp at or below 8 ms. That is the trend
     // the constant leans on, and it is the only monotone statement the data supports.
@@ -461,8 +613,8 @@ TEST_CASE("CONTRACT: Physical cross-pitch restrike lands the new pitch inside 30
     // claim it replaces was. This file previously asserted a three-point descent over the top of a
     // five-point sweep and read it as "30 ms is the shortest ramp that clears the criterion". At
     // 1 ms resolution that is false in both halves: the sequence inverts repeatedly across the WHOLE
-    // range (not only at the fast end), and 22 ms clears the criterion at 1.70 dB while 28 ms FAILS
-    // it at 4.13 dB sitting between two passing neighbours. A sampled statistic that jumps like that
+    // range (not only at the fast end), and 22 ms clears the criterion at 1.18 dB while 28 ms FAILS
+    // it at 3.59 dB sitting between two passing neighbours. A sampled statistic that jumps like that
     // between adjacent values cannot order ramp lengths, and no constant may be chosen from it.
     int inversions = 0;
     int shorterRampsThatClear = 0;
@@ -1235,7 +1387,7 @@ TEST_CASE("CONTRACT: a retrigger damper choke has no state left to act on, and b
     // defers audible-slide behaviour besides.
     //
     // -----------------------------------------------------------------------------------------
-    // FIXES WAVE 2 STRENGTHENED THE REFUSAL AND BROKE THE OLD MEASUREMENT, and both are recorded.
+    // FIXES WAVE 2 BROKE THE OLD MEASUREMENT. THE REFUSAL STANDS ON LESS EVIDENCE THAN IT DID.
     // -----------------------------------------------------------------------------------------
     // The original form of this case built an engaged felt out of the SHIPPED machinery -- a
     // note-off 10.7 ms before the restrike -- and measured two things from one pair of renders: the
@@ -1251,24 +1403,42 @@ TEST_CASE("CONTRACT: a retrigger damper choke has no state left to act on, and b
     // attack-cost reading collapses from -1.2233 dB to -0.2070 dB, and what remains is the missing
     // superposition of the old note in the un-choked arm, not a damper cost.)
     //
-    // What replaces it is stronger than what it replaced, because it refuses the clause on
-    // REACHABILITY rather than on cost:
+    // *** WAVE 2 CALLED THE REPLACEMENT "STRONGER THAN REFUSING IT ON COST". IT IS NOT, AND FIXES
+    // WAVE 3 WITHDRAWS THAT. *** Section (a) below observes that nothing engages the damper on this
+    // path today. The plan's clause proposes to ADD a fast engage(); "there is no engagement today"
+    // cannot refute a proposal to create one, because it RESTATES THE CONTROL FLOW the proposal is
+    // asking to change. What (a) actually is -- and it is worth having -- is a REGRESSION GUARD: a
+    // build that inserts the choke fails on the sample it was inserted, so the refusal cannot be
+    // undone silently. It is evidence about the code, not an argument about the design.
     //
-    //   (a) The path the plan's clause names -- Physical, pitch changing, plucking over a live note
-    //       -- runs only on a SOUNDING string, and a sounding string's damper is provably at 0: the
-    //       only thing that engages one is the note-off branch, which clears `sounding_` on the same
-    //       line, and landSynthFade's pending note-off, which does the same. So there is nothing to
-    //       choke WITH unless new code engages it, and section (a) asserts the engagement is 0 on
-    //       both sides of exactly that re-strike. A build that added the choke fails it.
+    // THE REFUSAL ITSELF RESTS WHERE IT ALWAYS DID: on COST and on LATENCY. A choke's whole currency
+    // is elapsed time in which no new note exists, section (c) measures what that time buys
+    // (-1.4925 dB of amplitude for 10.67 ms of felt, reproduced exactly from 0eb52b9), and the plan
+    // budgets up to 30 ms of it on every legato note. That is the trade being declined.
+    //
+    // AND THE EVIDENTIARY BASE IS THINNER THAN IT WAS, WHICH IS SAID PLAINLY RATHER THAN GLOSSED.
+    // The sharpest number the original refusal had -- the attack cost of -1.22328 dB, and with it
+    // the -0.269221 dB NET effect on the balance, the one quantity a choke exists to change -- is no
+    // longer reproducible in this tree and survives only as a quotation from the P2.6 report. The
+    // conclusion has not moved; the evidence for it has.
+    //
+    //   (a) THE REGRESSION GUARD. The path the plan's clause names -- Physical, pitch changing,
+    //       plucking over a live note -- runs only on a SOUNDING string, and a sounding string's
+    //       damper is at 0: the only thing that engages one is the note-off branch, which clears
+    //       `sounding_` on the same line, and landSynthFade's pending note-off, which does the same.
+    //       Section (a) asserts the engagement is 0 on both sides of exactly that re-strike, so a
+    //       build that added the choke fails it. That is what it is for.
     //   (b) The path where the felt IS down -- a re-strike on a released string -- already discards
     //       the old content ENTIRELY and resets the felt to fully open on the same sample. The
     //       choke's stated goal is to make the old note quieter relative to the new one; that path
     //       already achieves it completely, and at no cost to the attack. Section (b) asserts both.
+    //       This one IS an argument about the design, and it is about the OTHER path.
     //
-    //   (c) And the half of the original measurement that still stands, because it is about the felt
-    //       and not about the retrigger: suppression is bought with ELAPSED TIME. Section (c)
-    //       measures what 10.7 ms of felt takes out of a ringing string, with no re-strike involved
-    //       at all -- which is the quantity the plan would have to spend latency to obtain.
+    //   (c) THE HALF OF THE ORIGINAL MEASUREMENT THAT STILL STANDS, and the half the refusal rests
+    //       on, because it is about the felt and not about the retrigger: suppression is bought with
+    //       ELAPSED TIME. Section (c) measures what 10.7 ms of felt takes out of a ringing string,
+    //       with no re-strike involved at all -- which is the quantity the plan would have to spend
+    //       latency to obtain.
     constexpr int kRingBlocks = 200;
     constexpr int kChokeBlocks = 4; // 10.7 ms at 48 kHz / 128, well inside the plan's 30 ms budget
 

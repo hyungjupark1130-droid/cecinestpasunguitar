@@ -99,25 +99,34 @@ enum class RetriggerMode : std::uint8_t {
 // and a glide of a full rail has motion of its own -- while the rails shorten the read position
 // sweeps through the buffer faster than one sample per sample, which is the pitch change and which
 // reads on a peak-|dx| metric as motion a fresh pluck does not have. Measured against a fresh pluck
-// at MIDI 45 -> 51 (tests/dsp/RetriggerModeTests.cpp, printed every run, 19 points):
+// at MIDI 45 -> 51 (tests/dsp/RetriggerModeTests.cpp, printed every run, 19 points, with the
+// re-strike LEVEL-PLACED on the loudest sample of the old note's cycle -- see below):
 //
 //     ramp     0.02 ms  2 ms   8 ms   16 ms  17 ms  18 ms  19 ms  20 ms  21 ms  22 ms
-//     excess   14.04    18.78  10.43  6.52   5.36   3.32   3.05   3.05   3.96   1.70
+//     excess   10.37    18.70  10.11  6.04   4.85   2.62   2.22   2.30   3.39   1.18
 //     ramp     23 ms    24 ms  25 ms  26 ms  28 ms  29 ms  30 ms  31 ms  32 ms
-//     excess   2.34     2.00   2.29   1.90   4.13   1.19   1.69   1.76   1.77
+//     excess   1.83     1.47   1.47   1.20   3.59   0.61   0.90   0.98   1.00
 //
 // 30 ms clears the 3 dB criterion, AND THAT IS ALL THIS STATISTIC SAYS. It does not say 30 ms is the
-// shortest ramp that clears it -- 22 ms clears it at 1.70 dB and five other sub-30 ms points do too
-// -- and it cannot order ramp lengths at all: 28 ms FAILS at 4.13 dB sitting between two passing
-// neighbours, and the sequence inverts at eight of the sampled points. An earlier revision of this
+// shortest ramp that clears it -- 22 ms clears it at 1.18 dB and eight other sub-30 ms points do too
+// -- and it cannot order ramp lengths at all: 28 ms FAILS at 3.59 dB sitting between two passing
+// neighbours, and the sequence inverts at seven of the sampled points. An earlier revision of this
 // comment claimed "at nothing shorter" from a five-point sweep too coarse to see any of that.
+//
+// THE TABLE MOVED AT FIXES WAVE 3 AND THE CONCLUSIONS DID NOT. Until then the re-strike was struck
+// at a round block boundary -- an arbitrary phase of the 110 Hz note being replaced -- and the whole
+// table is a function of that phase: recomputing the gate at ten phases across one period swung its
+// median from 0.111 to 3.199 dB, across the criterion, on identical code. The re-strike is now
+// placed on the loudest sample of the old note's cycle (tests/support/ClickMetric.h states the rule
+// for controls and perturbations alike), which makes the phase a property of the signal instead of
+// of the block size. Every number above is the level-placed one.
 //
 // The statistic is also STRUCTURALLY BIASED against legato and cannot choose this constant even in
 // principle: its reference is a fresh pluck, which contains no glide, so every millisecond of glide
 // is excess by construction and a longer ramp always reads better. Its minimum is at "no legato".
 // What it is for is refusing a ramp so short that the retune is a STEP -- 8 ms was tried first, on
 // the argument that 30 ms of glide is the audible-slide mode Q3 defers, and is refused by this gate
-// at 10.43 dB. Whether 30 ms of glide reads as a hammer-on or as a slide is an ear question, it is
+// at 10.11 dB. Whether 30 ms of glide reads as a hammer-on or as a slide is an ear question, it is
 // docs/listening/physical-plausibility-checklist.md item 17, it is UNANSWERED, and it is what
 // actually decides this number. The knob to answer it with is StringNetwork::setRetuneRampSeconds.
 inline constexpr double kRetuneRampSeconds = 0.030;

@@ -181,13 +181,16 @@ class NoteAllocator {
     // enable went false, both of which are automatable while the note is held. That ownership is
     // released and the note is reassigned like any other, because StringNetwork::handleEvent drops
     // every event addressed to such a string and a restrike handed back to it would vanish with no
-    // counter moving anywhere. Releasing before reassigning is what keeps the invariant.
+    // counter moving anywhere. Releasing before reassigning is what keeps the invariant, and if the
+    // released ownership was carrying a CC64-held NoteOff that NoteOff is counted on
+    // unaddressableNoteOffCount() rather than discarded in silence.
     //
     // NoteOff (including a NoteOn with velocity 0). Emitted only if the (channel, note) still owns
     // a string. With the pedal down it is HELD instead, and the string stays owned. If the owning
     // string can no longer be ADDRESSED, the ownership is still released but no event is emitted --
     // StringNetwork would discard it -- and unaddressableNoteOffCount() increments. The same rule
-    // applies to a held NoteOff released by a pedal-up.
+    // applies to a held NoteOff released by a pedal-up, and to one discarded by the restrike path
+    // above: all three are the same event on the same counter.
     //
     // CC64. Value >= kSustainPedalDownThreshold is pedal-down; while down, NoteOffs are held per
     // string. On pedal-up every held NoteOff is emitted at the pedal-release sample offset in
@@ -240,6 +243,13 @@ class NoteAllocator {
     // class: it means a numStrings or stringEnabled automation move landed under a held note, which
     // is a legal gesture whose consequence is that the note-off had nowhere to be delivered. The
     // string is silenced by StringNetwork's own enable ramp regardless, so nothing is left stuck.
+    //
+    // THREE ROUTES REACH IT, and they are three ways for one thing to happen rather than three
+    // things: a direct NoteOff, a CC64-held NoteOff released by a pedal-up, and a CC64-held NoteOff
+    // discarded when a restrike releases the stale unaddressable ownership that was carrying it.
+    // Fixes wave 3 added the third -- it was the one discard on this path that moved no counter, and
+    // while it was harmless in effect (the string is being ramped silent and the note is reassigned
+    // on the same line) it was the one line that made the file-header claim above false.
     std::uint32_t unaddressableNoteOffCount() const noexcept;
 
     // NoteEvents this class produced and the destination queue refused because it was full

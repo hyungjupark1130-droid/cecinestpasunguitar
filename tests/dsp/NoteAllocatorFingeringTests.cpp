@@ -739,6 +739,96 @@ TEST_CASE("CONTRACT: a NoteOff whose string left the count is counted, never emi
         REQUIRE(allocator.ownedNote(1) == -1);
         REQUIRE(allocator.queueOverflowCount() == 0);
     }
+
+    SECTION("a CC64-held NoteOff discarded by a RESTRIKE of the same note") {
+        // THE THIRD ROUTE TO THE SAME COUNTER, closed in fixes wave 3. The two sections above reach
+        // the discard through a NoteOff; this one reaches it through a NoteON. A note is struck,
+        // held under the pedal, released (so its NoteOff is sitting in heldNoteOff_), its string
+        // leaves the count -- and then the player strikes the same note again. The NoteOn branch
+        // releases the stale unaddressable ownership before choosing a string, which throws that
+        // held NoteOff away.
+        //
+        // It was HARMLESS and UNCOUNTED, and the second half is why this section exists. Nothing is
+        // stuck: the string is being ramped silent by StringNetwork's enable ramp regardless, and
+        // the note is reassigned on the next line. But NoteAllocator.h claims the two ownership
+        // levels can differ only where an emitted event failed to arrive AND that every way that
+        // can happen is counted -- and this line discarded a pending note-off with no counter
+        // moving, which made the claim false by exactly one line of code.
+        NoteAllocator allocator;
+        allocator.prepare(cnpg::dsp::kMaxStrings);
+        NoteAllocatorParams params = sixStringGuitar();
+        allocator.setParams(params);
+
+        const RawMidiEvent on[] = {noteOn(0, 60)};
+        BlockEventQueue out;
+        allocator.allocate(on, 1, out);
+        REQUIRE(drain(out)[0].stringIndex == 4);
+
+        const RawMidiEvent pedalDown[] = {RawMidiEvent{1, 0xB0u, cnpg::dsp::kSustainPedalController, 127, 0}};
+        allocator.allocate(pedalDown, 1, out);
+        const RawMidiEvent release[] = {noteOff(2, 60)};
+        allocator.allocate(release, 1, out);
+        // IN STATE, before the count moves: the NoteOff really is pending under the pedal and the
+        // string really does still own the note. Without both, the path below is not the one named.
+        REQUIRE(out.empty());
+        REQUIRE(allocator.sustainHoldPending(4));
+        REQUIRE(allocator.ownedNote(4) == 60);
+        requireNoDrops(allocator);
+
+        params.activeStringCount = 3; // string 4 leaves, still holding the note and the held NoteOff
+        allocator.setParams(params);
+        REQUIRE(allocator.effectiveStringCount() == 3);
+        REQUIRE(allocator.sustainHoldPending(4)); // still pending: the count move did not clear it
+
+        const RawMidiEvent restrike[] = {noteOn(3, 60)};
+        allocator.allocate(restrike, 1, out);
+        const std::vector<NoteEvent> reassigned = drain(out);
+
+        // THE NOTE IS REASSIGNED (fixes wave 1's half, unchanged) ...
+        REQUIRE(reassigned.size() == 1);
+        REQUIRE(reassigned[0].stringIndex == 2); // fret 10 on the D string, cheapest inside the count
+        REQUIRE(reassigned[0].stringIndex < allocator.effectiveStringCount());
+        REQUIRE(allocator.ownedNote(4) == -1);
+        REQUIRE_FALSE(allocator.sustainHoldPending(4));
+        // ... AND THE HELD NoteOff IT DISCARDED IS COUNTED, which is the whole of this section.
+        REQUIRE(allocator.unaddressableNoteOffCount() == 1);
+        REQUIRE(allocator.unassignableNoteCount() == 0);
+        REQUIRE(allocator.outOfRangeNoteCount() == 0);
+        REQUIRE(allocator.queueOverflowCount() == 0);
+
+        // ...and the discard does not double-count on the pedal-up that follows: the ownership went
+        // with it, so the pedal-up has nothing left to release for this note.
+        const RawMidiEvent pedalUp[] = {RawMidiEvent{6, 0xB0u, cnpg::dsp::kSustainPedalController, 0, 0}};
+        allocator.allocate(pedalUp, 1, out);
+        REQUIRE(out.empty()); // string 2's note is still HELD -- the pedal was down when it landed
+        REQUIRE(allocator.unaddressableNoteOffCount() == 1);
+        REQUIRE(allocator.ownedNote(2) == 60); // the reassigned note is alive and owned
+
+        // AND THE COUNTER ONLY MOVES WHEN THERE WAS SOMETHING TO DISCARD. The same restrike path
+        // over a stale unaddressable ownership carrying NO held NoteOff must leave it alone --
+        // otherwise the counter would read "a note-off was lost" on every count ride, which is
+        // exactly the kind of false positive that makes cnpg_render's fail-on-drop guard useless.
+        NoteAllocator quiet;
+        quiet.prepare(cnpg::dsp::kMaxStrings);
+        NoteAllocatorParams quietParams = sixStringGuitar();
+        quiet.setParams(quietParams);
+        BlockEventQueue quietOut;
+        quiet.allocate(on, 1, quietOut);
+        REQUIRE(drain(quietOut)[0].stringIndex == 4);
+        quietParams.activeStringCount = 3;
+        quiet.setParams(quietParams);
+        quiet.allocate(restrike, 1, quietOut);
+        REQUIRE(drain(quietOut).size() == 1);
+        REQUIRE(quiet.unaddressableNoteOffCount() == 0);
+        requireNoDrops(quiet);
+
+        std::cout << "[contract] a restrike that releases a stale unaddressable ownership discards the CC64-held "
+                     "NoteOff it was carrying, and counts it: unaddressableNoteOffCount reads "
+                  << allocator.unaddressableNoteOffCount() << " with the note reassigned to string "
+                  << static_cast<int>(reassigned[0].stringIndex)
+                  << "; with no held NoteOff to discard the same path reads " << quiet.unaddressableNoteOffCount()
+                  << "\n";
+    }
 }
 
 TEST_CASE("CONTRACT: a full event queue is counted, never blocked on", "[contract]") {

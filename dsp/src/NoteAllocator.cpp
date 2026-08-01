@@ -224,6 +224,16 @@ void NoteAllocator::allocate(const RawMidiEvent* events, int numEvents, BlockEve
             const int staleOwner = stringForNote(raw.channel, raw.data1);
             if (staleOwner >= 0 && !stringAddressable(staleOwner)) {
                 const auto staleIndex = static_cast<std::size_t>(staleOwner);
+                // ...and if that ownership was carrying a CC64-HELD NoteOff, the NoteOff dies here.
+                // It is the same event as the two sites above and below -- a note-off whose string
+                // was automated out from under it -- so it is counted on the same counter, and
+                // NoteAllocator.h's "every way an emitted event can fail to arrive is counted" stays
+                // true rather than having to be narrowed around this line. Nothing is stuck either
+                // way (the string is being ramped silent by StringNetwork regardless, and the note
+                // is about to be reassigned), but an uncounted discard is exactly the class of
+                // silence this whole counter set exists to break.
+                if (heldNoteOff_[staleIndex])
+                    ++unaddressableNoteOffCount_;
                 owned_[staleIndex] = false;
                 heldNoteOff_[staleIndex] = false;
             }
