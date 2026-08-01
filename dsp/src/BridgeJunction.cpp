@@ -198,7 +198,9 @@ template <typename SampleT> void BridgeJunction<SampleT>::advanceSmoothers() noe
             // branch, so a slider dragged to its stop over a ringing instrument lands here (see
             // kBridgeMinMobilityRatio, which used to claim otherwise). What makes it acceptable is
             // measured rather than argued: against a control gesture that decouples just as far but
-            // stays LOADED, the discarded store contributes <= 0.009 dB of click-metric excess.
+            // stays LOADED, the difference signal -- which on a linear tap path IS the response to
+            // the discarded store -- peaks 57.9 dB below the ringing chord, worst over 42 measured
+            // points.
             massState_ = 0.0;
             springState_ = 0.0;
         }

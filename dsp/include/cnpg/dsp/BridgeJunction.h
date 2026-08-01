@@ -185,13 +185,15 @@ inline constexpr float kBridgeMaxMobilityRatio = 0.05f;
 // reach" was false, and it is why the transition went unmeasured through the network for a round.
 //
 // It is measured now, and it is benign -- but the reason is a decomposition, not an assertion.
-// Decoupling is a legitimate timbral change, so a raw click reading across the gesture measures two
-// things at once. The control is a gesture to couplingStrength = 1e-6, which is acoustically the
-// same decoupling but stays LOADED, so the store decays instead of being discarded: the difference
-// between the two readings is the store release's own contribution, measured at <= 0.009 dB across
-// four configurations including full coupling into a high-Q mode landed late in the decay.
-// "CONTRACT: dragging Bridge Coupling to zero is click-free through the network"
-// (tests/dsp/BridgePortContractTests.cpp) is that measurement.
+// Decoupling is a legitimate timbral change, so measuring the gesture alone measures two things at
+// once. The control is a gesture to couplingStrength = 1e-6, which is acoustically the same
+// decoupling but stays LOADED, so the store decays instead of being discarded; the difference
+// SIGNAL between the two renders is then the response to the discarded store, and the tap path is
+// linear, so that is an isolation rather than an inference. Measured over 6 admittance
+// configurations x 7 note-onset staggers = 42 points, the worst is 57.9 dB BELOW the ringing
+// chord's own peak. "CONTRACT: dragging Bridge Coupling to zero is click-free through the network"
+// (tests/dsp/BridgePortContractTests.cpp) is that measurement, and its header records why the
+// obvious click-ratio statistic could not be the gated one.
 inline constexpr double kBridgeMinMobilityRatio = 1.0e-9;
 
 // Below this stored energy the junction is treated as quiescent. A THRESHOLD, not an exact-zero
