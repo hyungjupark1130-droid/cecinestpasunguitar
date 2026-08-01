@@ -8,6 +8,11 @@ add_executable(cnpg_bench
 
 target_link_libraries(cnpg_bench PRIVATE cnpg_dsp)
 
+# Lets BenchMain.cpp include the shared P1 chain assembly as "support/P1Chain.h" -- the same
+# spelling cnpg_tests and cnpg_render use for tests/support/ headers (Task P1.11: the chain moved
+# out of this file so cnpg_bench and cnpg_render provably cannot drive different chains).
+target_include_directories(cnpg_bench PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+
 cnpg_set_warnings(cnpg_bench)
 
 # Best-effort short git commit, baked in at configure time purely for the JSON report's
