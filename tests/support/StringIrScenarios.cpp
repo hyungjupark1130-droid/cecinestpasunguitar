@@ -23,12 +23,14 @@ std::string scenarioFileName(int midiNote) {
     return std::string(buffer);
 }
 
+const char* chordChannelName(ChordIrChannel channel) { return channel == ChordIrChannel::Tap ? "tap" : "bridge"; }
+
 std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote) {
     // docs/plan.md section 4.3: "a single-string StringNetwork (1 active string, damper
-    // transparent, default BridgeAdmittanceParams)". The damper is transparent because
-    // DamperJunction does not exist yet (P2.2) and the bridge admittance is at its default
-    // because P1's port is the rigid termination (P2.4 loads it) -- both of which is what
-    // "transparent" and "default" mean at this point in the plan, not a deviation from it.
+    // transparent, default BridgeAdmittanceParams)". The damper is transparent because nothing
+    // engages it; the bridge admittance is the shipping default, which from Task P2.4 is a LOADED
+    // junction (docs/decisions/0006) rather than the rigid termination P1 shipped -- which is why
+    // these goldens were regenerated at that task.
     cnpg::dsp::StringNetworkParams params;
     params.pickupPosition01 = kStringIrTapPosition;
     params.stringMaterial = cnpg::dsp::StringMaterialParams{}; // documented defaults
@@ -64,6 +66,76 @@ std::vector<double> renderStringIr(cnpg::dsp::FractionalDelayKind kind, double s
             out.push_back(static_cast<double>(channel[n]));
     }
     return out;
+}
+
+std::vector<double> renderChordIr(cnpg::dsp::FractionalDelayKind kind, double sampleRate, ChordIrChannel channel) {
+    // docs/plan.md section 4.3: "A sixth scenario captures the full 6-string network playing one
+    // open E-major chord (tests bridge coupling regression)." Everything except the note set and
+    // the string count is the single-string recipe, so the two scenarios differ in exactly the
+    // thing under test.
+    cnpg::dsp::StringNetworkParams params;
+    params.pickupPosition01 = kChordIrTapPosition;
+    params.stringMaterial = cnpg::dsp::StringMaterialParams{}; // documented defaults
+    params.exciter.noiseAmount = kStringIrNoiseAmount;
+    // The SHIPPING bridge admittance, left at its struct default on purpose: this scenario exists
+    // to freeze the coupled behaviour, so it must be rendered at the coupling that ships.
+
+    cnpg::dsp::StringNetwork<float> network;
+    network.prepare(sampleRate, kStringIrBlockSize, kind);
+    network.setNumStrings(static_cast<int>(kChordIrNotes.size()));
+    network.setParams(params);
+    network.reset();
+
+    cnpg::dsp::BlockEventQueue events;
+    for (std::size_t s = 0; s < kChordIrNotes.size(); ++s) {
+        cnpg::dsp::NoteEvent noteOn{};
+        noteOn.type = cnpg::dsp::NoteEventType::NoteOn;
+        // Strummed, not struck: 6 ms between strings at 48 kHz, scaled with the rate so the gesture
+        // is the same gesture everywhere rather than the same sample count.
+        noteOn.sampleOffset = static_cast<int>(static_cast<double>(s) * 0.006 * sampleRate);
+        noteOn.stringIndex = static_cast<std::uint8_t>(s);
+        noteOn.channel = 0;
+        noteOn.midiNote = static_cast<std::uint8_t>(kChordIrNotes[s]);
+        noteOn.velocity = kStringIrVelocity;
+        noteOn.pluckPosition = kStringIrPluckPosition;
+        noteOn.hardness = kStringIrHardness;
+        events.push(noteOn);
+    }
+
+    const auto count = static_cast<std::size_t>(kStringIrSeconds * sampleRate);
+    std::vector<double> out;
+    out.reserve(count);
+    while (out.size() < count) {
+        const auto wanted = static_cast<int>(std::min<std::size_t>(kStringIrBlockSize, count - out.size()));
+        network.process(events, wanted);
+        if (channel == ChordIrChannel::Bridge) {
+            const float* bridge = network.bridgeOutputBuffer();
+            for (int n = 0; n < wanted; ++n)
+                out.push_back(static_cast<double>(bridge[n]));
+        } else {
+            const int strings = network.tapBuffers().numStrings();
+            for (int n = 0; n < wanted; ++n) {
+                double sum = 0.0;
+                for (int s = 0; s < strings; ++s) {
+                    const float* tap = network.tapBuffers().channel(s, 0);
+                    if (tap != nullptr && network.tapBuffers().isActive(s))
+                        sum += static_cast<double>(tap[n]);
+                }
+                out.push_back(sum);
+            }
+        }
+    }
+    return out;
+}
+
+StringIrFeatures extractChordIrFeatures(const std::vector<double>& samples, double sampleRate) {
+    StringIrFeatures features;
+    features.attackRmsDbfs = rmsDbfs(samples, sampleRate, 0.1);
+    features.partialHz.assign(8, 0.0); // see the header: not well posed for a six-note chord
+    features.bandT60.reserve(kStringIrT60Bands.size());
+    for (double centre : kStringIrT60Bands)
+        features.bandT60.push_back(bandT60Seconds(samples, sampleRate, centre));
+    return features;
 }
 
 StringIrFeatures extractStringIrFeatures(const std::vector<double>& samples, double sampleRate, int midiNote) {

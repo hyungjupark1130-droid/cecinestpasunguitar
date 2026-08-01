@@ -6,6 +6,7 @@
 # top-level CMakeLists.txt before add_subdirectory(dsp).
 
 add_library(cnpg_dsp STATIC
+    src/BridgeJunction.cpp
     src/CabFilter.cpp
     src/DamperJunction.cpp
     src/ModuleGraph.cpp

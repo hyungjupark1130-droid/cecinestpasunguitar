@@ -149,6 +149,15 @@ TEST_CASE("CONTRACT: StringNetwork static pitch bend lands on the bent target", 
         params.pitchBendSemitones = bend;
         params.stringMaterial.lossGainLow = 1.0f;
         params.stringMaterial.lossGainHigh = 1.0f;
+        // DECOUPLED BRIDGE (Task P2.4). This case is docs/plan.md section 4.5's "TUNING: static bend
+        // accuracy" -- does a constant pitchBendSemitones land the string on the bent target within
+        // +/-2 cents? The BRIDGE LOAD pulls partials near its resonance (measured: worst 4.9 cents
+        // at MIDI 45 with the shipping admittance, see "TUNING: the coupled topology's residual
+        // tuning error" in tests/dsp/BridgePortContractTests.cpp), which would fold a physical
+        // effect into a measurement of the bend parameter's arithmetic and gate the wrong thing.
+        // Section 4.5 assigns the coupled topology's residual to Task P2.7's calibration table;
+        // carry-forward B3 assigns MEASURING it to P2.4, and it is measured -- there, not here.
+        params.bridge.couplingStrength = 0.0f;
 
         StringNetwork<float> network;
         network.prepare(kSampleRate, kBlockSize, FractionalDelayKind::Lagrange3);

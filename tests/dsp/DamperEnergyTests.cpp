@@ -2,6 +2,7 @@
 #include "cnpg/dsp/DamperJunction.h"
 #include "cnpg/dsp/EventQueue.h"
 #include "cnpg/dsp/PluckExciter.h"
+#include "cnpg/dsp/ScopedFtzDazGuard.h"
 #include "cnpg/dsp/StringNetwork.h"
 #include "cnpg/dsp/WaveguideString.h"
 
@@ -364,6 +365,11 @@ TEST_CASE("CONTRACT: a permanently in-line damper at engagement 0 costs the stri
         params.damperPosition01 = damperPosition;
         params.damper.maxLoss = 1.0f; // irrelevant at engagement 0, and that is part of the claim
         params.exciter.noiseAmount = 0.25f;
+        // The bridge is held at its rigid limit and the hand-driven reference below is given the
+        // SAME rigid termination at the SAME one-sample offset (Task P2.4). What this case claims
+        // is that the DAMPER SEAM costs the string nothing; the bridge seam is a different seam
+        // with a different cost, and leaving it in would fold the two together and measure neither.
+        params.bridge.couplingStrength = 0.0f;
 
         StringNetwork<float> network;
         network.prepare(rate, kBlock, FractionalDelayKind::Lagrange3);
@@ -385,7 +391,11 @@ TEST_CASE("CONTRACT: a permanently in-line damper at engagement 0 costs the stri
         stringParams.f0Hz = static_cast<float>(440.0 * std::exp2((static_cast<double>(kMidiNote) - 69.0) / 12.0));
         string.setParams(stringParams);
         string.setAnalyticTuningCompensation(0.0f);
+        string.setBridgePortDriven(true); // the network's topology, so the comparison is fair
         string.reset();
+
+        cnpg::dsp::RigidBridgeTermination<float> rigid;
+        rigid.prepare(rate, kBlock, 1, nullptr);
 
         cnpg::dsp::PluckExciter<float> exciter;
         exciter.prepare(rate, kBlock);
@@ -410,6 +420,12 @@ TEST_CASE("CONTRACT: a permanently in-line damper at engagement 0 costs the stri
                 if (excitation != 0.0f)
                     string.injectAt(exciter.latchedPosition01(), excitation);
                 const float direct = string.readTapAt(kPickup);
+                // Exactly StringNetwork's ordering: last tick's outgoing wave, scattered through
+                // the same rigid termination, handed back before this tick.
+                const float incident = string.railOutgoingAtBridge();
+                float reflected = 0.0f;
+                rigid.scatter(&incident, &reflected, 1);
+                string.railAcceptFromBridge(reflected);
                 string.tick();
 
                 withDamper.push_back(static_cast<double>(channel[n]));
@@ -731,6 +747,10 @@ TEST_CASE("ENERGY/T3: lossy network only dissipates with dampers engaged", "[ene
     constexpr int kBlocks = 1200; // ~3.2 s at 48 kHz
     constexpr int kExcitationBlocks = 60;
     constexpr double kRelativeTolerance = 1.0e-6; // absorbs float32 state rounding, per section 4.2
+    // Shared with tests/dsp/NetworkEnergyTierThreeTests.cpp, where it is derived; restated as a
+    // local constant rather than exported because the two suites gate different scenarios and a
+    // shared symbol would invite one of them to move it for the other's sake.
+    constexpr double kMeasurementFloor = 1.0e-40;
 
     auto run = [](bool engageDampers) {
         StringNetworkParams params;
@@ -747,6 +767,17 @@ TEST_CASE("ENERGY/T3: lossy network only dissipates with dampers engaged", "[ene
 
         std::vector<double> energies;
         energies.reserve(static_cast<std::size_t>(kBlocks));
+        // THE SHIPPING CONFIGURATION (added at Task P2.4). This case measures the float32 path, and
+        // the float32 path has run under ScopedFtzDazGuard since Task P1.1 -- PluginProcessor's
+        // processBlock constructs one first. It did not matter while the strings were UNCOUPLED:
+        // an engaged damper took every string to the silence watchdog's floor and the state was
+        // cleared outright. Bidirectional coupling (P2.4) gives the decay a long subnormal tail
+        // instead -- the bridge resonator keeps re-driving damped strings out of its own residual --
+        // and scoring energyEstimate() on subnormal float32 state measured "growth" of 0.58 at total
+        // energies around 1e-87, i.e. -870 dBFS. See the header of
+        // tests/dsp/NetworkEnergyTierThreeTests.cpp for the diagnosis and the standing case that
+        // pins it (the identical scenario on the double instantiation is clean).
+        const cnpg::dsp::ScopedFtzDazGuard denormalGuard;
         for (int b = 0; b < kBlocks; ++b) {
             if (engageDampers && b == kExcitationBlocks) {
                 BlockEventQueue offs;
@@ -769,9 +800,24 @@ TEST_CASE("ENERGY/T3: lossy network only dissipates with dampers engaged", "[ene
 
         double worstGrowth = 0.0;
         std::size_t worstAt = 0;
+        double worstBelowFloor = 0.0;
+        double lowestGated = energies.front();
         for (std::size_t k = 1; k < energies.size(); ++k) {
             const double previous = energies[k - 1];
-            const double growth = (previous > 0.0) ? (energies[k] / previous - 1.0) : 0.0;
+            if (!(previous > 0.0))
+                continue;
+            const double growth = energies[k] / previous - 1.0;
+            // The float32 measurement floor (Task P2.4). Below it the shipping FTZ/DAZ guard is
+            // flushing the recursions' own intermediate products, so energyEstimate() stops being
+            // a measurement -- the derivation, the margin and the double-precision control are in
+            // the header of tests/dsp/NetworkEnergyTierThreeTests.cpp. This case never went near
+            // the floor while the strings were uncoupled; P2.4's bridge is what gave the engaged
+            // decay a tail long enough to reach it.
+            if (previous < kMeasurementFloor) {
+                worstBelowFloor = std::max(worstBelowFloor, growth);
+                continue;
+            }
+            lowestGated = std::min(lowestGated, previous);
             if (growth > worstGrowth) {
                 worstGrowth = growth;
                 worstAt = k;
@@ -780,7 +826,9 @@ TEST_CASE("ENERGY/T3: lossy network only dissipates with dampers engaged", "[ene
 
         std::cout << "[energy] T3 " << (engageDampers ? "dampers engaged" : "dampers idle")
                   << ": worst per-block growth " << worstGrowth << " at block " << worstAt << " (limit "
-                  << kRelativeTolerance << "), start " << energies.front() << " -> end " << energies.back() << "\n";
+                  << kRelativeTolerance << "), start " << energies.front() << " -> end " << energies.back()
+                  << "; gated down to " << lowestGated << ", worst growth below the float32 measurement floor "
+                  << worstBelowFloor << "\n";
 
         INFO((engageDampers ? "dampers engaged" : "dampers idle")
              << ": worst growth " << worstGrowth << " at block " << worstAt);

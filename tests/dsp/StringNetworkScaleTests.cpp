@@ -51,6 +51,12 @@ NoteEvent noteOn(int sampleOffset, int midiNote, int stringIndex, float velocity
 StringNetworkParams defaultParams() {
     StringNetworkParams params;
     params.pickupPosition01 = kPickup;
+    // DECOUPLED BRIDGE (Task P2.4) -- same scoping decision as tests/dsp/StringNetworkTests.cpp.
+    // This file is the N = 1..8 SCALE-OUT's contracts: the trip count, the deferred reduction, the
+    // enable ramp, per-string parameters. "The readmitted string arrives silent" is a statement
+    // about the count change, and under bidirectional coupling a silent string is exactly what the
+    // bridge rings. Cases that DO want the coupling set it explicitly.
+    params.bridge.couplingStrength = 0.0f;
     return params;
 }
 
@@ -414,6 +420,17 @@ TEST_CASE("TUNING: a per-string tuning offset detunes exactly one string of a un
     // samples starting 0.5 s after the pluck, Blackman-Harris window, x4 zero pad, parabolic peak
     // refinement, peak search restricted to +/-80 cents around each string's OWN nominal so the
     // detuned string cannot be measured against its neighbour's fundamental.
+    //
+    // MEASURED WITH THE BRIDGE DECOUPLED, and that is a statement about what the criterion means
+    // rather than a convenience (Task P2.4). "String 1's f0" is a well-posed quantity only while
+    // the strings are independent oscillators. Once the bridge couples them they are ONE system
+    // with two normal modes, both of which appear in BOTH taps, and the estimator -- which returns
+    // the strongest peak in its window -- then reports the same frequency for both channels
+    // whatever the per-string offset is. Measured at the shipping default that is exactly what
+    // happens: both taps read 111.30 Hz for a pair nominally at 110.00 and 111.60. Nothing is
+    // broken there; the criterion's question has simply stopped being about one string. The
+    // coupled behaviour is measured on its own terms in tests/dsp/CoupledStringsTests.cpp (beating,
+    // sympathetic response, two-stage decay) and reported at the end of this case.
     constexpr int kMidiNote = 45;
     constexpr float kOffsetCents = 25.0f;
     constexpr double kToleranceCents = 2.0;
@@ -429,6 +446,7 @@ TEST_CASE("TUNING: a per-string tuning offset detunes exactly one string of a un
     params.stringMaterial.lossGainHigh = 1.0f;
     params.exciter.noiseAmount = 0.0f;
     params.perString[1].tuningOffsetCents = kOffsetCents;
+    params.bridge.couplingStrength = 0.0f; // see the note above
 
     StringNetwork<float> network;
     configure(network, params, 2);
@@ -483,6 +501,40 @@ TEST_CASE("TUNING: a per-string tuning offset detunes exactly one string of a un
     const double plainErrorCents = cnpg::test::centsBetween(plainHz, nominalHz);
     INFO("unoffset string measured " << plainErrorCents << " cents from nominal");
     REQUIRE(std::fabs(plainErrorCents) <= kToleranceCents);
+
+    // REPORTED, not gated: the same render at the shipping coupling, so the note at the top of this
+    // case is a measurement rather than an assertion about something nobody looked at.
+    StringNetworkParams coupledParams = params;
+    coupledParams.bridge.couplingStrength = StringNetworkParams{}.bridge.couplingStrength;
+    StringNetwork<float> coupled;
+    configure(coupled, coupledParams, 2);
+    BlockEventQueue coupledEvents;
+    coupledEvents.push(noteOn(0, kMidiNote, 0));
+    coupledEvents.push(noteOn(0, kMidiNote, 1));
+    std::vector<double> coupledA;
+    std::vector<double> coupledB;
+    std::size_t coupledRendered = 0;
+    while (coupledRendered < totalSamples && coupledA.size() < kAnalysisLength) {
+        coupled.process(coupledEvents, kBlock);
+        const float* a = coupled.tapBuffers().channel(0, 0);
+        const float* b = coupled.tapBuffers().channel(1, 0);
+        for (int n = 0; n < kBlock; ++n, ++coupledRendered) {
+            if (coupledRendered < discard || coupledA.size() >= kAnalysisLength)
+                continue;
+            coupledA.push_back(static_cast<double>(a[n]));
+            coupledB.push_back(static_cast<double>(b[n]));
+        }
+    }
+    const double coupledAHz = cnpg::test::findPeakHz(cnpg::test::computeSpectrum(coupledA, kRate, kAnalysisLength),
+                                                     nominalHz, cnpg::test::kTuningSearchCents);
+    const double coupledBHz = cnpg::test::findPeakHz(cnpg::test::computeSpectrum(coupledB, kRate, kAnalysisLength),
+                                                     detunedNominalHz, cnpg::test::kTuningSearchCents);
+    std::cout << "[tuning] the same pair at the shipping couplingStrength " << coupledParams.bridge.couplingStrength
+              << ": string 0 tap peaks at " << coupledAHz << " Hz, string 1 tap at " << coupledBHz << " Hz (nominals "
+              << nominalHz << " / " << detunedNominalHz
+              << ") -- one coupled system with shared normal modes, which is why the gate above runs decoupled\n";
+    REQUIRE(coupledAHz > 0.0);
+    REQUIRE(coupledBHz > 0.0);
 }
 
 // ---------------------------------------------------------------------------------------------

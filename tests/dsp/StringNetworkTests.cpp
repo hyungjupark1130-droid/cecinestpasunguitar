@@ -60,6 +60,16 @@ NoteEvent noteOff(int sampleOffset, int midiNote, int stringIndex = 0) {
 StringNetworkParams defaultParams() {
     StringNetworkParams params;
     params.pickupPosition01 = kPickup;
+    // DECOUPLED BRIDGE (Task P2.4). The cases in this file are the network's LIFECYCLE and
+    // ADDRESSING contracts -- event offsets, reset completeness, retrigger semantics, the SoA
+    // boundary, the enable ramp -- and several of them state their claim as "bit-identical to a
+    // fresh instance" or "an untriggered string's channel is all zeros". Bidirectional coupling
+    // makes both false OF THE INSTRUMENT while leaving them true of the machinery: the junction is
+    // state that a string clear does not touch, and an untriggered string is exactly what
+    // sympathetic resonance rings. Decoupling here keeps these cases measuring what they are named
+    // for; the coupled behaviour has its own gates (tests/dsp/CoupledStringsTests.cpp) and its own
+    // cases in the bridge-seam section at the end of this file, which set the coupling explicitly.
+    params.bridge.couplingStrength = 0.0f;
     return params;
 }
 
@@ -98,10 +108,12 @@ template <typename SampleT> SampleT peakOf(const std::vector<SampleT>& samples) 
     return peak;
 }
 
-// An IBridgePort that records everything it is handed. bridgeOutput() deliberately returns a
-// non-zero signal (the summed incident waves) so the bridge-buffer plumbing is testable before
-// BridgeJunction exists, and scatter() returns a deliberately absurd reflection so P1's "the
-// port's outgoing waves are not routed back into the strings" boundary is observable.
+// An IBridgePort that records everything it is handed. bridgeOutput() returns the summed incident
+// waves so the bridge-buffer plumbing is observable, and scatter() returns a PASSIVE-but-distinctive
+// reflection (the rigid -1 with the port index folded in) so a test can tell whether the network
+// really routed this port's outgoing waves back into the strings. From Task P2.4 it does -- the
+// coupling is bidirectional -- so a port that reflected nonsense would now genuinely explode, which
+// is why this one no longer does.
 class RecordingPort final : public cnpg::dsp::IBridgePort<float> {
   public:
     void prepare(double sampleRate, int maxBlockSize, int numPorts, const float* portImpedances) override {
@@ -118,26 +130,41 @@ class RecordingPort final : public cnpg::dsp::IBridgePort<float> {
         float sum = 0.0f;
         for (int port = 0; port < numPorts; ++port) {
             sum += incident[port];
-            // Deliberately absurd: nothing physical reflects like this. If P1 routed the port's
-            // outgoing waves back into the strings, the render would explode.
-            outgoing[port] = 17.0f * incident[port] + 1.0f;
+            // A rigid reflection scaled by a strictly contractive per-port factor: passive (so the
+            // render stays bounded), and distinguishable from what BridgeJunction would have
+            // returned (so "the substituted port is the one being used" is observable).
+            outgoing[port] = -0.5f * incident[port];
         }
         lastSum = sum;
+        scatterCalls++;
         incidentLog.push_back(numPorts > 0 ? incident[0] : 0.0f);
+        outgoingLog.push_back(numPorts > 0 ? outgoing[0] : 0.0f);
+        lastPorts = numPorts;
     }
 
     float bridgeOutput() const noexcept override { return lastSum; }
     void setLossBypassed(bool bypass) noexcept override { lossBypassed = bypass; }
+    void setAdmittance(const cnpg::dsp::BridgeAdmittanceParams& p) noexcept override {
+        admittanceCalls++;
+        lastAdmittance = p;
+    }
+    bool isQuiescent() const noexcept override { return true; } // memoryless
+    cnpg::dsp::Sample64 storageEnergy() const noexcept override { return 0.0; }
 
     int prepareCalls = 0;
     int resetCalls = 0;
+    int scatterCalls = 0;
+    int admittanceCalls = 0;
     int preparedPorts = 0;
+    int lastPorts = 0;
     double preparedRate = 0.0;
     int preparedBlockSize = 0;
     float impedanceOfPort0 = -1.0f;
     bool lossBypassed = false;
     float lastSum = 0.0f;
+    cnpg::dsp::BridgeAdmittanceParams lastAdmittance{};
     std::vector<float> incidentLog;
+    std::vector<float> outgoingLog;
 };
 
 } // namespace
@@ -358,22 +385,24 @@ TEST_CASE("CONTRACT: StringNetwork reset is idempotent and complete", "[contract
 
 TEST_CASE("CONTRACT: StringNetwork renders the isolated string bit-exactly", "[contract]") {
     // The [tuning] gate (docs/plan.md section 4.5, +/-2 cents) and the [regression] goldens both
-    // measure a note rendered through this topology. The network wraps the string in an exciter,
-    // a permanently in-line DamperJunction and a bridge port whose reflection is not routed back,
-    // and none of that may move a sample -- if it did, every cent measured on the isolated string
-    // would stop applying to the shipping path. Asserted at both bend extremes, since the bend
-    // reaches the string through StringNetwork's own parameter plumbing.
+    // measure a note rendered through this topology, so what the network adds around the string has
+    // to be exactly accountable. Through P2.3 it added NOTHING: an exciter, a transparent damper
+    // seam that deposits the difference (which is 0.0f at engagement 0), and a bridge port whose
+    // reflection was discarded -- so the network's tap was bit-identical to an isolated string
+    // driven by hand.
     //
-    // THIS COMMENT USED TO SAY the identity would legitimately end at Task P2.2, when the damper
-    // went into the loop. It did not, and the reason is worth recording rather than quietly
-    // deleting: WaveguideString::writeJunctionOutputs deposits only the DIFFERENCE between the
-    // junction's outputs and the waves it just read, and DamperJunction::scatter() at engagement 0
-    // returns those waves bit-for-bit (g = R/(R+2) is exactly +0 at R = 0), so the deposit is
-    // exactly 0.0f. The seam does all its interpolation on every sample of every string and then
-    // adds nothing. So the P1 identity survives P2.2 unchanged, the tuning gate did not need
-    // re-pointing, and the goldens did not need regenerating.
-    // tests/dsp/DamperEnergyTests.cpp measures the same claim over 3 s with the layer-(a) feature
-    // invariants; this case is the bit-exact version of it across kinds, bends and notes.
+    // TASK P2.4 CHANGES WHAT "NOTHING" MEANS, and the change is the task. The port's reflection is
+    // now routed back, so the string terminates on the bridge instead of on its own internal rigid
+    // -1: one sample later (the gather/scatter/accept ordering) and through the load's own
+    // reflectance instead of through -1. Both differences are REAL PHYSICS and neither is an
+    // accident, so the identity is re-pointed rather than deleted -- the reference below is an
+    // isolated string driven through the SAME rigid reflection at the SAME one-sample offset, at
+    // couplingStrength 0, and the two must still agree bit-for-bit. What that pins is everything
+    // except the load: the seam's ordering, the loop-length compensation, the enable gain, the
+    // damper seam, the exciter, and the tap read.
+    //
+    // The load's own effect is then measured where it belongs -- tests/dsp/CoupledStringsTests.cpp
+    // for what it does musically, tests/dsp/BridgePortContractTests.cpp for what it costs in cents.
     constexpr int kBlocks = 200;
 
     for (FractionalDelayKind kind : {FractionalDelayKind::Lagrange3, FractionalDelayKind::Thiran1}) {
@@ -382,12 +411,14 @@ TEST_CASE("CONTRACT: StringNetwork renders the isolated string bit-exactly", "[c
                 StringNetworkParams params = defaultParams();
                 params.pitchBendSemitones = bend;
                 params.exciter.noiseAmount = 0.25f;
+                params.bridge.couplingStrength = 0.0f; // the rigid limit, so the LOAD is out of it
 
                 StringNetwork<float> network;
                 configure(network, params, kRate, kBlock, kind);
                 BlockEventQueue events;
                 events.push(noteOn(0, note));
                 const std::vector<float> viaNetwork = renderTap(network, events, kBlocks);
+                REQUIRE(network.unbridgedTicks() == 0);
 
                 WaveguideString<float> string;
                 string.prepare(kRate, kBlock, kind);
@@ -396,6 +427,9 @@ TEST_CASE("CONTRACT: StringNetwork renders the isolated string bit-exactly", "[c
                 stringParams.bendSemitones = bend;
                 string.setParams(stringParams);
                 string.setAnalyticTuningCompensation(0.0f);
+                // The same topology declaration the network makes for its own strings: one sample
+                // of seam, paid back by the loop-length solve.
+                string.setBridgePortDriven(true);
                 string.reset();
 
                 PluckExciter<float> exciter;
@@ -405,12 +439,19 @@ TEST_CASE("CONTRACT: StringNetwork renders the isolated string bit-exactly", "[c
                 exciter.setParams(exciterParams);
                 exciter.trigger(0.8f, kPluckPosition, 0.5f);
 
+                cnpg::dsp::RigidBridgeTermination<float> rigid;
+                rigid.prepare(kRate, kBlock, 1, nullptr);
+
                 std::vector<float> direct(viaNetwork.size());
                 for (std::size_t n = 0; n < direct.size(); ++n) {
                     const float excitation = exciter.renderSample();
                     if (excitation != 0.0f)
                         string.injectAt(exciter.latchedPosition01(), excitation);
                     direct[n] = string.readTapAt(kPickup);
+                    const float incident = string.railOutgoingAtBridge();
+                    float reflected = 0.0f;
+                    rigid.scatter(&incident, &reflected, 1);
+                    string.railAcceptFromBridge(reflected);
                     string.tick();
                 }
 
@@ -713,36 +754,59 @@ TEST_CASE("CONTRACT: StringNetwork smooths the pickup position per sample", "[co
 // bridge port seam
 // ---------------------------------------------------------------------------------------------
 
-TEST_CASE("CONTRACT: StringNetwork drives the bridge port but keeps P1's internal termination", "[contract]") {
-    // The P1 boundary, stated as a test: the port SEES every string's outgoing bridge wave and
-    // its bridgeOutput() fills bridgeOutputBuffer(), but its reflected waves are not routed back
-    // into the strings, because that insertion costs one extra sample of loop and the loop-length
-    // term that subtracts it again is BridgeJunction's (P2.4). A port returning a deliberately
-    // absurd reflection must therefore not move a single audio sample in P1.
+TEST_CASE("CONTRACT: StringNetwork drives the bridge port and routes its reflection back", "[contract]") {
+    // THE P1 BOUNDARY, MOVED (Task P2.4). Through P2.3 this case asserted the opposite of what it
+    // asserts now: the port was driven but its reflected waves were DISCARDED, because routing them
+    // back costs one extra sample of loop and the loop-length term that subtracts it again was this
+    // task's work. Both halves have now landed (WaveguideString::setBridgePortDriven), so the
+    // claim under test is the completed one -- the port is prepared, driven, and its reflection is
+    // what the strings terminate on.
+    //
+    // The case is kept HERE, on a substituted port, rather than folded into
+    // tests/dsp/BridgePortContractTests.cpp: what it measures is StringNetwork's plumbing (prepare
+    // arity, impedances, admittance forwarding, lossless forwarding, buffer fill), not the
+    // junction's physics.
     RecordingPort port;
 
+    StringNetworkParams params = defaultParams();
+    params.bridge.resonanceHz = 321.0f;
+    params.bridge.damping = 0.75f;
+    params.bridge.couplingStrength = 0.42f;
+
     StringNetwork<float> network;
-    configure(network, defaultParams());
+    configure(network, params);
     network.setBridgePort(port);
     REQUIRE(port.prepareCalls == 1);
     REQUIRE(port.preparedPorts == cnpg::dsp::kMaxStrings); // prepared for capacity, not the count
     REQUIRE(port.preparedRate == kRate);
     REQUIRE(port.preparedBlockSize == kBlock);
     REQUIRE(port.impedanceOfPort0 == 1.0f);
+    // StringNetworkParams carries the admittance (docs/plan.md section 2.7) and it must REACH the
+    // port, whichever implementation the port is -- which is why setAdmittance is on IBridgePort.
+    REQUIRE(port.admittanceCalls >= 1);
+    REQUIRE(port.lastAdmittance.resonanceHz == 321.0f);
+    REQUIRE(port.lastAdmittance.damping == 0.75f);
+    REQUIRE(port.lastAdmittance.couplingStrength == 0.42f);
 
     BlockEventQueue events;
     events.push(noteOn(0, kMidiNote));
     const std::vector<float> withPort = renderTap(network, events, 40);
 
     StringNetwork<float> reference;
-    configure(reference, defaultParams());
+    configure(reference, params);
     BlockEventQueue referenceEvents;
     referenceEvents.push(noteOn(0, kMidiNote));
-    const std::vector<float> withInternalTermination = renderTap(reference, referenceEvents, 40);
+    const std::vector<float> withInternalJunction = renderTap(reference, referenceEvents, 40);
 
     REQUIRE(peakOf(withPort) > 0.001f);
-    for (std::size_t i = 0; i < withPort.size(); ++i)
-        REQUIRE(withPort[i] == withInternalTermination[i]);
+    // The substituted port's reflection really is what the string terminates on: a port reflecting
+    // -0.5 instead of the loaded junction's own coefficient must change the render. Through P2.3
+    // this loop asserted equality, and that was the boundary this task removed.
+    bool differs = false;
+    for (std::size_t i = 0; i < withPort.size() && !differs; ++i)
+        differs = (withPort[i] != withInternalJunction[i]);
+    REQUIRE(differs);
+    REQUIRE(network.unbridgedTicks() == 0); // ...and no tick quietly fell back to the internal -1
 
     // The port is genuinely driven, not merely held: it saw non-zero incident waves...
     REQUIRE(port.incidentLog.size() == withPort.size());
@@ -750,6 +814,7 @@ TEST_CASE("CONTRACT: StringNetwork drives the bridge port but keeps P1's interna
     for (float value : port.incidentLog)
         sawIncident |= (value != 0.0f);
     REQUIRE(sawIncident);
+    REQUIRE(port.lastPorts == 1); // exactly the strings in the loop, not the preallocated capacity
 
     // ...and its bridgeOutput() is what lands in bridgeOutputBuffer().
     const float* bridge = network.bridgeOutputBuffer();
@@ -762,9 +827,8 @@ TEST_CASE("CONTRACT: StringNetwork drives the bridge port but keeps P1's interna
     network.setLosslessTestMode(false);
     REQUIRE_FALSE(port.lossBypassed);
 
-    // The other half of the P1 boundary argument: discarding the trivial termination's reflection
-    // discards nothing, because it IS the reflection WaveguideString::tick() applies internally
-    // (-1 per port, no port seeing any other). Asserted on the shipping termination directly.
+    // The trivial termination still is what it says it is -- it is the couplingStrength == 0 limit
+    // of BridgeJunction and the object tests/dsp/BridgePortContractTests.cpp compares against.
     cnpg::dsp::RigidBridgeTermination<float> rigid;
     rigid.prepare(kRate, kBlock, 3, nullptr);
     const float incident[3] = {0.25f, -1.5f, 7.0f};
@@ -775,22 +839,31 @@ TEST_CASE("CONTRACT: StringNetwork drives the bridge port but keeps P1's interna
     REQUIRE(rigid.bridgeOutput() == 0.0f);
 }
 
-TEST_CASE("CONTRACT: StringNetwork's P1 bridge output is identically zero", "[contract]") {
-    // The rigid termination carries no load, so there is no load velocity to feed a body node:
-    // bridgeOutput() is 0 by construction (IBridgePort.h). Asserted rather than assumed, because
-    // docs/plan.md section 4.3 captures bridgeOutputBuffer() as a golden channel and this is the
-    // reason P1's goldens do not -- a 3 s run of zeros per scenario is not a reference.
-    StringNetwork<float> network;
-    configure(network, defaultParams());
-    BlockEventQueue events;
-    events.push(noteOn(0, kMidiNote));
+TEST_CASE("CONTRACT: StringNetwork's bridge output is zero exactly when the load is decoupled", "[contract]") {
+    // docs/plan.md section 2.6 gives couplingStrength == 0 the contract "strings fully decoupled AND
+    // bridgeOutput() == 0", and carry-forward B2 is the reason that is no longer the default: at 0
+    // this signal is a silent kill switch for every later body/chamber/pickup-feed feature. Both
+    // halves are asserted here so the default can never drift back to 0 without something failing.
+    auto renderBridge = [](float coupling) {
+        StringNetworkParams params = defaultParams();
+        params.bridge.couplingStrength = coupling;
+        StringNetwork<float> network;
+        configure(network, params);
+        BlockEventQueue events;
+        events.push(noteOn(0, kMidiNote));
+        float peak = 0.0f;
+        for (int b = 0; b < 200; ++b) {
+            network.process(events, kBlock);
+            for (int n = 0; n < kBlock; ++n)
+                peak = std::max(peak, std::fabs(network.bridgeOutputBuffer()[n]));
+        }
+        REQUIRE(network.energyEstimate() > 0.0); // the string really was ringing throughout
+        return peak;
+    };
 
-    for (int b = 0; b < 200; ++b) {
-        network.process(events, kBlock);
-        for (int n = 0; n < kBlock; ++n)
-            REQUIRE(network.bridgeOutputBuffer()[n] == 0.0f);
-    }
-    REQUIRE(network.energyEstimate() > 0.0); // the string really was ringing throughout
+    REQUIRE(renderBridge(0.0f) == 0.0f);
+    REQUIRE(renderBridge(StringNetworkParams{}.bridge.couplingStrength) > 0.0f);
+    REQUIRE(StringNetworkParams{}.bridge.couplingStrength > 0.0f); // ADR 0004 amendment 3, closed
 }
 
 TEST_CASE("CONTRACT: StringNetwork injectFeedback is audibly inert in P1", "[contract]") {

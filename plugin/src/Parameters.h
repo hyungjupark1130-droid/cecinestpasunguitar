@@ -72,6 +72,18 @@ inline constexpr const char* damperPosition01 = "damperPosition01";
 inline constexpr const char* damperMaxLoss = "damperMaxLoss";
 inline constexpr const char* damperFeltTimeMs = "damperFeltTimeMs";
 
+// Bridge (cnpg::dsp::BridgeAdmittanceParams, nested under StringNetworkParams::bridge). Task P2.4.
+// These three are the load every string terminates on, so they are the controls of how much of one
+// string reaches the others -- not an effect on top of the strings but a property of the instrument
+// they are all attached to. `bridgeCoupling` is the continuum ADR 0004 asks the later "chamber" to
+// ride on; its shipping default is nonzero and measured (docs/decisions/0006). Smoothed per sample
+// inside BridgeJunction, which is what makes them automatable without the exposure Task P2.2
+// created for damperPosition01 and Task P2.3 had to close.
+// The state version stays 2 (it stays 2 through all of P2, per Task P2.1).
+inline constexpr const char* bridgeCoupling = "bridgeCoupling";
+inline constexpr const char* bridgeResonanceHz = "bridgeResonanceHz";
+inline constexpr const char* bridgeDamping = "bridgeDamping";
+
 // Global (cnpg::dsp::RetriggerMode, nested under StringNetworkParams::retriggerMode)
 inline constexpr const char* retriggerMode = "retriggerMode";
 
@@ -148,6 +160,10 @@ struct RawParameterPointers {
     std::atomic<float>* damperPosition01 = nullptr;
     std::atomic<float>* damperMaxLoss = nullptr;
     std::atomic<float>* damperFeltTimeMs = nullptr;
+
+    std::atomic<float>* bridgeCoupling = nullptr;
+    std::atomic<float>* bridgeResonanceHz = nullptr;
+    std::atomic<float>* bridgeDamping = nullptr;
 
     std::atomic<float>* retriggerMode = nullptr;
 

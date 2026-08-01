@@ -75,6 +75,12 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
         exciters_[static_cast<std::size_t>(s)].prepare(sampleRate_, maxBlockSize_);
         dampers_[static_cast<std::size_t>(s)].prepare(sampleRate_, maxBlockSize_);
         dampers_[static_cast<std::size_t>(s)].setLossBypassed(lossless_);
+        // Every string in this network is terminated by the bridge port, not by its own internal
+        // rigid reflection, so it must solve its loop one sample shorter and count the sample in
+        // flight at the seam (Task P2.4). Declared here, once, for all kMaxStrings strings --
+        // including ones outside the active count, so a later setNumStrings() cannot readmit a
+        // string that is silently a semitone-and-a-bit sharp.
+        strings_[static_cast<std::size_t>(s)].setBridgePortDriven(true);
         midiNote_[static_cast<std::size_t>(s)] = static_cast<std::uint8_t>(kMinMidiNote);
         portImpedance_[static_cast<std::size_t>(s)] = strings_[static_cast<std::size_t>(s)].portImpedance();
     }
@@ -92,9 +98,10 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
     enableRampStep_ = static_cast<float>(1.0 / std::max(1.0, kEnableRampSeconds * sampleRate_));
 
     if (port_ == nullptr)
-        port_ = &internalPort_;
+        port_ = &internalBridge_;
     port_->prepare(sampleRate_, maxBlockSize_, kMaxStrings, portImpedance_.data());
     port_->setLossBypassed(lossless_);
+    port_->setAdmittance(params_.bridge);
 
     for (int s = 0; s < kMaxStrings; ++s)
         applyStringParams(s);
@@ -118,9 +125,11 @@ template <typename SampleT> void StringNetwork<SampleT>::reset() noexcept {
         }
         sounding_[static_cast<std::size_t>(s)] = false;
         releasing_[static_cast<std::size_t>(s)] = false;
+        ringing_[static_cast<std::size_t>(s)] = false;
         portIncident_[static_cast<std::size_t>(s)] = SampleT(0);
         portOutgoing_[static_cast<std::size_t>(s)] = SampleT(0);
     }
+    previousRenderedMask_ = 0;
 
     std::fill(tapStorage_.begin(), tapStorage_.end(), SampleT(0));
     std::fill(bridgeBuffer_.begin(), bridgeBuffer_.end(), SampleT(0));
@@ -194,18 +203,29 @@ template <typename SampleT> void StringNetwork<SampleT>::setParams(const StringN
     refreshEnableTargets();
     for (int s = 0; s < kMaxStrings; ++s)
         applyStringParams(s);
+    // The bridge admittance travels on StringNetworkParams (docs/plan.md section 2.7) and reaches
+    // whatever port is attached through IBridgePort::setAdmittance, which is why that method is on
+    // the interface rather than only on BridgeJunction: this call site cannot know which
+    // implementation it is holding, and must not have to.
+    if (port_ != nullptr)
+        port_->setAdmittance(params_.bridge);
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::setBridgePort(IBridgePort<SampleT>& port) noexcept {
     port_ = &port;
     port_->prepare(sampleRate_, maxBlockSize_, kMaxStrings, portImpedance_.data());
     port_->setLossBypassed(lossless_);
+    port_->setAdmittance(params_.bridge);
     port_->reset();
 }
 
 template <typename SampleT> bool StringNetwork<SampleT>::stringHasState(int stringIndex) const noexcept {
     const auto index = static_cast<std::size_t>(stringIndex);
-    if (sounding_[index] || releasing_[index])
+    // ringing_ is here for Task P2.4's sake: a string driven purely through the bridge is neither
+    // sounding nor releasing and its exciter is idle, yet it is emphatically not silent, and every
+    // caller of this helper (the enable-ramp snap, the position-smoother snap) is asking exactly
+    // "would a discontinuity here be audible?".
+    if (sounding_[index] || releasing_[index] || ringing_[index])
         return true;
     return !exciters_.empty() && exciters_[index].isActive();
 }
@@ -271,6 +291,9 @@ template <typename SampleT> void StringNetwork<SampleT>::clearStringState(int st
     dampers_[index].reset();
     silencePeak_[index] = 0.0f;
     silenceCount_[index] = 0;
+    // The rails are zero now, so the string carries no motion -- and a stale `ringing_` would keep
+    // it in the loop for ever and keep the whole network from ever reaching quiescence.
+    ringing_[index] = false;
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int stringIndex) noexcept {
@@ -417,9 +440,11 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
     for (int s = 0; s < kMaxStrings; ++s) {
         const auto index = static_cast<std::size_t>(s);
         // "Enabled and ringing at some point during this block": seeded from the state the block
-        // starts in, then latched true by any NoteOn the loop consumes. A string whose enable ramp
-        // is on its way UP counts too -- its gain can be exactly 0 at the block boundary and
-        // non-zero one sample later, and marking it inactive would drop that whole block.
+        // starts in, then latched true by any NoteOn the loop consumes and by any non-zero tap
+        // sample the loop writes (see the end of process(), and why that latch is load-bearing
+        // under bidirectional coupling). A string whose enable ramp is on its way UP counts too:
+        // its gain can be exactly 0 at the block boundary and non-zero one sample later, and
+        // marking it inactive would drop that whole block.
         tapView_.active_[index] = s < loopStrings_ && (sounding_[index] || releasing_[index]) &&
                                   (enableGain_[index] > 0.0f || enableTarget_[index] > 0.0f);
     }
@@ -440,6 +465,14 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
     // not have to recompute the predicate. process() is only ever entered with count > 0 on a
     // prepared instance, so indexing strings_/exciters_ inside the loop needs no emptiness guard.
     std::uint32_t renderedMask = 0;
+    // Strings that produced a NON-ZERO tap sample somewhere in this block. This -- not "was
+    // rendered" -- is what the domain boundary's isActive() reports, and the distinction is the
+    // whole of StringTapBuffers' documented contract: "a string that is silent for the whole block
+    // reports false and every one of its channels is all zeros, so a consumer may skip it entirely
+    // rather than summing silence". Under bidirectional coupling the loop legitimately RENDERS
+    // strings that are still silent (it has to, or they could never start), so the two questions
+    // came apart at Task P2.4 and the boundary must answer the one its consumers ask.
+    std::uint32_t blockAudibleMask = 0;
 
     // Block-invariant loads hoisted out of the per-sample loop. handleEvent() is called from inside
     // that loop and the compiler must assume a non-inlined member call can touch any member, so
@@ -466,6 +499,18 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             handleEvent(*event);
             events.pop();
         }
+
+        // CAN THE BRIDGE HAND ENERGY TO A STRING THAT HAS NONE OF ITS OWN THIS SAMPLE? Two ways,
+        // and both have to be asked or the idle-string skip below silently deletes sympathetic
+        // resonance (see the PRECONDITION note there):
+        //   - some string rendered on the PREVIOUS sample, so it fed the junction and the junction
+        //     will scatter that energy across every port this sample; or
+        //   - every string has already fallen silent but the junction's own resonator has not, so
+        //     it is still driving them out of its own store.
+        // Written as a network-level question rather than a per-string one because the bridge node
+        // is a single point: if it is moving, it is moving under all of them.
+        const bool bridgeMayDrive = (previousRenderedMask_ != 0u) || !port_->isQuiescent();
+
         renderedMask = 0;
 
         // Per-sample smoothed fractional pickup taps (docs/plan.md Task P1.5 step 3), now one
@@ -515,25 +560,33 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             // loop length while doing it. Skipping is bit-identical, and it is what keeps eight
             // preallocated strings from costing eight strings' CPU when two are being played.
             //
-            // ---- PRECONDITION, and the task that invalidates it -------------------------------
-            // This predicate is complete ONLY because nothing outside this loop can put energy into
-            // a string's rails. Today that holds: injectFeedback() is a documented no-op until P4,
-            // and railAcceptFromBridge() is declared but never called -- the port is driven, its
-            // reflected waves are discarded (see setBridgePort()).
+            // ---- THE PRECONDITION THAT TASK P2.4 PAID -----------------------------------------
+            // Through P2.3 this predicate read only the string's own state, and it was complete
+            // ONLY because nothing outside this loop could put energy into a string's rails: the
+            // port was driven but its reflected waves were discarded, and injectFeedback() is a
+            // documented no-op until P4. P2.1 wrote the warning here, naming this task.
             //
-            // Task P2.4 ENDS THAT. Wiring the port's reflected waves back into the strings is
-            // exactly what makes body coupling bidirectional, and bidirectional coupling means a
-            // string that is not sounding can receive energy through the bridge from one that is.
-            // That is not an edge case -- it IS sympathetic resonance, the whole point of the
-            // feature. On that day this predicate silently kills it: the string receiving bridge
-            // energy reports no state, gets skipped, is never ticked, and the energy vanishes with
-            // no test failing and no sound to notice, because the "before" is also silence.
+            // Wiring the port's reflected waves back in is what makes body coupling bidirectional,
+            // and bidirectional coupling means a string that is not sounding can receive energy
+            // through the bridge from one that is. That is not an edge case -- it IS sympathetic
+            // resonance, the whole point of the feature. Left as it was, this predicate would have
+            // killed it in silence: the string receiving bridge energy reports no state of its own,
+            // gets skipped, is never ticked, and the energy vanishes with no test failing and
+            // nothing to hear, because the "before" is also silence. The tempting fix from the
+            // outside would then have been to raise couplingStrength until something leaked
+            // through.
             //
-            // So P2.4 must extend `live` to include pending incident energy at the bridge port
-            // (and P4 the same for injectFeedback), not merely remember to. Written here rather
-            // than only in a plan document because here is where it breaks.
+            // So `live` now has two more terms. `ringing_` is the string's own bridge-driven
+            // motion, latched below and cleared with its state by the silence watchdog.
+            // `bridgeMayDrive` is the network-level question computed once per sample above: it is
+            // what lets a string with EXACTLY zero state be ticked, which is the only way it can
+            // ever acquire any. tests/dsp/CoupledStringsTests.cpp asserts that directly -- a
+            // quiescent string's own stringEnergyEstimate() must rise from exactly 0 with no note
+            // of its own -- rather than inferring it from a level that got louder.
+            // (P4 owes injectFeedback() the same treatment, for the same reason.)
             const bool muted = (gain == 0.0f && gainTarget == 0.0f);
-            const bool live = !muted && (sounding_[index] || releasing_[index] || exciters[index].isActive());
+            const bool live = !muted && (sounding_[index] || releasing_[index] || ringing_[index] ||
+                                         exciters[index].isActive() || bridgeMayDrive);
             if (!live) {
                 for (int t = 0; t < numTaps; ++t)
                     tapBase[(base + static_cast<std::size_t>(t)) * stride + static_cast<std::size_t>(n)] = SampleT(0);
@@ -583,11 +636,29 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
                 // first one's. Every slot carries the same target today, so this moves no sample.
                 const SampleT tap = strings[index].readTapAt(t, static_cast<float>(tapSmoothed_[slot])) * envelope;
                 tapBase[slot * stride + static_cast<std::size_t>(n)] = tap;
+                if (tap != SampleT(0))
+                    blockAudibleMask |= (1u << static_cast<unsigned>(s));
             }
             const SampleT outgoing = strings[index].railOutgoingAtBridge();
+            // B5 (P2.1): a disabled or ramping string presents its bridge incident wave SCALED by
+            // the enable gain, so it reaches exactly zero only once fully muted. The reflection is
+            // scaled by the same gain on the way back (see the accept pass below), which is what
+            // keeps the muting passive: a round trip through the junction is scaled by gain^2 <= 1,
+            // whereas dividing the reflection back out would make a half-muted string an amplifier.
             portIncident_[index] = outgoing * static_cast<SampleT>(gain);
 
-            if (releasing_[index]) {
+            // "This string carries motion", whether or not anyone played it. Latched here because
+            // this is the one place that knows: `outgoing` is the wave leaving the string at the
+            // bridge, and every mode of the string passes through it by construction (which is
+            // also why the watchdog measures it rather than the tap).
+            if (outgoing != SampleT(0))
+                ringing_[index] = true;
+
+            // The silence watchdog now runs for ANY non-sounding string that is in the loop, not
+            // just a releasing one: a sympathetically driven string has to be able to leave the
+            // loop too, or the network never reaches quiescence, energyEstimate() never returns to
+            // zero, and eight strings tick for ever after one note.
+            if (!sounding_[index]) {
                 // Silence watchdog. Measured on the wave leaving the string at the bridge, not on
                 // the tap: the tap can sit on a node of whatever partial is still ringing and
                 // report silence that is not there, whereas every mode circulates through the
@@ -610,16 +681,47 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             }
         }
 
-        // The port sees every string's outgoing bridge wave and publishes the mono bridge signal.
-        // Its reflected waves are not routed back into the strings before P2.4 -- see
-        // setBridgePort().
+        // THE COUPLING (Task P2.4). Every string's outgoing bridge wave in, one shared bridge
+        // velocity and N reflections out. This is the single point at which six strings stop being
+        // six instruments -- and the reason the whole task is one commit rather than six.
         port_->scatter(portIncident_.data(), portOutgoing_.data(), loopStrings);
         bridgeBuffer_[static_cast<std::size_t>(n)] = port_->bridgeOutput();
 
         for (int s = 0; s < loopStrings; ++s)
-            if ((renderedMask & (1u << static_cast<unsigned>(s))) != 0u)
-                strings[static_cast<std::size_t>(s)].tick();
+            if ((renderedMask & (1u << static_cast<unsigned>(s))) != 0u) {
+                const auto index = static_cast<std::size_t>(s);
+                // Handed back UNSCALED, and that is the deliberate choice rather than the obvious
+                // one. B5 says a ramping string "presents its bridge incident wave scaled by the
+                // enable gain" -- one scaling, on the way in -- and one is all passivity needs: the
+                // junction is a contraction on whatever it is given, so ||b|| <= ||g a|| <= ||a||
+                // already. Scaling the reflection as well would square the factor and damp the
+                // string's LOOP twice as hard as its output during a 10 ms mute, which is audible
+                // as level the string never gets back when a count reduction is reversed mid-ramp
+                // (measured: it pushed the P2.1 count-churn click reading from 1.6 dB to 3.7 dB
+                // against a 3 dB gate, with the direct tap-continuity assertion still clean --
+                // i.e. it was lost level, not a discontinuity). One factor of g per round trip is
+                // unavoidable and correct: a string that presents less to the bridge gets less
+                // back.
+                //
+                // Then tick(): the accept is consumed by the very next tick, and a tick that finds
+                // none falls back to the internal rigid -1, which is the silent failure
+                // WaveguideString's liveness counters exist to make loud.
+                strings[index].railAcceptFromBridge(portOutgoing_[index]);
+                strings[index].tick();
+            }
+
+        previousRenderedMask_ = renderedMask;
     }
+
+    // Any string that put a non-zero sample on the boundary was ringing during this block, whatever
+    // its note flags say. This latch is what makes sympathetic resonance survive the boundary: a
+    // bridge-driven string is neither sounding nor releasing, so the seed above reports false for
+    // it, and PickupTap -- which honours isActive() -- would drop its channel and turn the feature
+    // into silence that looks like a tuning problem. tapBuffers() is only read after process()
+    // returns, so writing it here is the same boundary the seed was.
+    for (int s = 0; s < kMaxStrings; ++s)
+        if ((blockAudibleMask & (1u << static_cast<unsigned>(s))) != 0u)
+            tapView_.active_[static_cast<std::size_t>(s)] = true;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -647,6 +749,12 @@ template <typename SampleT> void StringNetwork<SampleT>::setLosslessTestMode(boo
     // structural (see its header), which the tier-1 grid gates independently.
     for (auto& damper : dampers_)
         damper.setLossBypassed(lossless);
+    // ...and the bridge. NOTE the asymmetry with the damper, because it is what makes the tier-2
+    // network case non-vacuous where the damper-motion one was not (docs/plan.md section 4.2,
+    // P2.3 amendment): bypassing the DAMPER's loss makes it transparent, so the element under test
+    // disappears, whereas bypassing the BRIDGE's loss removes only the dashpot and leaves a
+    // lossless mass-spring resonator that still couples every string to every other one. The
+    // coupling -- the thing tier 2 is there to gate -- is fully present in lossless mode.
     if (port_ != nullptr)
         port_->setLossBypassed(lossless);
 }
@@ -662,8 +770,34 @@ template <typename SampleT> Sample64 StringNetwork<SampleT>::energyEstimate() co
     // its state was cleared -- so this is honest without being noisy.
     for (int s = 0; s < kMaxStrings; ++s)
         total += strings_[static_cast<std::size_t>(s)].energyEstimate();
-    // The rigid termination is memoryless, so it stores nothing; the bridge admittance biquad's
-    // storage term joins this sum with BridgeJunction (P2.4).
+    // ...and the junction's own store (Task P2.4). A bridge admittance is a mass and a spring, and
+    // a mass and a spring hold energy: leaving them out would make this functional fluctuate by
+    // however much is currently in the bridge -- which for a resonator sitting where the
+    // instrument's fundamentals are is not a rounding term. It is also the reason IBridgePort has a
+    // storageEnergy(): the network cannot know which implementation it is holding, and a
+    // fallback bus (P2.5) would store energy in different states with a different closed form.
+    if (port_ != nullptr)
+        total += port_->storageEnergy();
+    return total;
+}
+
+template <typename SampleT> Sample64 StringNetwork<SampleT>::stringEnergyEstimate(int stringIndex) const noexcept {
+    if (strings_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0.0;
+    return strings_[static_cast<std::size_t>(stringIndex)].energyEstimate();
+}
+
+template <typename SampleT> unsigned long long StringNetwork<SampleT>::bridgeDrivenTicks() const noexcept {
+    unsigned long long total = 0;
+    for (const auto& string : strings_)
+        total += string.bridgeReflectionTicks();
+    return total;
+}
+
+template <typename SampleT> unsigned long long StringNetwork<SampleT>::unbridgedTicks() const noexcept {
+    unsigned long long total = 0;
+    for (const auto& string : strings_)
+        total += string.internalReflectionTicks();
     return total;
 }
 

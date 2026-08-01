@@ -82,6 +82,25 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
         juce::NormalisableRange<float>(cnpg::dsp::kFeltTimeConstantMinMs, cnpg::dsp::kFeltTimeConstantMaxMs),
         cnpg::dsp::DamperJunctionParams{}.feltTimeConstantMs, juce::AudioParameterFloatAttributes().withLabel("ms")));
 
+    // Bridge (Task P2.4). The three controls of the load every string terminates on, and therefore
+    // of how much of ONE string reaches the others: coupling is the continuum
+    // docs/decisions/0004-phase2-vision-decisions.md asks the later "chamber" to ride on rather
+    // than a toggle, and its default is measured rather than chosen (docs/decisions/0006). Each is
+    // exposed over exactly the window BridgeJunction validates, so the knob cannot ask for a
+    // setting the module refuses -- and the resonance range is expressed against the shipping
+    // design envelope rather than against the Nyquist ceiling, which moves with the sample rate.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::bridgeCoupling), "Bridge Coupling",
+                                                           unitRange,
+                                                           cnpg::dsp::BridgeAdmittanceParams{}.couplingStrength));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        makeParameterID(ID::bridgeResonanceHz), "Bridge Resonance",
+        juce::NormalisableRange<float>(cnpg::dsp::kBridgeMinResonanceHz, 2000.0f, 0.0f, 0.35f),
+        cnpg::dsp::BridgeAdmittanceParams{}.resonanceHz, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        makeParameterID(ID::bridgeDamping), "Bridge Damping",
+        juce::NormalisableRange<float>(cnpg::dsp::kBridgeMinDamping, 4.0f, 0.0f, 0.5f),
+        cnpg::dsp::BridgeAdmittanceParams{}.damping));
+
     // Triode
     layout.add(
         std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::triodeDrive), "Triode Drive", unitRange, 0.5f));
@@ -155,6 +174,10 @@ RawParameterPointers collectRawParameterPointers(const juce::AudioProcessorValue
     params.damperMaxLoss = apvts.getRawParameterValue(ID::damperMaxLoss);
     params.damperFeltTimeMs = apvts.getRawParameterValue(ID::damperFeltTimeMs);
 
+    params.bridgeCoupling = apvts.getRawParameterValue(ID::bridgeCoupling);
+    params.bridgeResonanceHz = apvts.getRawParameterValue(ID::bridgeResonanceHz);
+    params.bridgeDamping = apvts.getRawParameterValue(ID::bridgeDamping);
+
     params.triodeDrive = apvts.getRawParameterValue(ID::triodeDrive);
     params.triodeOutputTrimDb = apvts.getRawParameterValue(ID::triodeOutputTrimDb);
     params.triodeBypass = apvts.getRawParameterValue(ID::triodeBypass);
@@ -194,6 +217,13 @@ Snapshot snapshotParameters(const RawParameterPointers& params) noexcept {
     snapshot.stringNetwork.damperPosition01 = params.damperPosition01->load();
     snapshot.stringNetwork.damper.maxLoss = params.damperMaxLoss->load();
     snapshot.stringNetwork.damper.feltTimeConstantMs = params.damperFeltTimeMs->load();
+
+    // The bridge admittance travels on StringNetworkParams and reaches whatever IBridgePort is
+    // attached through StringNetwork::setParams -- the plugin never touches BridgeJunction
+    // directly, which is what keeps the P2.5 fallback substitutable at the port seam.
+    snapshot.stringNetwork.bridge.couplingStrength = params.bridgeCoupling->load();
+    snapshot.stringNetwork.bridge.resonanceHz = params.bridgeResonanceHz->load();
+    snapshot.stringNetwork.bridge.damping = params.bridgeDamping->load();
     // AudioParameterChoice reports its selected index as a float via getRawParameterValue();
     // index 0 -> Physical, 1 -> Synth (matches the choices list in createParameterLayout()).
     snapshot.stringNetwork.retriggerMode =

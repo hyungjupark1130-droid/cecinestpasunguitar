@@ -264,6 +264,11 @@ template <typename SampleT> void WaveguideString<SampleT>::reset() noexcept {
     bridgeOutgoing_ = SampleT(0);
     bridgeAccepted_ = SampleT(0);
     bridgeAcceptPending_ = false;
+    // The liveness counters are transient state, so reset() clears them: a test that renders,
+    // resets and renders again must not inherit the first render's evidence. bridgePortDriven_ is
+    // a TOPOLOGY declaration and deliberately survives, exactly as lossBypassed_ does.
+    bridgeReflectionTicks_ = 0;
+    internalReflectionTicks_ = 0;
 
     // DISARM every moving-position anchor rather than snap it onto a remembered target. Same
     // contract as the smoothers below -- a reset instance is indistinguishable from a freshly
@@ -346,6 +351,13 @@ template <typename SampleT> void WaveguideString<SampleT>::setLossBypassed(bool 
     updateCoefficients();
 }
 
+template <typename SampleT> void WaveguideString<SampleT>::setBridgePortDriven(bool driven) noexcept {
+    if (driven == bridgePortDriven_)
+        return;
+    bridgePortDriven_ = driven;
+    updateCoefficients(); // the loop is one sample longer (or shorter) from this call on
+}
+
 // ------------------------------------------------------------------------------------------
 // loop-length solve
 // ------------------------------------------------------------------------------------------
@@ -424,8 +436,13 @@ template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() 
     // +1 frame offset, the interpolator's 3-sample reach and the tap that reads one past the
     // bridge.
     const double maxRailSpan = static_cast<double>(up_.size()) - 6.0;
-    const double railSpan =
-        clampd(0.5 * (period - tauDispersion - tauLoss - analyticCorrectionSamples_), kMinRailSpan, maxRailSpan);
+    // The bridge seam's own sample is subtracted here, alongside the filters' phase delays and the
+    // caller's probe offset, because it is exactly the same kind of quantity: loop delay that is
+    // not rail. See setBridgePortDriven() -- StringNetwork's gather/scatter/accept ordering makes
+    // the external reflection arrive one sample late, at every rate and every note.
+    const double seamDelay = bridgePortDriven_ ? kBridgeSeamDelaySamples : 0.0;
+    const double railSpan = clampd(0.5 * (period - tauDispersion - tauLoss - analyticCorrectionSamples_ - seamDelay),
+                                   kMinRailSpan, maxRailSpan);
 
     const bool lagrange = (kind_ == FractionalDelayKind::Lagrange3);
     const double delayMin = lagrange ? kLagrangeDelayMin : kThiranDelayMin;
@@ -477,7 +494,9 @@ template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() 
     // would be written or read after it has already left the loop.
     positionSpan_ = lagrange ? realizedRailSpan_ : std::max(0.0, static_cast<double>(railBase_ - 1));
 
-    realizedLoopDelay_ = 2.0 * realizedRailSpan_ + tauDispersion + tauLoss;
+    // The REALIZED total, seam included, so realizedLoopDelaySamples() still equals fs / f0 to
+    // solver precision whether or not a bridge port is driving the string.
+    realizedLoopDelay_ = 2.0 * realizedRailSpan_ + tauDispersion + tauLoss + seamDelay;
     energyCacheValid_ = false;
 }
 
@@ -753,8 +772,18 @@ template <typename SampleT> void WaveguideString<SampleT>::tick() noexcept {
 
     bridgeOutgoing_ = runLoopChain(toBridge);
 
-    const SampleT bridgeIncoming = bridgeAcceptPending_ ? bridgeAccepted_ : static_cast<SampleT>(-bridgeOutgoing_);
+    // Junction liveness (Task P2.4). The fallback branch is not an error here -- an isolated
+    // WaveguideString is SUPPOSED to terminate itself, and P1 shipped exactly that -- but inside a
+    // StringNetwork with a port attached it means the port did not tick, which degrades the
+    // instrument to six uncoupled strings without failing anything. Counting both branches is what
+    // makes that assertable from outside.
+    const bool accepted = bridgeAcceptPending_;
+    const SampleT bridgeIncoming = accepted ? bridgeAccepted_ : static_cast<SampleT>(-bridgeOutgoing_);
     bridgeAcceptPending_ = false;
+    if (accepted)
+        ++bridgeReflectionTicks_;
+    else
+        ++internalReflectionTicks_;
 
     up_[static_cast<std::size_t>(upWrite_)] = static_cast<SampleT>(-toNut);
     dn_[static_cast<std::size_t>(dnWrite_)] = bridgeIncoming;
@@ -831,8 +860,34 @@ template <typename SampleT> double WaveguideString<SampleT>::energyEstimate() co
     const double ls = static_cast<double>(lossState_);
     stateEnergy += lossStorage_ * ls * ls;
 
+    // THE SEAM REGISTER (Task P2.4). With an external bridge port driving the string, the wave the
+    // loop chain produced on the last tick is sitting in bridgeOutgoing_ waiting to be scattered:
+    // it has left the rails and has not yet arrived anywhere, so it is a state-bearing element of
+    // exactly one sample and it carries exactly one sample's worth of energy. Left out, the tier-2
+    // functional would fluctuate by whatever is in flight -- of order the signal itself, i.e.
+    // ~1e-1 relative against a 1e-9 bound. With the INTERNAL termination it must NOT be counted:
+    // tick() writes it into the down rail in the same call, where the rail sum above already has
+    // it, and adding it here would double-count.
+    if (bridgePortDriven_) {
+        const double inFlight = static_cast<double>(bridgeOutgoing_);
+        stateEnergy += inFlight * inFlight;
+    }
+
     const double impedance = static_cast<double>(portImpedance());
     return (railEnergy + stateEnergy) / (2.0 * impedance);
+}
+
+template <typename SampleT>
+typename WaveguideString<SampleT>::LossStorageProbe WaveguideString<SampleT>::lossStorageProbe() const noexcept {
+    if (!energyCacheValid_)
+        refreshEnergyCache();
+    LossStorageProbe probe;
+    probe.b0 = static_cast<double>(lossB0_);
+    probe.b1 = static_cast<double>(lossB1_);
+    probe.a1 = static_cast<double>(lossA1_);
+    probe.storageWeight = lossStorage_;
+    probe.bypassed = lossBypassed_;
+    return probe;
 }
 
 template class WaveguideString<float>;  // realtime path

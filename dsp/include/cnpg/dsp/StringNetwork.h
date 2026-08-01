@@ -5,6 +5,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "cnpg/dsp/BridgeJunction.h"
 #include "cnpg/dsp/Common.h"
 #include "cnpg/dsp/DamperJunction.h"
 #include "cnpg/dsp/EventQueue.h"
@@ -62,9 +63,16 @@
 //     damper cannot promise that: a point contact at p has exact nodes (p = 0.15 puts one on
 //     partial 20) that it can never touch, so those partials decay on loop loss alone. The
 //     watchdog is therefore a level observation, not a timer -- see kSilenceWindowSeconds below.
-//   - Bridge. The port is driven every sample (it sees the strings' outgoing waves and publishes
-//     bridgeOutput()), but its reflected waves are NOT fed back into the strings before P2.4 --
-//     see setBridgePort() for why that is a deliberate boundary rather than an omission.
+//   - Bridge (P2.4). BIDIRECTIONAL. The network owns a BridgeJunction and runs it as its default
+//     port: every sample it gathers each string's outgoing bridge wave, scatters them through the
+//     junction's loaded N-port, and hands each string back its reflection. That closes the loop
+//     that makes six strings one instrument -- sympathetic resonance, two-stage decay, dead spots
+//     -- and it is what setBridgePort() replaces when P2.5's fallback bus is substituted. Three
+//     consequences worth stating where they bite: the seam adds exactly one sample to every
+//     string's loop (WaveguideString::setBridgePortDriven subtracts it from the tuning solve), a
+//     string with NO state of its own can now be driven purely through the bridge (which is why
+//     the idle-string skip predicate in process() had to grow a bridge term), and the junction's
+//     stored energy is part of energyEstimate()'s storage functional.
 //   - Allocation. Which string a host note lands on is NoteAllocator's decision, and its
 //     multi-string assignment modes are Task P2.6. StringNetwork addresses strings by the
 //     NoteEvent's own stringIndex and does not care where it came from.
@@ -241,20 +249,21 @@ template <typename SampleT> class StringNetwork {
     void setParams(const StringNetworkParams& p) noexcept;
 
     // Message thread. StringNetwork holds exactly one port and cannot tell implementations apart.
-    // The port is prepared for kMaxStrings ports against the impedances the strings publish.
+    // The port is prepared for kMaxStrings ports against the impedances the strings publish, given
+    // the current StringNetworkParams::bridge, and reset.
     //
-    // P1 DRIVES the port every sample -- it is handed the strings' outgoing bridge waves and its
-    // bridgeOutput() fills bridgeOutputBuffer() -- but does NOT feed its reflected waves back
-    // into the strings, because routing the bridge through an external junction inserts one extra
-    // sample into each string's loop, and the loop-length solve that subtracts it again is
-    // BridgeJunction's work (see WaveguideString::railAcceptFromBridge). Doing it now would move
-    // every note off pitch by that sample -- at MIDI 108 / 44.1 kHz, one sample of a 10.5-sample
-    // loop, which is ~160 cents. With P1's rigid termination the reflection the strings apply
-    // internally is bit-identical to what the port returns anyway -- "CONTRACT: StringNetwork
-    // drives the bridge port but keeps P1's internal termination" asserts both halves of that: the
-    // rigid termination's scatter() is exactly -incident, and attaching a port that reflects
-    // nonsense does not move one output sample. So nothing audible is being dropped; P2.4 turns
-    // the feedback on together with the loop-length term that pays for it.
+    // The DEFAULT port is the network's own BridgeJunction, so the shipping topology is coupled
+    // without any caller having to remember to attach anything. That is deliberate: a bridge port
+    // that is absent or not ticked fails OPEN -- the strings fall back to their internal rigid
+    // termination and the instrument still makes sound, just an uncoupled one, with nothing to
+    // hear except the absence of something that was never there. Owning the default removes the
+    // whole failure mode for every caller (plugin, cnpg_bench, cnpg_render, the goldens, the
+    // [tuning] sweep) at once; bridgeDrivenTicks()/unbridgedTicks() below are what assert it for
+    // the case where a caller DOES substitute a port.
+    //
+    // This entry point exists for that substitution: docs/plan.md Q17 designs for the P2.5
+    // fallback by making BridgeJunction and SympatheticResonatorBus share IBridgePort, and this is
+    // the seam the swap happens at.
     void setBridgePort(IBridgePort<SampleT>& port) noexcept;
 
     // Per-block entry point. Realtime-safe: never allocates, locks, throws or performs I/O.
@@ -267,8 +276,12 @@ template <typename SampleT> class StringNetwork {
     // Valid until the next process() call.
     const StringTapBuffers<SampleT>& tapBuffers() const noexcept { return tapView_; }
 
-    // numSamples of mono bridge signal (the body/pickup feed). Identically 0 through P1: the
-    // rigid termination carries no load (see IBridgePort.h).
+    // numSamples of mono bridge signal (the body/pickup feed) -- the bridge point's VELOCITY, which
+    // is what a body node is driven by. Identically 0 only when the load is fully decoupled
+    // (BridgeAdmittanceParams::couplingStrength == 0), which is exactly why that is no longer the
+    // shipping default (docs/decisions/0006). Its LEVEL is physical rather than normalized: a
+    // lightly-coupled bridge moves very little, so this signal sits far below the tap channels and
+    // whatever consumes it is expected to scale it.
     const SampleT* bridgeOutputBuffer() const noexcept { return bridgeBuffer_.data(); }
 
     // P4 feedback-bus seam, declared now and implemented in P4: the power-amp output re-excites
@@ -314,6 +327,34 @@ template <typename SampleT> class StringNetwork {
     float damperEngagement(int stringIndex) const noexcept;
     float damperLossDepth(int stringIndex) const noexcept;
     float damperPosition01(int stringIndex) const noexcept;
+
+    // ---- bridge diagnostics (Task P2.4) --------------------------------------------------------
+
+    // ONE string's contribution to the storage functional. The whole point of bidirectional
+    // coupling is that a string nobody plucked ends up holding energy, and "the tap got louder" is
+    // not evidence of that -- it is satisfied by leakage, by summing the wrong channel, and by a
+    // reference render that was never silent. This is the direct state observation that says the
+    // energy is IN string k. Returns 0 for an out-of-range index. NOT realtime-safe (see
+    // energyEstimate()).
+    Sample64 stringEnergyEstimate(int stringIndex) const noexcept;
+
+    // JUNCTION LIVENESS (carry-forward B4). Summed over every string: ticks whose bridge reflection
+    // came from the attached port, and ticks that fell back to WaveguideString's internal rigid
+    // -1 because no reflection had been supplied. In this network the second number must be ZERO
+    // for every rendered sample -- a nonzero count means the port was mis-wired or did not tick,
+    // which degrades the instrument to uncoupled strings SILENTLY. Cleared by reset().
+    unsigned long long bridgeDrivenTicks() const noexcept;
+    unsigned long long unbridgedTicks() const noexcept;
+
+    // The network's own default BridgeJunction, for tests and for the plugin's parameter surface.
+    // Returns nullptr semantics are avoided deliberately: the network always owns one, whether or
+    // not setBridgePort() has substituted something else for the audio path.
+    BridgeJunction<SampleT>& internalBridgeJunction() noexcept { return internalBridge_; }
+    const BridgeJunction<SampleT>& internalBridgeJunction() const noexcept { return internalBridge_; }
+
+    // The port actually in the loop right now (the internal junction unless setBridgePort()
+    // substituted one). Diagnostics only.
+    const IBridgePort<SampleT>* attachedBridgePort() const noexcept { return port_; }
 
   private:
     void handleEvent(const NoteEvent& event) noexcept;
@@ -401,6 +442,13 @@ template <typename SampleT> class StringNetwork {
     std::array<std::uint8_t, kMaxStrings> midiNote_{};
     std::array<bool, kMaxStrings> sounding_{};
     std::array<bool, kMaxStrings> releasing_{};
+    // "This string carries motion", independent of whether anyone played it (Task P2.4). Under
+    // bidirectional coupling a string can be ringing with no note of its own -- that IS sympathetic
+    // resonance -- and every piece of bookkeeping that used to read (sounding || releasing) as
+    // "has state" would otherwise be wrong about it: the enable-ramp snap, the position-smoother
+    // snap, the loop's own skip predicate and the silence watchdog. Latched by any rendered sample
+    // whose outgoing bridge wave is non-zero, cleared with the string's state by the watchdog.
+    std::array<bool, kMaxStrings> ringing_{};
     std::array<float, kMaxStrings> silencePeak_{};  // windowed peak of the watchdog, while releasing
     std::array<int, kMaxStrings> silenceCount_{};   // samples into the current watchdog window
     std::array<float, kMaxStrings> enableGain_{};   // 0..1, the ramp's current value
@@ -433,7 +481,14 @@ template <typename SampleT> class StringNetwork {
     int silenceWindowSamples_ = 1;
     float enableRampStep_ = 1.0f;
 
-    RigidBridgeTermination<SampleT> internalPort_; // the P1 termination; see setBridgePort()
+    // Which strings the loop rendered on the PREVIOUS sample. A string that rendered fed the
+    // junction, so on the next sample the junction may hand energy to any string -- including one
+    // that has nothing of its own. This is the cheap, exact form of "the bridge node is moving"
+    // that the skip predicate needs; the junction's own isQuiescent() covers the case where every
+    // string has already fallen silent but the bridge resonator has not.
+    std::uint32_t previousRenderedMask_ = 0;
+
+    BridgeJunction<SampleT> internalBridge_; // the shipping default port; see setBridgePort()
     IBridgePort<SampleT>* port_ = nullptr;
 };
 

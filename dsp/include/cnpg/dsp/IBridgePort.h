@@ -2,6 +2,8 @@
 
 #include <type_traits>
 
+#include "cnpg/dsp/Common.h"
+
 // IBridgePort -- see docs/plan.md section 2.6. The single port-level seam shared by the primary
 // bidirectional bridge (BridgeJunction, Task P2.4) and the fallback bus (SympatheticResonatorBus,
 // Task P2.5 only if the passivity timebox triggers): StringNetwork holds exactly one
@@ -20,13 +22,29 @@
 namespace cnpg::dsp {
 
 struct BridgeAdmittanceParams { // tunable positive-real 2nd-order load (P2.4)
-    float resonanceHz = 180.0f; // load resonance
-    float damping = 0.5f;       // >= 0; positive-real constraint enforced at set time (P2.4)
+    // Load resonance. Validated into [kBridgeMinResonanceHz, kBridgeResonanceNyquistFraction * fs]
+    // by BridgeJunction::setAdmittance. 180 Hz is a plausible low body/bridge resonance for a
+    // guitar-shaped thing and sits where the instrument's fundamentals actually are, which is what
+    // makes the coupling audible rather than theoretical.
+    float resonanceHz = 180.0f;
+    // Damping RATIO zeta of that resonance, validated onto a STRICTLY POSITIVE floor
+    // (kBridgeMinDamping) -- the positive-real constraint itself, since zeta = 0 puts the poles on
+    // the imaginary axis and makes Re Y identically zero. 0.5 is Q = 1, i.e. deliberately broad:
+    // a real bridge has many modes and P2 ships one, so a narrow one would couple nothing except
+    // the handful of partials that happened to land on it.
+    float damping = 0.5f;
     // 0..1; scales the FULL load admittance (conductance AND susceptance): 0 = strings fully
-    // decoupled AND bridgeOutput() == 0 (the P3 body feed requires > 0). The P1 default is 0
-    // because P1's termination is rigid: there is no load to couple into, and P1 ships no
-    // parameter that could move this (docs/plan.md Task P2.4 adds the APVTS surface).
-    float couplingStrength = 0.0f;
+    // decoupled AND bridgeOutput() == 0 (the P3 body feed requires > 0).
+    //
+    // NONZERO BY DECISION, Task P2.4 (docs/decisions/0004-phase2-vision-decisions.md amendment 3,
+    // closed by docs/decisions/0006-p2-bridge-passivity-fallback.md). Through P1 this was 0
+    // because P1's termination was rigid and there was no load to couple into. Leaving it at 0
+    // once BridgeJunction exists would be a silent kill switch: the strings would stay
+    // independent, bridgeOutput() would stay identically zero, and every later body/chamber/pickup
+    // -feed feature would be disabled by a default rather than by a decision. The value is
+    // measured, not guessed -- see the ADR for the sympathetic-response, beat-rate, T60 and
+    // tuning-shift numbers behind it.
+    float couplingStrength = 0.35f;
 };
 
 static_assert(std::is_trivially_copyable_v<BridgeAdmittanceParams>,
@@ -56,6 +74,29 @@ template <typename SampleT> class IBridgePort {
 
     // Tier-2 energy test support: makes the load lossless.
     virtual void setLossBypassed(bool bypass) noexcept = 0;
+
+    // The load's tuning surface. Hoisted here from the two implementations (docs/plan.md section
+    // 2.6 declares an identical setAdmittance on BridgeJunction and on SympatheticResonatorBus,
+    // and calls the latter's "same tuning surface as BridgeJunction") because StringNetworkParams
+    // CARRIES a BridgeAdmittanceParams (section 2.7) while StringNetwork holds only this base and
+    // "cannot tell implementations apart". Without it on the interface the parameter has no route
+    // from the network's surface to the port, and every caller would have to know which
+    // implementation it attached -- exactly the fail-open wiring this seam is supposed to remove.
+    // Realtime-safe; implementations clamp into their own passive region at set time.
+    virtual void setAdmittance(const BridgeAdmittanceParams& p) noexcept = 0;
+
+    // True when the port stores no energy, so zero incident waves imply zero outgoing waves for
+    // ever. StringNetwork's idle-string skip predicate needs it: once the port's reflected waves
+    // are routed back into the strings, a string with no state of its own can still be driven
+    // through the bridge, and "there is nothing to do" stops being a purely per-string question.
+    virtual bool isQuiescent() const noexcept = 0;
+
+    // The port's own contribution to the discrete Lyapunov storage functional, in the same units
+    // as WaveguideString::energyEstimate(). Summed into StringNetwork::energyEstimate(), which is
+    // what the tier-2 [energy] bound is asserted on: a junction whose stored energy is left out of
+    // the functional makes the functional fluctuate by however much energy is sloshing in and out
+    // of it, which is orders of magnitude above the 1e-9 bound.
+    virtual Sample64 storageEnergy() const noexcept = 0;
 };
 
 // The trivial passive reflective termination P1 runs against: a rigid, lossless, inverting
@@ -93,6 +134,14 @@ template <typename SampleT> class RigidBridgeTermination final : public IBridgeP
     void setLossBypassed(bool bypass) noexcept override {
         (void)bypass; // already lossless: |r| == 1 at every port
     }
+
+    // A rigid termination IS the Y == 0 limit of every admittance, so there is nothing to tune:
+    // BridgeJunction with couplingStrength == 0 reduces to exactly this object, sample for sample.
+    void setAdmittance(const BridgeAdmittanceParams& p) noexcept override { (void)p; }
+
+    // Memoryless: it stores nothing, ever.
+    bool isQuiescent() const noexcept override { return true; }
+    Sample64 storageEnergy() const noexcept override { return 0.0; }
 };
 
 } // namespace cnpg::dsp

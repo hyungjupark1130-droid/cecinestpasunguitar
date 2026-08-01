@@ -235,6 +235,14 @@ TEST_CASE("CONTRACT: PickupTap sums only active strings; an untriggered string c
     for (double sampleRate : {44100.0, 48000.0, 96000.0}) {
         StringNetworkParams netParams;
         netParams.pickupPosition01 = 0.6f;
+        // DECOUPLED BRIDGE (Task P2.4). What this case measures is PickupTap's own isActive() skip:
+        // does summing a two-string network whose second string was never triggered give the same
+        // output as summing a one-string network? Under the shipping coupling the answer is
+        // legitimately NO -- the untriggered string rings sympathetically, which is the whole point
+        // of P2.4 and is gated in tests/dsp/CoupledStringsTests.cpp. Decoupling restores the
+        // premise this case needs (an untriggered string really contributes nothing) so that what
+        // it measures is PickupTap rather than the bridge.
+        netParams.bridge.couplingStrength = 0.0f;
 
         StringNetwork<float> twoString;
         twoString.prepare(sampleRate, kMaxBlock, FractionalDelayKind::Lagrange3);

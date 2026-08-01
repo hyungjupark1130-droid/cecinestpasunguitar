@@ -194,6 +194,126 @@ TEST_CASE("REGRESSION/B: float64 golden exactness", "[regression]") {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The coupled scenario (Task P2.4): docs/plan.md section 4.3's sixth scenario
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr ChordIrChannel kChordChannels[2] = {ChordIrChannel::Tap, ChordIrChannel::Bridge};
+
+GoldenSidecar makeChordSidecar(FractionalDelayKind kind, double sampleRate, const std::vector<double>& samples,
+                               const StringIrFeatures& features) {
+    GoldenSidecar sidecar;
+    sidecar.dspSourceSha256 = dspSourceHash();
+    sidecar.generatedUtc = utcNow();
+    sidecar.sampleRate = sampleRate;
+    sidecar.variant = variantName(kind);
+    sidecar.midiNote = kChordIrNotes.front(); // the chord's root, so the field is not meaningless
+    sidecar.excitationVelocity = static_cast<double>(kStringIrVelocity);
+    sidecar.excitationPluckPosition = static_cast<double>(kStringIrPluckPosition);
+    sidecar.excitationHardness = static_cast<double>(kStringIrHardness);
+    sidecar.excitationNoiseAmount = static_cast<double>(kStringIrNoiseAmount);
+    sidecar.noiseSeed = static_cast<double>(kStringIrNoiseSeed);
+    sidecar.tapPosition = static_cast<double>(kChordIrTapPosition);
+    sidecar.lengthSamples = static_cast<double>(samples.size());
+    sidecar.atol = kStringIrGoldenAtol;
+    sidecar.features = features;
+    return sidecar;
+}
+
+} // namespace
+
+TEST_CASE("REGRESSION/A: coupled chord feature invariants", "[regression]") {
+    // Layer (a) for the coupled scenario. Partial tracking is omitted (see
+    // tests/support/StringIrScenarios.h for why it is not well posed across six fundamentals);
+    // what IS gated is exactly the coupling's own signature -- per-octave-band T60, which is what
+    // a bridge load changes, and nothing else in the render can.
+    for (FractionalDelayKind kind : kKinds) {
+        for (double sampleRate : kStringIrSampleRates) {
+            for (ChordIrChannel channel : kChordChannels) {
+                const auto sidecarPath = chordGoldenJsonPath(kind, sampleRate, channel);
+                INFO("sidecar " << sidecarPath.string());
+                INFO(missingGoldenHint());
+                GoldenSidecar reference;
+                REQUIRE(readGoldenSidecar(sidecarPath, reference));
+                REQUIRE(reference.schemaVersion == kGoldenSchemaVersion);
+                REQUIRE(reference.dspStateVersion == kDspStateVersion);
+                REQUIRE(reference.variant == variantName(kind));
+                REQUIRE(reference.sampleRate == sampleRate);
+
+                const std::vector<double> rendered = renderChordIr(kind, sampleRate, channel);
+                REQUIRE(reference.lengthSamples == static_cast<double>(rendered.size()));
+                const StringIrFeatures features = extractChordIrFeatures(rendered, sampleRate);
+
+                REQUIRE(features.bandT60.size() == reference.features.bandT60.size());
+                int gatedBands = 0;
+                for (std::size_t b = 0; b < features.bandT60.size(); ++b) {
+                    const double referenceT60 = reference.features.bandT60[b];
+                    if (referenceT60 <= 0.0) {
+                        INFO("band " << kStringIrT60Bands[b] << " Hz expected empty, measured " << features.bandT60[b]);
+                        REQUIRE(features.bandT60[b] <= 0.0);
+                        continue;
+                    }
+                    INFO(chordChannelName(channel) << " band " << kStringIrT60Bands[b] << " Hz reference T60 "
+                                                   << referenceT60 << " s measured " << features.bandT60[b] << " s");
+                    REQUIRE(features.bandT60[b] > 0.0);
+                    REQUIRE(std::fabs(features.bandT60[b] - referenceT60) <= kT60RelativeTolerance * referenceT60);
+                    ++gatedBands;
+                }
+                // Non-vacuous: a scenario whose every band was empty would pass every line above.
+                REQUIRE(gatedBands >= 3);
+
+                INFO("attack RMS reference " << reference.features.attackRmsDbfs << " dBFS measured "
+                                             << features.attackRmsDbfs << " dBFS");
+                REQUIRE(std::fabs(features.attackRmsDbfs - reference.features.attackRmsDbfs) <= kAttackRmsDbTolerance);
+            }
+        }
+    }
+}
+
+TEST_CASE("REGRESSION/B: coupled chord float64 golden exactness", "[regression]") {
+#if !defined(_MSC_VER)
+    SKIP("docs/plan.md section 4.9: layer (b) goldens are pinned to the MSVC toolchain and run in "
+         "the Windows job only; the ubuntu portability job runs layer (a).");
+#else
+    double worstDiff = 0.0;
+    double bridgePeak = 0.0;
+    for (FractionalDelayKind kind : kKinds) {
+        for (double sampleRate : kStringIrSampleRates) {
+            for (ChordIrChannel channel : kChordChannels) {
+                const auto path = chordGoldenF64Path(kind, sampleRate, channel);
+                INFO("golden " << path.string());
+                INFO(missingGoldenHint());
+                std::vector<double> golden;
+                REQUIRE(readGoldenF64(path, golden));
+
+                const std::vector<double> rendered = renderChordIr(kind, sampleRate, channel);
+                REQUIRE(rendered.size() == golden.size());
+
+                double localWorst = 0.0;
+                double peak = 0.0;
+                for (std::size_t i = 0; i < rendered.size(); ++i) {
+                    localWorst = std::max(localWorst, std::fabs(rendered[i] - golden[i]));
+                    peak = std::max(peak, std::fabs(golden[i]));
+                }
+                INFO("worst |diff| " << localWorst);
+                REQUIRE(localWorst <= kStringIrGoldenAtol);
+                // Non-vacuous: the coupled scenario's whole point is that the bridge channel is a
+                // signal now. A golden of silence would compare equal to a render of silence.
+                REQUIRE(peak > 0.0);
+                if (channel == ChordIrChannel::Bridge)
+                    bridgePeak = std::max(bridgePeak, peak);
+                worstDiff = std::max(worstDiff, localWorst);
+            }
+        }
+    }
+    std::cout << "[regression] chord_ir layer (b): worst |golden diff| " << worstDiff << " (atol "
+              << kStringIrGoldenAtol << "); bridge-channel peak " << bridgePeak << "\n";
+    REQUIRE(bridgePeak > 0.0);
+#endif
+}
+
+// ---------------------------------------------------------------------------------------------
 // Provenance -- the sidecar field that says WHICH code wrote these bytes
 // ---------------------------------------------------------------------------------------------
 
@@ -284,6 +404,34 @@ TEST_CASE("REGEN: rewrite string_ir goldens", "[.][regen]") {
                 writeGoldenF64(f64Path, rendered);
                 writeGoldenSidecar(goldenJsonPath(kind, sampleRate, midiNote),
                                    makeSidecar(kind, sampleRate, midiNote, rendered, features));
+            }
+        }
+    }
+
+    // ...and the coupled chord scenario (Task P2.4), both captured channels.
+    for (FractionalDelayKind kind : kKinds) {
+        for (double sampleRate : kStringIrSampleRates) {
+            for (ChordIrChannel channel : kChordChannels) {
+                const std::vector<double> rendered = renderChordIr(kind, sampleRate, channel);
+                const StringIrFeatures features = extractChordIrFeatures(rendered, sampleRate);
+
+                const auto f64Path = chordGoldenF64Path(kind, sampleRate, channel);
+                std::vector<double> previous;
+                double maxDiff = -1.0;
+                if (readGoldenF64(f64Path, previous) && previous.size() == rendered.size()) {
+                    maxDiff = 0.0;
+                    for (std::size_t i = 0; i < rendered.size(); ++i)
+                        maxDiff = std::max(maxDiff, std::fabs(rendered[i] - previous[i]));
+                }
+                char line[512];
+                std::snprintf(line, sizeof(line), "%-9s %6.0f Hz chord/%-6s maxSampleDiff %-12s attackRMS %+8.2f dBFS",
+                              variantName(kind).c_str(), sampleRate, chordChannelName(channel),
+                              (maxDiff < 0.0) ? "(new)" : std::to_string(maxDiff).c_str(), features.attackRmsDbfs);
+                std::cout << line << "\n";
+
+                writeGoldenF64(f64Path, rendered);
+                writeGoldenSidecar(chordGoldenJsonPath(kind, sampleRate, channel),
+                                   makeChordSidecar(kind, sampleRate, rendered, features));
             }
         }
     }

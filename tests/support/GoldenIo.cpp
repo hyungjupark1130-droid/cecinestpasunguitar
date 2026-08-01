@@ -112,6 +112,23 @@ std::filesystem::path goldenJsonPath(cnpg::dsp::FractionalDelayKind kind, double
     return goldenDirectory(kind, sampleRate) / (scenarioFileName(midiNote) + ".json");
 }
 
+namespace {
+std::filesystem::path chordDirectory(cnpg::dsp::FractionalDelayKind kind, double sampleRate) {
+    return goldenRoot() / "chord_ir" / variantName(kind) / rateFolder(sampleRate);
+}
+std::string chordFileName(ChordIrChannel channel) { return std::string("open_e_major_") + chordChannelName(channel); }
+} // namespace
+
+std::filesystem::path chordGoldenF64Path(cnpg::dsp::FractionalDelayKind kind, double sampleRate,
+                                         ChordIrChannel channel) {
+    return chordDirectory(kind, sampleRate) / (chordFileName(channel) + ".f64");
+}
+
+std::filesystem::path chordGoldenJsonPath(cnpg::dsp::FractionalDelayKind kind, double sampleRate,
+                                          ChordIrChannel channel) {
+    return chordDirectory(kind, sampleRate) / (chordFileName(channel) + ".json");
+}
+
 bool readGoldenF64(const std::filesystem::path& path, std::vector<double>& out) {
     std::ifstream file(path, std::ios::binary);
     if (!file)

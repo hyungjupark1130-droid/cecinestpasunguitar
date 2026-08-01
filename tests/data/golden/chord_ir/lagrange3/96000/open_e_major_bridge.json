@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "dspSourceSha256": "fe35d47ac15465dbd2ff83cfbe55a8e4101055f24a93414bfc3e899885ca32b5",
+  "generatedUtc": "2026-08-01T10:06:09Z",
+  "dspStateVersion": 1,
+  "sampleRate": 96000,
+  "variant": "lagrange3",
+  "midiNote": 40,
+  "excitationVelocity": 0.8,
+  "excitationPluckPosition": 0.28,
+  "excitationHardness": 0.5,
+  "excitationNoiseAmount": 0.25,
+  "noiseSeed": 2463534242,
+  "tapPosition": 0.87,
+  "lengthSamples": 288000,
+  "atol": 1.0e-07,
+  "partialHz": [0, 0, 0, 0, 0, 0, 0, 0],
+  "bandT60Seconds": [2.272342, 1.5213698, 1.2929727, 1.469675, 1.5577372, 1.690857, 1.9641332, 1.6620662],
+  "attackRmsDbfs": -57.989914
+}

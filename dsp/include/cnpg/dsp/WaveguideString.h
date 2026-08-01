@@ -263,14 +263,55 @@ template <typename SampleT> class WaveguideString {
     // with the rigid -1 termination.
     SampleT railOutgoingAtBridge() const noexcept { return bridgeOutgoing_; }
 
-    // Overrides the internal rigid reflection for the NEXT tick() only. NOTE for P2.4: routing
-    // the bridge through an external junction this way inserts one extra sample into the loop,
-    // which the loop-length solve must then subtract -- that adjustment lands with
-    // BridgeJunction, not here (P1 has no bridge port, so P1 tuning is unaffected).
+    // Overrides the internal rigid reflection for the NEXT tick() only. Routing the bridge through
+    // an external junction this way inserts one extra sample into the loop -- see
+    // setBridgePortDriven(), which is what pays for it.
     void railAcceptFromBridge(SampleT reflected) noexcept;
 
-    // Reference impedance for power normalization across the bridge port. P1 ships a single
-    // normalized string (1.0); per-string impedances arrive with BridgeJunction in P2.4.
+    // Declares that an external IBridgePort is supplying this string's bridge reflection every
+    // sample (Task P2.4). ONE fact with TWO consequences, which is why it is one setter:
+    //
+    //   1. LOOP LENGTH. The gather-scatter-accept ordering in StringNetwork's per-sample loop hands
+    //      back a reflection derived from the PREVIOUS tick's outgoing wave, so the loop is exactly
+    //      one sample longer than the internally-terminated one -- at every rate and every note,
+    //      because a scattering junction is memoryless in its incident waves. The loop-length solve
+    //      subtracts that sample, so the seam itself costs no tuning. (What the LOAD does to tuning
+    //      is a different thing entirely and is physics: a bridge resonance pulls the partials near
+    //      it. That residual is what P2.7's calibration table measures.)
+    //   2. ENERGY. Between ticks the outgoing wave sits in bridgeOutgoing_ waiting for the junction
+    //      to consume it -- one sample of the loop's energy that has left the rails and not yet
+    //      arrived anywhere. With the internal termination it never exists (tick() writes it into
+    //      the down rail in the same breath), so it was not a state-bearing element before this
+    //      call and is one after. energyEstimate() counts it exactly when this is set, which is
+    //      what keeps the tier-2 storage functional a Lyapunov function across the seam instead of
+    //      one that fluctuates by whatever is in flight.
+    //
+    // Realtime-safe; re-solves the loop length.
+    void setBridgePortDriven(bool driven) noexcept;
+    bool bridgePortDriven() const noexcept { return bridgePortDriven_; }
+
+    // Extra loop delay, in samples, that setBridgePortDriven(true) subtracts from the solve.
+    // Exposed so a test can assert the compensation is the number the derivation says it is
+    // rather than re-deriving it, and so P2.7 has the figure in code rather than in prose.
+    static constexpr double kBridgeSeamDelaySamples = 1.0;
+
+    // JUNCTION LIVENESS (Task P2.4, carry-forward B4). Ticks since reset() that consumed a
+    // reflection supplied by railAcceptFromBridge, and ticks that fell back to the internal rigid
+    // -1. The fallback is a SILENT WRONG ANSWER -- a mis-wired or non-ticking bridge port still
+    // makes sound, just an uncoupled one, with no test failing and nothing to hear except the
+    // absence of something that was never heard. These two counters are what let a test assert the
+    // port is actually driving the string rather than assume it.
+    unsigned long long bridgeReflectionTicks() const noexcept { return bridgeReflectionTicks_; }
+    unsigned long long internalReflectionTicks() const noexcept { return internalReflectionTicks_; }
+
+    // Reference impedance for power normalization across the bridge port. Every string publishes
+    // the same normalized 1.0: a per-string impedance is Z = sqrt(T mu) = mu c, and neither the
+    // linear mass density nor the tension exists in StringMaterialParams -- a real per-string
+    // impedance is a string-gauge model and belongs to the phase that adds one. BridgeJunction
+    // nonetheless supports and is tier-1 gated over an arbitrary positive impedance set (including
+    // a 4:1 spread), so the seam is ready for it; what is missing is the physics upstream, not the
+    // plumbing downstream. See the P2.4 report for the one place a non-uniform set would also
+    // require energyEstimate()'s own 1/(2 Z) weighting to be revisited.
     float portImpedance() const noexcept { return 1.0f; }
 
     // ---- per-sample loop ---------------------------------------------------------------------
@@ -311,6 +352,23 @@ template <typename SampleT> class WaveguideString {
     // call after a coefficient change may run a closed-form spectral factorization. Test and
     // diagnostic use only (docs/plan.md section 4.2).
     double energyEstimate() const noexcept;
+
+    // The loop-loss filter as the storage functional sees it: its three coefficients and the
+    // scalar p in V = p s^2. Exposed at Task P2.4 to close the P1.4 deferral "lossStorageWeight
+    // validity is unchecked, and tier 3 leans on it" -- p is the vertex of a parabola that has a
+    // non-negative branch only when the filter really is contractive, and if that branch is empty
+    // the returned p is not a storage function at all and tier 3's energyEstimate() stops being a
+    // Lyapunov function. With these four numbers a test can check the dissipation inequality
+    // p (a1 s + (a1 b0 + b1) x)^2 - p s^2 <= x^2 - (s + b0 x)^2 directly, over the whole shipping
+    // parameter range, instead of re-typing the closed form and proving nothing.
+    struct LossStorageProbe {
+        double b0 = 1.0;
+        double b1 = 0.0;
+        double a1 = 0.0;
+        double storageWeight = 0.0;
+        bool bypassed = false;
+    };
+    LossStorageProbe lossStorageProbe() const noexcept;
 
     // Where a moving read actually sits RIGHT NOW (Task P2.3) -- all of it, which is the point.
     // `anchor01` is the committed position, `pending01` the one being faded in (equal to the anchor
@@ -455,6 +513,9 @@ template <typename SampleT> class WaveguideString {
     SampleT bridgeOutgoing_ = SampleT(0);
     SampleT bridgeAccepted_ = SampleT(0);
     bool bridgeAcceptPending_ = false;
+    bool bridgePortDriven_ = false;
+    unsigned long long bridgeReflectionTicks_ = 0;
+    unsigned long long internalReflectionTicks_ = 0;
 
     double realizedLoopDelay_ = 0.0;
 

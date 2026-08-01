@@ -76,6 +76,21 @@ StringNetworkParams paramsWith(float feltTimeConstantMs, float damperPosition01 
     params.damper.maxLoss = 1.0f;
     params.damper.feltTimeConstantMs = feltTimeConstantMs;
     params.exciter.noiseAmount = 0.0f;
+    // DECOUPLED BRIDGE (Task P2.4), and it is a scoping decision rather than a convenience. Every
+    // case in this file is about ONE STRING'S LIFECYCLE -- how fast the felt silences it, when the
+    // watchdog clears it, whether a clear opens the damper -- and each states its claim as "the
+    // network is now bit-identical to a fresh instance" or "energyEstimate() is exactly 0". Those
+    // are claims about the STRING, and P2.4 made them false of the INSTRUMENT: the bridge junction
+    // is state too, clearing a string does not clear it, and it goes on re-driving that string out
+    // of its own residual. So a re-init on a used network is genuinely no longer bit-identical to a
+    // fresh one, and "the string is silent" no longer implies "the network stores nothing".
+    //
+    // That is a real behavioural change and it is NOT hidden here -- it is asserted on its own
+    // terms in "CONTRACT: DamperFeltTime -- a cleared string does not clear the coupled
+    // instrument" at the end of this file, and recorded in the P2.4 report as a P2.6 entry
+    // condition (a NoteOn now lands on a string that may be ringing sympathetically). What this
+    // file keeps measuring, unchanged and at the same tolerances, is the damper.
+    params.bridge.couplingStrength = 0.0f;
     return params;
 }
 
@@ -894,4 +909,64 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a same-pitch pluck over a ringing string 
     network.process(retrigger, kBlock);
     REQUIRE(network.damperEngagement(0) == 0.0f);
     REQUIRE(network.energyEstimate() > 0.0); // the ringing state was kept, not cleared
+}
+
+// ---------------------------------------------------------------------------------------------
+// what Task P2.4 changed about "cleared" -- stated here because this file's cases stopped saying it
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: DamperFeltTime -- a cleared string does not clear the coupled instrument", "[contract]") {
+    // THE BEHAVIOUR CHANGE THE DECOUPLING IN paramsWith() MOVED OUT OF THE WAY, asserted here on
+    // its own terms so nothing is lost by that scoping decision.
+    //
+    // Every lifecycle case above states its claim as "energyEstimate() is exactly 0" or "the render
+    // is bit-identical to a fresh instance". Both were true of the whole network while the strings
+    // were uncoupled, because clearing the last ringing string cleared everything there was. From
+    // Task P2.4 they are true of the STRING and false of the INSTRUMENT: the bridge junction is a
+    // mass and a spring, it holds energy that no string clear touches, and it goes on re-driving
+    // the strings out of its own residual afterwards.
+    //
+    // That is not a defect and it is not free. It is a P2.6 ENTRY CONDITION: a NoteOn can now land
+    // on a string that is ringing sympathetically with no note of its own, and the re-init path
+    // clears it -- which through P2.3 was inaudible by construction (the string really was silent)
+    // and now is a small truncation whose level this case measures.
+    StringNetworkParams params = paramsWith(40.0f);
+    params.bridge.couplingStrength = StringNetworkParams{}.bridge.couplingStrength;
+    REQUIRE(params.bridge.couplingStrength > 0.0f);
+
+    StringNetwork<float> network;
+    network.prepare(kRate, kBlock, FractionalDelayKind::Lagrange3);
+    network.setNumStrings(2);
+    network.setParams(params);
+    network.reset();
+
+    BlockEventQueue events;
+    events.push(noteOn(0, 45, 0)); // string 0 only; string 1 rings sympathetically
+    for (int b = 0; b < 300; ++b)
+        network.process(events, kBlock);
+
+    // IN the state this case claims to test: string 1 really is ringing without ever having been
+    // played, which is the situation P2.6's retrigger semantics will have to have an answer for.
+    const double sympatheticEnergy = network.stringEnergyEstimate(1);
+    REQUIRE(sympatheticEnergy > 0.0);
+
+    // Release string 0 and let the watchdog clear it. The INSTRUMENT is not silent afterwards.
+    BlockEventQueue release;
+    release.push(noteOff(0, 45, 0));
+    for (int b = 0; b < 200; ++b)
+        network.process(release, kBlock);
+
+    const double stringZero = network.stringEnergyEstimate(0);
+    const double stringOne = network.stringEnergyEstimate(1);
+    const double total = network.energyEstimate();
+    std::cout << "[contract] a cleared string does not clear the instrument: after string 0's note-off and clear, "
+              << "string 0 holds " << stringZero << ", string 1 (never played) holds " << stringOne
+              << ", the whole network " << total << "\n";
+
+    // The claim, both halves: the network as a whole still stores energy, and the string nobody
+    // played is where it is. A test that only asked "is the total non-zero" would be satisfied by
+    // string 0 failing to clear, which is the opposite finding.
+    REQUIRE(total > 0.0);
+    REQUIRE(stringOne > 0.0);
+    REQUIRE(stringOne > stringZero);
 }

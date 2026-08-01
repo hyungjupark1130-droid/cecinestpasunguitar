@@ -1,6 +1,7 @@
 #include "cnpg/dsp/Common.h"
 #include "cnpg/dsp/EventQueue.h"
 #include "cnpg/dsp/PluckExciter.h"
+#include "cnpg/dsp/ScopedFtzDazGuard.h"
 #include "cnpg/dsp/StringNetwork.h"
 #include "cnpg/dsp/WaveguideString.h"
 
@@ -142,6 +143,19 @@ Render renderChord(const Spec& spec) {
     network.setNumStrings(kChordStrings);
     network.setParams(params);
     network.reset();
+
+    // THE SHIPPING DENORMAL CONFIGURATION (Task P2.4). This file asserts
+    // ClickMeasurement::subnormalSamples == 0 on every render, and that held trivially while the
+    // strings were uncoupled: an unplucked or fully damped string's state was CLEARED outright by
+    // the silence watchdog, so nothing ever spent time in the subnormal range on the way down.
+    // Bidirectional coupling gives every string a long, quiet, bridge-driven tail instead, and a
+    // float32 render of that tail without the guard produces genuine subnormals (measured: 14 228
+    // of them in the damper-sweep case). PluginProcessor::processBlock has constructed one of these
+    // first since Task P1.1, so this IS the shipping path; what changed is not that denormals
+    // appeared but that there is now a tail for them to appear in. Same finding, same reasoning and
+    // the same double-precision control as the header of
+    // tests/dsp/NetworkEnergyTierThreeTests.cpp.
+    const cnpg::dsp::ScopedFtzDazGuard denormalGuard;
 
     const auto totalBlocks = static_cast<int>(spec.seconds * kRate / kBlock);
     const auto releaseBlock = static_cast<int>(kReleaseSeconds * kRate / kBlock);

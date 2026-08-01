@@ -159,7 +159,9 @@ These ride inside tasks already scheduled to rewrite the same lines; **zero outp
    Stiffness") reserving Material/Wood for the body, in the task that already bumps the state
    version; `PerString` gains the envelope-scaling scalar reserved for D2.
 2. **P2.3** — the click-free crossfade is written against the widened tap arity.
-3. **P2.4** — decide and record a **nonzero** shipping default for
+3. **P2.4** — *(CLOSED 2026-08-01 by ADR 0006: `couplingStrength` ships at 0.35, chosen by
+   measurement; the evidence table and the reasoning are in that ADR.)* — decide and record a
+   **nonzero** shipping default for
    `BridgeAdmittanceParams::couplingStrength` at the gate (at 0.0 the strings are fully
    decoupled and `bridgeOutput()` is identically zero, which would silently disable every
    later body/chamber feature).

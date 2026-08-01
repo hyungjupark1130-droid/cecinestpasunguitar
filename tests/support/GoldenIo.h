@@ -52,6 +52,14 @@ std::filesystem::path goldenDirectory(cnpg::dsp::FractionalDelayKind kind, doubl
 std::filesystem::path goldenF64Path(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote);
 std::filesystem::path goldenJsonPath(cnpg::dsp::FractionalDelayKind kind, double sampleRate, int midiNote);
 
+// The chord scenario (Task P2.4), under tests/data/golden/chord_ir/<variant>/<rate>/ -- the same
+// directory scheme docs/plan.md section 4.3 gives string_ir, with the scenario name changed and the
+// captured channel in the file name.
+std::filesystem::path chordGoldenF64Path(cnpg::dsp::FractionalDelayKind kind, double sampleRate,
+                                         ChordIrChannel channel);
+std::filesystem::path chordGoldenJsonPath(cnpg::dsp::FractionalDelayKind kind, double sampleRate,
+                                          ChordIrChannel channel);
+
 bool readGoldenF64(const std::filesystem::path& path, std::vector<double>& out);
 void writeGoldenF64(const std::filesystem::path& path, const std::vector<double>& samples);
 
