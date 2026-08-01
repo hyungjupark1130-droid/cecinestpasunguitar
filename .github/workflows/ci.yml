@@ -283,7 +283,16 @@ jobs:
           path: build-dsp/_deps/*-src
           key: ${{ runner.os }}-deps-${{ hashFiles('cmake/Dependencies.cmake') }}
 
+      # shell: bash on both piped steps below (not the implicit `bash -e` default): GitHub's
+      # explicit bash shell runs with `-eo pipefail`, the default one only with `-e`. Without
+      # pipefail a failing `cmake --build` piped into `tee` reports tee's exit status (0), so the
+      # step passes, the job carries on, and the real compile error only surfaces two steps later as
+      # a baffling "cnpg_tests_NOT_BUILT" ctest failure with no error text anywhere near it. That is
+      # exactly what happened on this branch's first Task P1.11 push (run 30675168303): a genuine
+      # clang-only compile error in tests/render/RenderMain.cpp was reported as a missing test
+      # binary. The pipe itself has to stay -- both logs are grepped by the portability guard below.
       - name: Configure (linux-dsp-only preset)
+        shell: bash
         run: cmake --preset linux-dsp-only 2>&1 | tee configure.log
 
       # No explicit --target list: the linux-dsp-only preset already sets CNPG_BUILD_PLUGIN=OFF,
@@ -292,6 +301,7 @@ jobs:
       # tests/CMakeLists.txt (P1/P2) -- matching the brief's "each as it lands" without needing
       # a workflow edit per target.
       - name: Build (cnpg_dsp, cnpg_tests, and cnpg_bench/cnpg_render/cnpg_calibrate as they land)
+        shell: bash
         run: cmake --build --preset linux-dsp-only 2>&1 | tee build.log
 
       - name: Verify no JUCE fetch or compile in this job's log (portability guard)

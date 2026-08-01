@@ -138,17 +138,30 @@ class JsonValue {
     bool boolean = false;
     double number = 0.0;
     std::string text;
-    std::vector<JsonValue> elements;                        // Array
-    std::vector<std::pair<std::string, JsonValue>> members; // Object (insertion order preserved)
+
+    // Array: `values` holds the elements and `keys` is empty.
+    // Object: `values` holds the member values and `keys` their names, index-parallel, in document
+    // order.
+    //
+    // Two parallel vectors rather than the obvious std::vector<std::pair<std::string, JsonValue>>,
+    // and the reason is not style. std::vector is one of the three containers the standard
+    // explicitly permits to be instantiated with an INCOMPLETE type (complete before any member is
+    // used), which is exactly what makes a recursive node like this legal at all. std::pair carries
+    // no such permission, so instantiating std::pair<std::string, JsonValue> inside JsonValue's own
+    // definition is ill-formed. MSVC and libstdc++-under-GCC accept it anyway; libstdc++ under
+    // Clang correctly rejects it ("template argument must be a complete class type"), which is how
+    // this was caught -- by the ubuntu (clang) CI job, on the first push of this file.
+    std::vector<JsonValue> values;
+    std::vector<std::string> keys;
 
     bool isNull() const noexcept { return type == Type::Null; }
 
     const JsonValue* find(const std::string& key) const noexcept {
         if (type != Type::Object)
             return nullptr;
-        for (const auto& member : members) {
-            if (member.first == key)
-                return &member.second;
+        for (std::size_t i = 0; i < keys.size() && i < values.size(); ++i) {
+            if (keys[i] == key)
+                return &values[i];
         }
         return nullptr;
     }
@@ -252,7 +265,8 @@ class JsonParser {
             JsonValue value;
             if (!parseValue(value))
                 return false;
-            out.members.emplace_back(std::move(key), std::move(value));
+            out.keys.push_back(std::move(key));
+            out.values.push_back(std::move(value));
             skipWhitespace();
             if (pos_ < text_.size() && text_[pos_] == ',') {
                 ++pos_;
@@ -280,7 +294,7 @@ class JsonParser {
             JsonValue value;
             if (!parseValue(value))
                 return false;
-            out.elements.push_back(std::move(value));
+            out.values.push_back(std::move(value));
             skipWhitespace();
             if (pos_ < text_.size() && text_[pos_] == ',') {
                 ++pos_;
@@ -651,7 +665,7 @@ bool parseAutomation(const fs::path& path, std::vector<AutomationLane>& out, std
         return false;
     }
 
-    for (const JsonValue& lane : lanes->elements) {
+    for (const JsonValue& lane : lanes->values) {
         if (lane.type != JsonValue::Type::Object) {
             error = path.string() + ": every entry of \"lanes\" must be an object";
             return false;
@@ -671,13 +685,13 @@ bool parseAutomation(const fs::path& path, std::vector<AutomationLane>& out, std
         }
 
         const JsonValue* breakpoints = lane.find("breakpoints");
-        if (breakpoints == nullptr || breakpoints->type != JsonValue::Type::Array || breakpoints->elements.empty()) {
+        if (breakpoints == nullptr || breakpoints->type != JsonValue::Type::Array || breakpoints->values.empty()) {
             error = path.string() + ": lane \"" + parsed.name + "\" needs a non-empty \"breakpoints\" array";
             return false;
         }
 
         double previousTime = -std::numeric_limits<double>::infinity();
-        for (const JsonValue& breakpoint : breakpoints->elements) {
+        for (const JsonValue& breakpoint : breakpoints->values) {
             const JsonValue* time = breakpoint.find("time");
             const JsonValue* value = breakpoint.find("value");
             if (time == nullptr || time->type != JsonValue::Type::Number || value == nullptr ||
@@ -722,19 +736,21 @@ struct CorpusManifest {
 
 bool parseParamOverrides(const JsonValue& object, const fs::path& manifestPath, const std::string& phrase,
                          std::vector<std::pair<AutomatableParam, double>>& out, std::string& error) {
-    for (const auto& member : object.members) {
+    for (std::size_t i = 0; i < object.keys.size() && i < object.values.size(); ++i) {
+        const std::string& name = object.keys[i];
+        const JsonValue& value = object.values[i];
+
         AutomatableParam which{};
-        if (!lookupParamName(member.first, which)) {
-            error = manifestPath.string() + ": phrase \"" + phrase + "\" sets unknown parameter \"" + member.first +
+        if (!lookupParamName(name, which)) {
+            error = manifestPath.string() + ": phrase \"" + phrase + "\" sets unknown parameter \"" + name +
                     "\"; known names are " + knownParamNames();
             return false;
         }
-        if (member.second.type != JsonValue::Type::Number) {
-            error = manifestPath.string() + ": phrase \"" + phrase + "\" sets \"" + member.first +
-                    "\" to a non-numeric value";
+        if (value.type != JsonValue::Type::Number) {
+            error = manifestPath.string() + ": phrase \"" + phrase + "\" sets \"" + name + "\" to a non-numeric value";
             return false;
         }
-        out.emplace_back(which, member.second.number);
+        out.emplace_back(which, value.number);
     }
     return true;
 }
@@ -763,7 +779,7 @@ bool parseManifest(const fs::path& path, CorpusManifest& out, std::string& error
         return false;
     }
 
-    for (const JsonValue& phrase : phrases->elements) {
+    for (const JsonValue& phrase : phrases->values) {
         if (phrase.type != JsonValue::Type::Object) {
             error = path.string() + ": every entry of \"phrases\" must be an object";
             return false;
