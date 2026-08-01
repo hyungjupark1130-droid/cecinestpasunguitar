@@ -1418,6 +1418,29 @@ build\bin\Release\cnpg_tests.exe "[tuning]"
 ```
 Manual: in Ableton Live at 48 kHz and again at 96 kHz, play against a reference tuner track across the range (A0, E1, A2, A4, C6, C8) — no audible detuning; ubuntu CI job runs the same `[tuning]` suite headless.
 
+> **Amendment (author decision, 2026-08-01, ADR 0007) — this
+> task's mechanism changes. Read §4.5's ADR 0007 amendment with it.** The steps above describe measuring the shipped
+> implementation into a per-note table. P2.4 established that the tuning residual is *not* a per-note constant: it is a
+> function of `couplingStrength`, `bridgeResonanceHz` and `bridgeDamping`, all live APVTS parameters, and it reverses
+> sign across the resonance sweep. A one-dimensional note-indexed table cannot represent that.
+>
+> **What replaces it.** Analytic bridge phase-delay compensation, computed from the junction's admittance at each
+> string's fundamental and recomputed on parameter change. Consequently:
+> - the **`[tuning]` gate becomes a sweep over (note × rate × bridge-parameter grid)**, not (note × rate) — the ±2-cent
+>   criterion binds across the declared normal range, not only at the default admittance;
+> - the parameter-change recompute must route through **P2.3's dual-anchor crossfade** and carry its own click gate,
+>   because retuning a ringing string is a delay-length change on a ringing string;
+> - the solve is **self-referential** (phase delay at f0 changes the loop length changes f0) and needs a fixed-point
+>   iteration with a stated convergence criterion, offline at parameter-change time;
+> - `cnpg_calibrate` is retained, re-scoped from *mechanism* to **verification across the grid** plus an optional
+>   residual trim. The file-format, determinism, CSV/header-agreement and no-audio-thread-allocation criteria above
+>   still apply to whatever it emits.
+>
+> **Blocked on an author input:** the definition of the *normal parameter range*. The gate cannot be written until it
+> exists. Note the scheduling wrinkle — it is a listening judgement, but this task precedes the P2.8 listening pass;
+> the controller's recommendation is to set it provisionally from measured data, gate P2.7 against that, and confirm it
+> at P2.8 in the same session that settles the `couplingStrength` default.
+
 ---
 
 ### P2.8 — Corpus expansion with mandated abuse cases + full P2 listening pass
@@ -1444,6 +1467,8 @@ Extend the versioned MIDI corpus with exactly the four P2 additions listed above
 - [ ] `[denormal]` state-inspection case passes on the 6-string coupled long-decay render (no FP_SUBNORMAL state, no NaN/Inf) in CI; the timing-ratio case (section 4.6) passes locally on the dev machine.
 - [ ] Checklist updated in the same commit series as the corpus (versioned together); every P2 checklist item has a recorded pass in `docs/listening/P2-<yyyymmdd>.md`, or a linked blocking issue.
 - [ ] Rendered WAVs peak below the SoftClipLimiter ceiling on default settings (gain-structure sanity, −18 dBFS per-string nominal respected).
+- [ ] **`couplingStrength` sign-off (author decision 2026-08-01, ADR 0007 D4).** ADR 0006's `0.35` is **provisional**. This pass must render and compare **lower coupling values** and judge **mode-locking in near-unison voicings** by ear, then confirm or replace the default. At 0.35 two strings 25 cents apart mode-lock — both peak at 111.297 Hz for nominals 110.00/111.60, a **+20.286 cent pull** on the string nobody detuned, separation collapsing to 0.0029 cents — while beat depth falls with coupling (10.08 / 3.59 / 2.28 / 1.62 dB at 0.1 / 0.35 / 0.5 / 1.0). The setting trades sympathetic richness against pitch integrity and where that sits is a musical judgement, not a measurement.
+- [ ] **Provisional *normal parameter range* confirmed or revised** for the three bridge parameters, per §4.5's ADR 0007 amendment — the range over which the ±2-cent tuning gate binds. P2.7 sets it provisionally from measured data; this is the session that judges it by ear.
 
 **Verification method:**
 ```
@@ -1473,6 +1498,7 @@ Run the complete gate on the dev machine (Windows 11 Pro workstation) and record
 - [ ] Exit-commit CI: windows and ubuntu jobs green; test log shows nonzero test counts for each of `[contract]`, `[energy]`, `[regression]`, `[aliasing]`, `[denormal]`, `[tuning]`; CI publishes bench numbers without gating on them.
 - [ ] `pluginval --strictness-level 10` passes on the exit-commit VST3.
 - [ ] `docs/bench/p2-exit.md` committed with all measurements, the P2.5 outcome, the voicing sign-off referencing `docs/listening/P2-<yyyymmdd>.md`, and the restated P1 triode voicing caveat; no open blocking issues from P2.8.
+- [ ] **This gate must NOT lock the `couplingStrength` default by passing** (ADR 0007 D4). The value is settled only by P2.8's recorded listening sign-off; if that sign-off is absent or inconclusive, the exit doc records the default as still provisional rather than treating a green board as confirmation.
 
 **Verification method:**
 ```
@@ -1607,8 +1633,11 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 > **documented sanity bound of ±12 cents** — set from the measured worst with ~2.4× headroom, and non-vacuous in both
 > directions (the residual must be > 0.5 cents, or the render has stopped going through the bridge) — and the ±2-cent
 > criterion binds the P2 calibration-table case, exactly as the "Named cases" paragraph above already assigns it.
-> `TUNING: static bend accuracy` additionally keeps a ±2-cent assertion on the bend's own *arithmetic*, as the
-> difference between the bent and unbent residuals, which the bridge load cannot move.
+> A ±2-cent assertion additionally survives on the bend's own *arithmetic*, as the difference between the bent and
+> unbent residuals. It lives in `PitchBendClickTests.cpp` (**not** in `TUNING: static bend accuracy`, which asserts only
+> the ±12-cent bound). The bridge load does move that difference — measured **+0.379 / −0.351 cents**, about 19% of the
+> budget — so the correct claim is that it moves it by *far less than the gate*, leaving ~5× headroom, which is what
+> makes the assertion still catch a bend landing off-target.
 >
 > **BINDING ENTRY CONDITION ON TASK P2.7.** P2.7 owns the ±2-cent gate over the full 88 notes × 3 rates in the shipping
 > coupled topology. It also inherits a scope question this task surfaced and deliberately did not solve: the residual is
@@ -1617,6 +1646,32 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 > −0.188/−4.855/−0.494 cents — **and the sign reverses across resonance**. A calibration table indexed by MIDI note
 > structurally cannot represent that, so P2.7 must either re-scope its mechanism or the parameter surface must change.
 > Measured by `TUNING: the coupled residual is a function of three LIVE parameters`.
+
+> **Amendment (author decision, 2026-08-01, `docs/decisions/0007-bridge-tuning-compensation.md`) — the
+> scope question above is answered: P2.7 re-scopes its mechanism, and the default instrument stays in tune.**
+> The frozen per-note calibration table is **not** the mechanism. P2.7 is redesigned around **analytic bridge
+> phase-delay compensation**: the junction's contribution to the loop delay is computed in closed form from its own
+> admittance at the string's fundamental, per string, on every parameter change — O(1), no table, correct at every
+> point in the parameter space rather than at one frozen admittance. This is the P1.4 phase-delay ruling (phase delay,
+> never group delay, governs tuning compensation) applied one element further down the loop.
+>
+> **The ±2-cent acceptance therefore binds on the shipping coupled topology across a declared *normal range* of the
+> three bridge parameters** — not merely at their defaults. Outside that range, bounded physical detuning may be
+> retained later as an optional, declared advanced behaviour; it is not a licence for the default instrument to drift
+> and it is not in P2.7's scope unless the analytic correction proves unable to hold ±2 cents across the normal range.
+>
+> Two consequences that are easy to miss. **The recompute lands inside P2.3's machinery** — changing tuning
+> compensation while a string rings *is* changing its delay length while it rings, the exact case the dual-anchor
+> crossfade exists for — so the parameter-change path routes through it and needs its own click gate. **The correction
+> is self-referential** — the phase delay is evaluated at f0, but changing the loop length changes f0 — so P2.7 needs a
+> fixed-point iteration with a declared convergence criterion, offline at parameter-change time, never on the audio
+> path. `cnpg_calibrate` survives as the *verification* harness across the parameter grid and as a possible residual
+> trim; it is no longer the mechanism of record.
+>
+> **Owed by the author before P2.7's gate can be written:** the definition of the *normal parameter range* — a musical
+> answer, the range over which the bridge is a bridge rather than an effect. ADR 0007 records two further open
+> questions (the bound for extreme settings, and whether the analytic correction holds near the load resonance where
+> the phase slope is steepest — the risk item, to be measured early rather than discovered at the gate).
 
 ## 4.6 Denormal robustness — `[denormal]`
 

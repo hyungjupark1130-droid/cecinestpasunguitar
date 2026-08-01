@@ -26,7 +26,19 @@ Two decisions had to be made here and recorded outside a task report:
 
 ## Decision
 
-### D1 — `couplingStrength` ships at **0.35**
+### D1 — `couplingStrength` is **provisionally 0.35**
+
+> **SUPERSEDED IN PART, 2026-08-01 — this default is PROVISIONAL, not shipped.** By author decision
+> (`docs/decisions/0007-bridge-tuning-compensation.md`, D4) the value below is confirmed or replaced only after the
+> **P2.8 listening pass**, which must compare *lower* coupling values and judge **mode-locking in near-unison
+> voicings** by ear. **No later task may treat it as settled — explicitly including the P2.9 exit gate, which must not
+> lock it by passing.** Motivating evidence: at 0.35 two strings tuned 25 cents apart mode-lock, both peaking at
+> 111.297 Hz for nominals 110.00/111.60 — a **+20.286 cent pull on the string nobody detuned**, with the separation
+> collapsing to 0.0029 cents — while beat depth falls with coupling (10.08 / 3.59 / 2.28 / 1.62 dB at 0.1 / 0.35 / 0.5
+> / 1.0). The setting trades sympathetic richness against pitch integrity; where that trade sits is a musical
+> judgement, and the measurements below establish the *range*, not the *choice*.
+>
+> The measurement-derived reasoning that follows remains valid and is what the listening pass should be read against.
 
 Chosen by measurement, not by taste. The number the knob maps to is a dimensionless *peak mobility
 ratio* against the string impedance,
