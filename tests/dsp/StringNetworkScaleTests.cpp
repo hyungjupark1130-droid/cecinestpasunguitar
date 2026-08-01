@@ -630,3 +630,58 @@ TEST_CASE("CONTRACT: PerString envelopeScale is reserved and inert", "[contract]
             REQUIRE(scaled[i] == unity[i]);
     }
 }
+
+TEST_CASE("CONTRACT: StringNetwork drops a SILENT string from the trip count immediately", "[contract]") {
+    // The enable ramp exists to protect a ringing tail. A string with no tail has nothing to
+    // protect, so it is snapped rather than ramped in either direction -- 0 * silence and 1 *
+    // silence are the same silence, and holding a string that has nothing to say in the loop for
+    // ten more milliseconds buys nobody anything. This is the counterpart to the ramped reduction
+    // above, and the two together are the whole of the reduction contract.
+    StringNetworkParams params = defaultParams();
+    StringNetwork<float> network;
+    configure(network, params, cnpg::dsp::kMaxStrings);
+
+    BlockEventQueue idle;
+    network.process(idle, kBlock);
+    REQUIRE(network.tapBuffers().numStrings() == cnpg::dsp::kMaxStrings);
+
+    // Nothing has ever been plucked, so the count falls on the very next block, not eight
+    // milliseconds later.
+    network.setNumStrings(2);
+    network.process(idle, kBlock);
+    REQUIRE(network.tapBuffers().numStrings() == 2);
+
+    // The same, one string at a time, through `enabled` rather than the count: a silent string
+    // switched off is off at once, and switched back on is on at once and at full amplitude.
+    params.perString[1].enabled = false;
+    network.setParams(params);
+    network.process(idle, kBlock);
+    REQUIRE_FALSE(network.tapBuffers().isActive(1));
+
+    params.perString[1].enabled = true;
+    network.setParams(params);
+    BlockEventQueue events;
+    events.push(noteOn(0, 45, 1));
+    std::vector<float> revived;
+    for (int b = 0; b < 20; ++b) {
+        network.process(events, kBlock);
+        const float* channel = network.tapBuffers().channel(1, 0);
+        revived.insert(revived.end(), channel, channel + kBlock);
+    }
+
+    StringNetwork<float> fresh;
+    configure(fresh, defaultParams(), 2);
+    BlockEventQueue freshEvents;
+    freshEvents.push(noteOn(0, 45, 1));
+    std::vector<float> reference;
+    for (int b = 0; b < 20; ++b) {
+        fresh.process(freshEvents, kBlock);
+        const float* channel = fresh.tapBuffers().channel(1, 0);
+        reference.insert(reference.end(), channel, channel + kBlock);
+    }
+
+    REQUIRE(peakOf(revived, 0, revived.size()) > 0.001f);
+    // Bit-identical: no residual ramp attenuating the attack of the first note after the toggle.
+    for (std::size_t i = 0; i < revived.size(); ++i)
+        REQUIRE(revived[i] == reference[i]);
+}

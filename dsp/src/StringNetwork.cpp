@@ -198,11 +198,14 @@ template <typename SampleT> void StringNetwork<SampleT>::refreshEnableTargets() 
         const bool wanted = (s < numStrings_) && params_.perString[index].enabled;
         enableTarget_[index] = wanted ? 1.0f : 0.0f;
 
-        // Coming back ON while the string is provably silent is a snap, not a ramp: there is
-        // nothing to fade in, and ramping would attenuate the front of whatever gets plucked next.
-        // Coming back on MID-RAMP-OUT (a reduction reversed before it finished) is a genuine ramp,
-        // because the string still holds a ringing tail that would step if the gain jumped.
-        if (enableTarget_[index] > enableGain_[index] && !stringHasState(s))
+        // A string with no state at all is snapped in EITHER direction rather than ramped, and the
+        // argument is the same both ways: 0 * silence and 1 * silence are the same silence, so
+        // there is no discontinuity available to produce. Going on, a ramp would attenuate the
+        // front of whatever gets plucked next; going off, it would hold a string that has nothing
+        // to say in the loop's trip count for ten pointless milliseconds. What is NEVER snapped is
+        // a string that still holds a tail -- including one coming back on mid-ramp-out, where a
+        // jump in gain would step that tail.
+        if (enableTarget_[index] != enableGain_[index] && !stringHasState(s))
             enableGain_[index] = enableTarget_[index];
     }
 }
