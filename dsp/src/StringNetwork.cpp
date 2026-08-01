@@ -133,7 +133,7 @@ template <typename SampleT> void StringNetwork<SampleT>::reset() noexcept {
     refreshEnableTargets();
     for (int s = 0; s < kMaxStrings; ++s) {
         enableGain_[static_cast<std::size_t>(s)] = enableTarget_[static_cast<std::size_t>(s)];
-        snapTapPositions(s);
+        snapPositionSmoothers(s);
     }
     loopStrings_ = numStrings_;
 
@@ -150,8 +150,9 @@ template <typename SampleT> void StringNetwork<SampleT>::setNumStrings(int count
         // Immediate: the readmitted strings rejoin the loop on the next block.
         loopStrings_ = std::max(loopStrings_, clamped);
 
-        // Their POSITION smoothers are snapped only if the string is genuinely silent. "Outside the
-        // count" does not imply "carries no state": a reduction leaves its removed strings ringing
+        // Their POSITION smoothers -- pickup taps and the damper junction alike -- are snapped only
+        // if the string is genuinely silent. "Outside the count" does not imply "carries no state":
+        // a reduction leaves its removed strings ringing
         // for the length of their enable ramp -- that deferral is the entire reason
         // updateLoopStringCount() exists -- so an increase arriving inside that window readmits
         // strings that are still sounding. Snapping one of those would jump its tap read by however
@@ -163,7 +164,7 @@ template <typename SampleT> void StringNetwork<SampleT>::setNumStrings(int count
         // Same predicate, same reason, as the enable-gain snap in refreshEnableTargets() below.
         for (int s = previous; s < clamped; ++s)
             if (!stringHasState(s))
-                snapTapPositions(s);
+                snapPositionSmoothers(s);
     }
 
     refreshEnableTargets();
@@ -227,11 +228,16 @@ template <typename SampleT> void StringNetwork<SampleT>::refreshEnableTargets() 
     }
 }
 
-template <typename SampleT> void StringNetwork<SampleT>::snapTapPositions(int stringIndex) noexcept {
+template <typename SampleT> void StringNetwork<SampleT>::snapPositionSmoothers(int stringIndex) noexcept {
     for (int t = 0; t < kMaxTapsPerString; ++t) {
         const auto slot = static_cast<std::size_t>(tapSlot(stringIndex, t));
         tapSmoothed_[slot] = tapTarget_[slot];
     }
+    // The junction position snaps with the taps, and for the same reason: both are only ever
+    // snapped where the string carries no state for the snap to step. WaveguideString's own anchors
+    // are disarmed by its reset(), so a cleared string re-anchors on wherever it is next asked to
+    // read rather than crossfading in from where the last note left the damper.
+    damperSmoothed_[static_cast<std::size_t>(stringIndex)] = damperTarget_[static_cast<std::size_t>(stringIndex)];
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::updateLoopStringCount() noexcept {
@@ -279,6 +285,11 @@ template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int s
     DamperJunctionParams damperParams = params_.damper;
     damperParams.position01 = params_.damperPosition01;
     dampers_[index].setParams(damperParams);
+    // Read the target back OUT of the junction rather than from params_: setParams is where
+    // position01 is clamped into 0..1 and where a NaN resolves, so taking the value from there
+    // keeps one validation point and puts this smoother strictly downstream of it. Only the target
+    // moves; the smoothed value glides toward it inside process().
+    damperTarget_[index] = static_cast<double>(dampers_[index].currentPosition01());
 
     WaveguideStringParams p;
     p.f0Hz = static_cast<float>(midiNoteToHz(static_cast<int>(midiNote_[index])));
@@ -312,7 +323,10 @@ template <typename SampleT> float StringNetwork<SampleT>::damperLossDepth(int st
 template <typename SampleT> float StringNetwork<SampleT>::damperPosition01(int stringIndex) const noexcept {
     if (dampers_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
         return 0.0f;
-    return dampers_[static_cast<std::size_t>(stringIndex)].currentPosition01();
+    // The SMOOTHED value, i.e. where the junction seam is being read and written right now -- the
+    // same role tapPosition01() plays for the pickup. The junction's own currentPosition01() is the
+    // validated target this is gliding toward.
+    return static_cast<float>(damperSmoothed_[static_cast<std::size_t>(stringIndex)]);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -455,20 +469,23 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
         renderedMask = 0;
 
         // Per-sample smoothed fractional pickup taps (docs/plan.md Task P1.5 step 3), now one
-        // smoother per (string, tap). The position moves continuously INSIDE the loop, not once per
-        // block, which is what makes a moving pickup click-free (P2.3 sweeps it). Kept as its own
-        // tight, branch-free pass rather than folded into the string body below: every slot is an
-        // independent one-pole recurrence over two contiguous arrays, which is the one part of this
-        // loop a compiler can actually vectorise. Advanced for every string in the trip count
-        // whether or not that string is currently sounding, so a string plucked after a position
-        // change reads where the pickup is now rather than gliding in from where it was when that
-        // string last rang.
+        // smoother per (string, tap), plus the damper junction's position (Task P2.3). Both
+        // positions move continuously INSIDE the loop, not once per block, which is the first half
+        // of what makes them click-free; the second half is WaveguideString's dual-anchor crossfade,
+        // which is what the smoothed values are then handed to. Kept as its own tight, branch-free
+        // pass rather than folded into the string body below: every slot is an independent one-pole
+        // recurrence over two contiguous arrays, which is the one part of this loop a compiler can
+        // actually vectorise. Advanced for every string in the trip count whether or not that string
+        // is currently sounding, so a string plucked after a position change reads where the pickup
+        // and the damper ARE rather than gliding in from where they were when that string last rang.
         for (int s = 0; s < loopStrings; ++s) {
-            const auto base = static_cast<std::size_t>(s) * static_cast<std::size_t>(kMaxTapsPerString);
+            const auto index = static_cast<std::size_t>(s);
+            const auto base = index * static_cast<std::size_t>(kMaxTapsPerString);
             for (int t = 0; t < numTaps; ++t) {
                 const std::size_t slot = base + static_cast<std::size_t>(t);
                 tapSmoothed_[slot] += smoothingCoeff * (tapTarget_[slot] - tapSmoothed_[slot]);
             }
+            damperSmoothed_[index] += smoothingCoeff * (damperTarget_[index] - damperSmoothed_[index]);
         }
 
         for (int s = 0; s < loopStrings; ++s) {
@@ -538,7 +555,14 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             // with the junction in the loop. There is deliberately NO engagement test around this:
             // a compiled-out damper is a second topology, and the transparency claim is worth
             // exactly as much as the fact that it is measured on the shipping one.
-            const float damperPosition = dampers[index].currentPosition01();
+            //
+            // The position handed to the seam is the SMOOTHED one, not the junction's own
+            // (validated, block-snapshotted) target: through P2.2 the target went in raw and
+            // stepped at every block boundary, which with the felt down measured 5.50 dB of
+            // click-metric excess against a 3 dB criterion. What the seam does with the smoothed
+            // value -- hold it until it has drifted a thirty-second of the string, then
+            // amplitude-complementary crossfade to it -- is WaveguideString's business.
+            const auto damperPosition = static_cast<float>(damperSmoothed_[index]);
             SampleT fromNut = SampleT(0);
             SampleT fromBridge = SampleT(0);
             strings[index].readJunctionInputs(damperPosition, fromNut, fromBridge);
@@ -553,7 +577,11 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             const auto envelope = static_cast<SampleT>(gain);
             for (int t = 0; t < numTaps; ++t) {
                 const std::size_t slot = base + static_cast<std::size_t>(t);
-                const SampleT tap = strings[index].readTapAt(static_cast<float>(tapSmoothed_[slot])) * envelope;
+                // The tap INDEX is passed, not just the position: each (string, tap) owns its own
+                // crossfade anchor pair inside WaveguideString, so a second coil at a different
+                // offset gets its own staircase rather than sharing -- and fighting over -- the
+                // first one's. Every slot carries the same target today, so this moves no sample.
+                const SampleT tap = strings[index].readTapAt(t, static_cast<float>(tapSmoothed_[slot])) * envelope;
                 tapBase[slot * stride + static_cast<std::size_t>(n)] = tap;
             }
             const SampleT outgoing = strings[index].railOutgoingAtBridge();

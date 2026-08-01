@@ -83,15 +83,18 @@ struct StringNetworkParams {
                                      // wheel via pitchWheelToSemitones() (MidiTranslation.h)
     float pickupPosition01 = 0.5f;   // tap position; continuously modulatable while ringing
 
-    // Junction position, 0 = nut, 1 = bridge. LIVE from Task P2.2 but NOT YET SMOOTHED: a change
-    // takes effect on the next block boundary, and the click-free machinery (per-sample smoothing
-    // here, dual-anchor amplitude-complementary crossfade inside WaveguideString's junction seam)
-    // is Task P2.3. What that costs today is bounded and worth stating rather than discovering: at
-    // engagement 0 the junction is bit-exactly transparent AT EVERY POSITION, so moving this while
-    // no damper is engaged cannot produce a click at all. The exposure is only audible while a
-    // damper IS engaged -- during a note-off tail, or with a partial maxLoss held down -- and that
-    // is precisely the case P2.3's click test gates ("damperPosition01 swept 0.1->0.9 at 2 Hz with
-    // engagement held at 0.5").
+    // Junction position, 0 = nut, 1 = bridge. Continuously modulatable while a note rings from
+    // Task P2.3: this value is a block-snapshotted TARGET, per-sample smoothed inside process()
+    // exactly as pickupPosition01 is, and the smoothed result reaches the rails through
+    // WaveguideString's dual-anchor amplitude-complementary crossfade. Through P2.2 it was applied
+    // raw, so a change stepped at the block boundary; with a damper engaged that was an audible
+    // click, measured at 5.50 dB of click-metric excess against a 3 dB criterion (the P2.3 RED
+    // reading, tests/dsp/MovingPositionClickTests.cpp).
+    //
+    // damperPosition01(stringIndex) reports the SMOOTHED value actually in force;
+    // DamperJunction::currentPosition01() reports the validated target it is gliding toward. There
+    // is one validation point (the junction's own setParams clamp) and the smoother sits
+    // downstream of it, so the two cannot disagree about anything but the glide.
     float damperPosition01 = 0.15f;
     StringMaterialParams stringMaterial; // one global shared physics set
     BridgeAdmittanceParams bridge;       // consumed by BridgeJunction (P2.4)
@@ -303,7 +306,11 @@ template <typename SampleT> class StringNetwork {
     // audio (the P2.1 review's ruling). lossDepth is here for a concrete reason: a smoother nobody
     // can observe is a smoother nobody can gate, and the first bug in this seam was exactly that
     // -- clearStringState() snapped the engagement and left the loss depth gliding.
-    // All three return 0 for an out-of-range index.
+    //
+    // damperPosition01 is StringNetwork's OWN per-(string) smoother (Task P2.3), not a forward to
+    // the junction: DamperJunction::currentPosition01() is the validated target, this is the value
+    // in force right now, and the difference between them is exactly the glide. All three return 0
+    // for an out-of-range index.
     float damperEngagement(int stringIndex) const noexcept;
     float damperLossDepth(int stringIndex) const noexcept;
     float damperPosition01(int stringIndex) const noexcept;
@@ -312,7 +319,7 @@ template <typename SampleT> class StringNetwork {
     void handleEvent(const NoteEvent& event) noexcept;
     void applyStringParams(int stringIndex) noexcept;
     void refreshEnableTargets() noexcept;
-    void snapTapPositions(int stringIndex) noexcept;
+    void snapPositionSmoothers(int stringIndex) noexcept;
     void updateLoopStringCount() noexcept;
     bool stringHasState(int stringIndex) const noexcept;
 
@@ -360,7 +367,9 @@ template <typename SampleT> class StringNetwork {
     static constexpr double kSilenceWindowSeconds = 0.050;
     static constexpr float kSilenceFloor = 1.0e-5f; // -100 dBFS: below this the tail is cleared
 
-    // Per-sample smoothing time for pickupPosition01, matching WaveguideString's own smoothers.
+    // Per-sample smoothing time for pickupPosition01 AND damperPosition01, matching WaveguideString's
+    // own smoothers. Both positions are block-snapshotted targets smoothed per sample inside
+    // process(); the smoothed value is what WaveguideString's dual-anchor crossfade is handed.
     static constexpr double kPositionSmoothingSeconds = 0.008;
 
     // Per-string enable ramp: the fade a string takes to or from silence when perString[i].enabled
@@ -412,6 +421,15 @@ template <typename SampleT> class StringNetwork {
     double positionSmoothingCoeff_ = 0.0;
     std::array<double, kTapSlots> tapTarget_ = filledTapSlots(kDefaultTapPosition01);
     std::array<double, kTapSlots> tapSmoothed_ = filledTapSlots(kDefaultTapPosition01);
+
+    // One damper-position smoother per STRING (Task P2.3). Per string rather than global because
+    // every place that snaps a smoother -- reset(), a setNumStrings() increase over a silent string
+    // -- is per string, and a global smoother could not be snapped for one string without stepping
+    // the junction of every other one that is still ringing. The target is read back from the
+    // string's own DamperJunction after setParams, so the clamp/NaN validation happens in exactly
+    // one place and this smoother is downstream of it.
+    std::array<double, kMaxStrings> damperTarget_{};
+    std::array<double, kMaxStrings> damperSmoothed_{};
     int silenceWindowSamples_ = 1;
     float enableRampStep_ = 1.0f;
 

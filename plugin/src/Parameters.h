@@ -62,9 +62,12 @@ inline constexpr const char* outputGainDb = "outputGainDb";
 
 // Damper (cnpg::dsp::DamperJunctionParams, nested under StringNetworkParams::damper, plus
 // damperPosition01 on StringNetworkParams itself -- exactly the split pickupPosition01 has, and for
-// the same reason: the POSITION is a StringNetwork-owned junction position that Task P2.3 makes
-// continuously modulatable, while depth and felt time are the junction module's own behaviour.
-// Task P2.2. The state version stays 2 (it stays 2 through all of P2, per Task P2.1).
+// the same reason: the POSITION is a StringNetwork-owned junction position, continuously
+// modulatable while a note rings from Task P2.3, while depth and felt time are the junction module's
+// own behaviour. Task P2.2 wired it; Task P2.3 made automating it click-free (per-sample smoothing
+// in StringNetwork, dual-anchor crossfade on WaveguideString's seam), which is what this parameter
+// being automatable had been promising since P2.2 and not delivering.
+// The state version stays 2 (it stays 2 through all of P2, per Task P2.1).
 inline constexpr const char* damperPosition01 = "damperPosition01";
 inline constexpr const char* damperMaxLoss = "damperMaxLoss";
 inline constexpr const char* damperFeltTimeMs = "damperFeltTimeMs";

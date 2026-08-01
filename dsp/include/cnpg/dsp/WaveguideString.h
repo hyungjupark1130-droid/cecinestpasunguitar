@@ -1,8 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <type_traits>
 #include <vector>
+
+#include "cnpg/dsp/Common.h"
 
 // WaveguideString -- see docs/plan.md section 2.4. Task P1.1 landed StringMaterialParams only (the
 // APVTS-backed P1 parameter surface, already its final shape per the draft); Task P1.4 adds
@@ -78,8 +81,68 @@
 // orthogonal embedding, whose "states" are simply the rail samples at delays base+1..base+3; see
 // WaveguideString.cpp. `energyEstimate()` is a diagnostic/test entry point, NOT a realtime path:
 // it may run that closed-form factorization on first call after a coefficient change.
+//
+// ---------------------------------------------------------------------------------------------
+// MOVING POSITIONS: the dual-anchor amplitude-complementary crossfade (Task P2.3)
+// ---------------------------------------------------------------------------------------------
+// Every position-mapped access this class offers -- the pickup tap and the two-port junction seam
+// -- reads the rails through a CROSSFADED PAIR of anchors rather than at a position that slides
+// with the parameter. The read position is therefore piecewise constant, and every step it takes is
+// an amplitude-complementary linear crossfade between the position it was reading and the position
+// it is going to:
+//
+//     anchor A = the committed position; anchor B = the position being faded in
+//     g2 = the crossfade's progress in [0, 1]; g1 = 1 - g2      (so g1 + g2 = 1 by construction)
+//     read = g1 * r(A) + g2 * r(B)
+//
+// While |requested - A| stays within kPositionAnchorThreshold01 (1/32 of the string) nothing moves
+// at all: a 1/32 position error is a timbral nuance, and holding it is what keeps a slowly drifting
+// parameter from resampling the rails at all. When the request departs beyond that threshold, B
+// opens at the requested position, g2 ramps 0 -> 1 over kPositionCrossfadeSeconds (128 samples at
+// 48 kHz, scaled with the sample rate), and B then BECOMES A. Because B opens with g2 == 0, the
+// output at the first sample of a fade is exactly r(A) -- the same value it was the sample before
+// -- and at the last it is exactly r(B): the read is continuous across the whole staircase. A fade
+// that completes re-arms on the very next sample, so a fast sweep becomes a chain of overlapping
+// amplitude-complementary segments rather than one long fade or a zipper.
+//
+// LINEAR, NOT EQUAL-POWER, and that is a decision rather than a simplification. Two taps a
+// thirty-second of a string apart are strongly correlated: a constant-POWER law (g1^2 + g2^2 = 1)
+// applied to correlated signals produces up to +3 dB mid-fade plus comb coloration -- the exact
+// artifact this machinery exists to prevent. Amplitude-complementary weights sum the two reads to a
+// convex combination, which can never exceed the larger of them.
+//
+// PASSIVITY OF THE MOVING SEAM, structurally rather than by measurement. Write r for the (linear)
+// functional the crossfade reads a rail with, i.e. r = g1 r_A + g2 r_B where each r_p is the
+// two-slot linear interpolation at p. railDeposit is the EXACT TRANSPOSE of railInterpolate (same
+// two slots, same two weights), so writeJunctionOutputs deposits through r^T. The seam is then
+// x' = x + r^T (S (r x) - r x), and with m = ||r||^2 the energy identity is
+//
+//     ||x'||^2 = ||x||^2 + (2 - 2m) y.u + (m - 2) ||y||^2 + m ||u||^2,   y = r x, u = S y
+//
+// which is <= ||x||^2 for every m <= 1 whenever ||u|| <= ||y||. And m <= 1 always: each ||r_p|| is
+// sqrt((1-f)^2 + f^2) <= 1, so ||g1 r_A + g2 r_B|| <= g1 + g2 = 1 by the triangle inequality. The
+// moving seam cannot create energy no matter how far apart the two anchors sit or where the fade
+// has got to -- which is what the tier-2 moving-junction [energy] case measures rather than
+// assumes.
+//
+// TRANSPARENCY SURVIVES THE MOTION. writeJunctionOutputs deposits the DIFFERENCE between the
+// junction's outputs and the waves it just read through the SAME crossfaded functional, so a
+// junction that returns its inputs unchanged deposits exactly 0.0 at BOTH anchors, mid-fade
+// included. A transparent damper therefore still costs a ringing string nothing while its position
+// is swept -- and, as the P2.3 [energy] case records, that is also exactly why a damper-position
+// sweep under setLosslessTestMode(true) is bit-exactly inert: lossless mode is what makes the
+// junction transparent in the first place.
+//
+// The exciter is deliberately NOT part of this: injectAt's position is latched at note-on and never
+// modulated, so it needs no anchor and gets none.
 
 namespace cnpg::dsp {
+
+// The moving-position machinery's two constants, stated once here so tests reference them rather
+// than restating numbers. The threshold is in string lengths; the crossfade duration is in seconds
+// and is converted to a whole number of samples at prepare() time (128 samples at 48 kHz).
+inline constexpr float kPositionAnchorThreshold01 = 1.0f / 32.0f;
+inline constexpr double kPositionCrossfadeSeconds = 128.0 / 48000.0;
 
 enum class FractionalDelayKind : std::uint8_t { Lagrange3, Thiran1 }; // P1 spike decides; fixed at prepare
 
@@ -161,19 +224,36 @@ template <typename SampleT> class WaveguideString {
     // weights (g1 + g2 = 1) across the two adjacent rail slots.
     void injectAt(float position01, SampleT excitation) noexcept;
 
-    // Fractional tap; amplitude-complementary linear crossfade (g1 + g2 = 1) for click-free
-    // position motion (P2). At position01 == 0 the two rails cancel to the accuracy of that linear
-    // crossfade against the loop's own interpolator -- near-silent at the rigid nut, but not
-    // bit-exactly zero, since the loop reads the rail with the fractional-delay interpolator while
-    // the tap reads it linearly.
-    SampleT readTapAt(float position01) const noexcept;
+    // Fractional tap, read through the dual-anchor amplitude-complementary crossfade described in
+    // the file header, so `position01` may be modulated continuously while the string rings. NOT
+    // const: the call retargets the tap slot's anchor pair. That retarget is IDEMPOTENT -- calling
+    // readTapAt twice with the same position inside one sample returns the same value and leaves
+    // the same state -- because the crossfade itself only ever advances in tick().
+    //
+    // `tapSlot` selects one of kMaxTapsPerString independent anchor pairs, so a network reading a
+    // string at several coil positions gets a crossfade per coil rather than one shared one; the
+    // single-argument overload is slot 0. An out-of-range slot returns 0.
+    //
+    // At position01 == 0 the two rails cancel to the accuracy of the linear rail interpolation
+    // against the loop's own interpolator -- near-silent at the rigid nut, but not bit-exactly
+    // zero, since the loop reads the rail with the fractional-delay interpolator while the tap
+    // reads it linearly.
+    SampleT readTapAt(int tapSlot, float position01) noexcept;
+    SampleT readTapAt(float position01) noexcept { return readTapAt(0, position01); }
 
     // 2-port insertion seam for DamperJunction at position p (DamperJunction itself is P2.2).
     // readJunctionInputs reports the two waves arriving at p; writeJunctionOutputs deposits the
     // DIFFERENCE between the junction's outputs and those same arriving waves back into the
     // rails, so a transparent junction (toBridge == fromNut, toNut == fromBridge) is bit-exactly
-    // a no-op. Both use the same amplitude-complementary linear weights as injectAt/readTapAt.
-    void readJunctionInputs(float position01, SampleT& fromNut, SampleT& fromBridge) const noexcept;
+    // a no-op. Both address the rails through the seam's own dual-anchor crossfade (file header),
+    // which is why readJunctionInputs is no longer const.
+    //
+    // THE PAIR IS ONE OPERATION and must be called with the same position inside one sample, read
+    // first. Both retarget the seam's anchor pair and that retarget is idempotent, so the write
+    // sees exactly the weights the read used -- which is what makes the difference it deposits the
+    // exact transpose of the read, and therefore what makes the moving seam passive (file header)
+    // and a transparent junction bit-exactly free even mid-fade.
+    void readJunctionInputs(float position01, SampleT& fromNut, SampleT& fromBridge) noexcept;
     void writeJunctionOutputs(float position01, SampleT toBridge, SampleT toNut) noexcept;
 
     // ---- bridge port coupling (power-normalized wave variables) -------------------------------
@@ -232,6 +312,34 @@ template <typename SampleT> class WaveguideString {
     // diagnostic use only (docs/plan.md section 4.2).
     double energyEstimate() const noexcept;
 
+    // Where a moving read actually sits RIGHT NOW (Task P2.3) -- all of it, which is the point.
+    // `anchor01` is the committed position, `pending01` the one being faded in (equal to the anchor
+    // when no crossfade is in flight), and `crossfade01` is g2, the amplitude-complementary weight
+    // on `pending01`. The effective read position is therefore
+    //
+    //     (1 - crossfade01) * anchor01 + crossfade01 * pending01
+    //
+    // and THAT is the quantity a continuity assertion has to be made about: a crossfade commit
+    // moves `anchor01` by up to the whole threshold in one sample while the effective position does
+    // not move at all, so an assertion written against the anchor alone would report a jump that
+    // does not exist -- and, worse, would miss one that does. A smoother nobody can observe is a
+    // smoother nobody can gate (the P2.2 lesson), and this is the moving seam's entire state.
+    // `armed` is false only before the first read after reset(), where there is no previous
+    // position to be continuous with and the first request is therefore snapped rather than faded.
+    struct PositionCrossfade {
+        float anchor01 = 0.0f;
+        float pending01 = 0.0f;
+        float crossfade01 = 0.0f;
+        bool armed = false;
+    };
+    PositionCrossfade tapCrossfade(int tapSlot) const noexcept;
+    PositionCrossfade junctionCrossfade() const noexcept;
+
+    // Length of one position crossfade in samples at the prepared rate: round(fs *
+    // kPositionCrossfadeSeconds), floored at 1. Exposed so a test can assert the ramp it actually
+    // runs instead of re-deriving the rounding.
+    int positionCrossfadeSamples() const noexcept { return positionCrossfadeSamples_; }
+
   private:
     struct FirstOrderAllpass {
         SampleT state{};
@@ -242,6 +350,22 @@ template <typename SampleT> class WaveguideString {
             return y;
         }
     };
+
+    // One moving read's whole state: the committed anchor, the anchor being faded in, the fade's
+    // progress, and whether anything has been read through it yet. See the file header.
+    struct PositionAnchor {
+        double anchor = 0.0;
+        double pending = 0.0;
+        double fade = 0.0; // g2 in [0, 1]
+        bool fading = false;
+        bool armed = false; // false until the first read after reset(): nothing to be continuous with
+    };
+
+    // Idempotent within a sample -- see readTapAt / readJunctionInputs for why that matters.
+    void retargetAnchor(PositionAnchor& anchor, double position01) noexcept;
+    void advanceAnchor(PositionAnchor& anchor) noexcept; // one crossfade step; called from tick()
+    SampleT tapAtPosition(double position01) const noexcept;
+    static PositionCrossfade describeAnchor(const PositionAnchor& anchor) noexcept;
 
     void retargetSmoothers() noexcept;
     void advanceSmoothers() noexcept;
@@ -259,10 +383,8 @@ template <typename SampleT> class WaveguideString {
     // Position mapping. p = 0 (nut) is the freshest write of the up rail and the far end of the
     // dn rail; p = 1 (bridge) is the far end of the up rail and the freshest dn write. The span is
     // whatever part of the rail is still ADDRESSABLE -- see positionSpan_.
-    double upDelayAt(float position01) const noexcept { return 1.0 + static_cast<double>(position01) * positionSpan_; }
-    double dnDelayAt(float position01) const noexcept {
-        return 1.0 + (1.0 - static_cast<double>(position01)) * positionSpan_;
-    }
+    double upDelayAt(double position01) const noexcept { return 1.0 + position01 * positionSpan_; }
+    double dnDelayAt(double position01) const noexcept { return 1.0 + (1.0 - position01) * positionSpan_; }
 
     void refreshEnergyCache() const noexcept;
 
@@ -335,6 +457,14 @@ template <typename SampleT> class WaveguideString {
     bool bridgeAcceptPending_ = false;
 
     double realizedLoopDelay_ = 0.0;
+
+    // ---- moving-position anchors (see the file header) -----------------------------------------
+    // One anchor pair per tap slot plus one for the junction seam. They are ORDINARY state, not a
+    // cache: the fade advances once per tick() and nothing else may move it.
+    std::array<PositionAnchor, kMaxTapsPerString> tapAnchor_{};
+    PositionAnchor junctionAnchor_{};
+    int positionCrossfadeSamples_ = 1;
+    double positionFadeStep_ = 1.0;
 
     // ---- energy-storage cache (see energyEstimate()) -------------------------------------------
     mutable bool energyCacheValid_ = false;

@@ -240,6 +240,12 @@ void WaveguideString<SampleT>::prepare(double sampleRate, int /*maxBlockSize*/, 
 
     smoothingCoeff_ = 1.0 - std::exp(-1.0 / (kSmoothingTimeSeconds * sampleRate_));
 
+    // The position crossfade is specified as a DURATION and realized as a whole number of samples,
+    // so the same gesture takes the same time at every rate: 128 samples at 48 kHz, 118 at 44.1,
+    // 256 at 96. Floored at one sample, which is a degenerate but well-defined fade.
+    positionCrossfadeSamples_ = std::max(1, static_cast<int>(std::lround(kPositionCrossfadeSeconds * sampleRate_)));
+    positionFadeStep_ = 1.0 / static_cast<double>(positionCrossfadeSamples_);
+
     reset();
 }
 
@@ -258,6 +264,18 @@ template <typename SampleT> void WaveguideString<SampleT>::reset() noexcept {
     bridgeOutgoing_ = SampleT(0);
     bridgeAccepted_ = SampleT(0);
     bridgeAcceptPending_ = false;
+
+    // DISARM every moving-position anchor rather than snap it onto a remembered target. Same
+    // contract as the smoothers below -- a reset instance is indistinguishable from a freshly
+    // prepared one -- reached the honest way: after reset() there is no previous read position for
+    // the next one to be continuous WITH, so the first request snaps onto whatever it asks for
+    // instead of crossfading in from wherever the last note left the pickup. Carrying a remembered
+    // anchor across a reset would make a re-init at a new pitch glide the tap for 128 samples over
+    // a string whose rails were just zeroed -- inaudible, and still a difference from a fresh
+    // instance that nothing would be able to justify.
+    for (auto& anchor : tapAnchor_)
+        anchor = PositionAnchor{};
+    junctionAnchor_ = PositionAnchor{};
 
     // Snap every smoother onto its target: a reset instance must be indistinguishable from a
     // freshly prepared one (docs/plan.md section 4.1, "reset is idempotent and complete").
@@ -543,35 +561,153 @@ SampleT WaveguideString<SampleT>::railSampleAtDelay(bool upRail, int delaySample
 }
 
 template <typename SampleT> void WaveguideString<SampleT>::injectAt(float position01, SampleT excitation) noexcept {
-    const float p = std::clamp(position01, 0.0f, 1.0f);
+    // No anchor and no crossfade, deliberately: the exciter's position is latched at note-on and
+    // never modulated, so there is no motion for the machinery below to make click-free.
+    const double p = static_cast<double>(std::clamp(position01, 0.0f, 1.0f));
     const SampleT half = excitation * SampleT(0.5);
     railDeposit(up_, upWrite_, upDelayAt(p), half);
     railDeposit(dn_, dnWrite_, dnDelayAt(p), half);
 }
 
-template <typename SampleT> SampleT WaveguideString<SampleT>::readTapAt(float position01) const noexcept {
-    const float p = std::clamp(position01, 0.0f, 1.0f);
-    return railInterpolate(up_, upWrite_, upDelayAt(p)) + railInterpolate(dn_, dnWrite_, dnDelayAt(p));
+// ------------------------------------------------------------------------------------------
+// moving positions: the dual-anchor amplitude-complementary crossfade (see the header)
+// ------------------------------------------------------------------------------------------
+
+template <typename SampleT>
+void WaveguideString<SampleT>::retargetAnchor(PositionAnchor& anchor, double position01) noexcept {
+    if (!anchor.armed) {
+        // First read after reset(): there is no previous position to be continuous with, so this
+        // one IS the anchor. Snapping here is what makes a freshly reset string read where it is
+        // asked to rather than crossfading in from a default.
+        anchor.anchor = position01;
+        anchor.pending = position01;
+        anchor.fade = 0.0;
+        anchor.fading = false;
+        anchor.armed = true;
+        return;
+    }
+    if (anchor.fading)
+        return; // `pending` is FROZEN for the length of the fade -- which is what makes this
+                // function idempotent inside one sample, and therefore what lets the junction
+                // seam's read and write agree on the weights without passing them between the two.
+    if (std::fabs(position01 - anchor.anchor) > static_cast<double>(kPositionAnchorThreshold01)) {
+        anchor.pending = position01;
+        anchor.fade = 0.0; // g2 == 0: the fade's first sample reads exactly where the last one did
+        anchor.fading = true;
+    }
+}
+
+template <typename SampleT> void WaveguideString<SampleT>::advanceAnchor(PositionAnchor& anchor) noexcept {
+    if (!anchor.fading)
+        return;
+    if (anchor.fade >= 1.0) {
+        // The previous sample was read entirely at `pending`, so committing it now moves the
+        // effective read position by exactly nothing. Committing on the sample that REACHES 1.0
+        // instead would skip the g2 == 1 sample and leave the last step of the ramp uncrossfaded.
+        anchor.anchor = anchor.pending;
+        anchor.fade = 0.0;
+        anchor.fading = false;
+        return; // re-arms on the next retarget, which is how a fast sweep chains segments
+    }
+    anchor.fade = std::min(1.0, anchor.fade + positionFadeStep_);
 }
 
 template <typename SampleT>
-void WaveguideString<SampleT>::readJunctionInputs(float position01, SampleT& fromNut,
-                                                  SampleT& fromBridge) const noexcept {
-    const float p = std::clamp(position01, 0.0f, 1.0f);
-    fromNut = railInterpolate(up_, upWrite_, upDelayAt(p));
-    fromBridge = railInterpolate(dn_, dnWrite_, dnDelayAt(p));
+typename WaveguideString<SampleT>::PositionCrossfade
+WaveguideString<SampleT>::describeAnchor(const PositionAnchor& anchor) noexcept {
+    PositionCrossfade out;
+    out.anchor01 = static_cast<float>(anchor.anchor);
+    out.pending01 = static_cast<float>(anchor.fading ? anchor.pending : anchor.anchor);
+    out.crossfade01 = static_cast<float>(anchor.fading ? anchor.fade : 0.0);
+    out.armed = anchor.armed;
+    return out;
+}
+
+template <typename SampleT>
+typename WaveguideString<SampleT>::PositionCrossfade
+WaveguideString<SampleT>::tapCrossfade(int tapSlot) const noexcept {
+    if (tapSlot < 0 || tapSlot >= kMaxTapsPerString)
+        return PositionCrossfade{};
+    return describeAnchor(tapAnchor_[static_cast<std::size_t>(tapSlot)]);
+}
+
+template <typename SampleT>
+typename WaveguideString<SampleT>::PositionCrossfade WaveguideString<SampleT>::junctionCrossfade() const noexcept {
+    return describeAnchor(junctionAnchor_);
+}
+
+template <typename SampleT> SampleT WaveguideString<SampleT>::tapAtPosition(double position01) const noexcept {
+    return railInterpolate(up_, upWrite_, upDelayAt(position01)) +
+           railInterpolate(dn_, dnWrite_, dnDelayAt(position01));
+}
+
+template <typename SampleT> SampleT WaveguideString<SampleT>::readTapAt(int tapSlot, float position01) noexcept {
+    if (tapSlot < 0 || tapSlot >= kMaxTapsPerString)
+        return SampleT(0);
+    PositionAnchor& anchor = tapAnchor_[static_cast<std::size_t>(tapSlot)];
+    retargetAnchor(anchor, static_cast<double>(std::clamp(position01, 0.0f, 1.0f)));
+    // The not-fading path is the plain single-anchor read, not a two-anchor mix weighted (1, 0).
+    // Both are exact in IEEE-754, and this one is what keeps a static-position render bit-identical
+    // to the pre-P2.3 arithmetic -- which is what leaves the layer-(b) goldens unmoved.
+    if (!anchor.fading)
+        return tapAtPosition(anchor.anchor);
+    const auto g2 = static_cast<SampleT>(anchor.fade);
+    const SampleT g1 = SampleT(1) - g2;
+    return g1 * tapAtPosition(anchor.anchor) + g2 * tapAtPosition(anchor.pending);
+}
+
+template <typename SampleT>
+void WaveguideString<SampleT>::readJunctionInputs(float position01, SampleT& fromNut, SampleT& fromBridge) noexcept {
+    retargetAnchor(junctionAnchor_, static_cast<double>(std::clamp(position01, 0.0f, 1.0f)));
+    const PositionAnchor& anchor = junctionAnchor_;
+    if (!anchor.fading) {
+        fromNut = railInterpolate(up_, upWrite_, upDelayAt(anchor.anchor));
+        fromBridge = railInterpolate(dn_, dnWrite_, dnDelayAt(anchor.anchor));
+        return;
+    }
+    const auto g2 = static_cast<SampleT>(anchor.fade);
+    const SampleT g1 = SampleT(1) - g2;
+    fromNut = g1 * railInterpolate(up_, upWrite_, upDelayAt(anchor.anchor)) +
+              g2 * railInterpolate(up_, upWrite_, upDelayAt(anchor.pending));
+    fromBridge = g1 * railInterpolate(dn_, dnWrite_, dnDelayAt(anchor.anchor)) +
+                 g2 * railInterpolate(dn_, dnWrite_, dnDelayAt(anchor.pending));
 }
 
 template <typename SampleT>
 void WaveguideString<SampleT>::writeJunctionOutputs(float position01, SampleT toBridge, SampleT toNut) noexcept {
-    const float p = std::clamp(position01, 0.0f, 1.0f);
-    // Deposit only the DIFFERENCE the junction introduces, re-reading the same points rather than
-    // caching them: a transparent junction is then bit-exactly a no-op and the seam stays const-
-    // correct and stateless.
-    const SampleT incomingUp = railInterpolate(up_, upWrite_, upDelayAt(p));
-    const SampleT incomingDn = railInterpolate(dn_, dnWrite_, dnDelayAt(p));
-    railDeposit(up_, upWrite_, upDelayAt(p), toBridge - incomingUp);
-    railDeposit(dn_, dnWrite_, dnDelayAt(p), toNut - incomingDn);
+    // Idempotent given the position the read was handed, so this recovers exactly the weights the
+    // read used without either call having to carry them across.
+    retargetAnchor(junctionAnchor_, static_cast<double>(std::clamp(position01, 0.0f, 1.0f)));
+    const PositionAnchor& anchor = junctionAnchor_;
+
+    // Deposit only the DIFFERENCE the junction introduces, re-reading the same points through the
+    // same functional rather than caching them: a transparent junction is then bit-exactly a no-op,
+    // mid-crossfade included, because the re-read reproduces the read's arithmetic exactly.
+    // BOTH rails are re-read before EITHER is deposited into -- the two anchors of a fade can land
+    // on overlapping slots, and depositing between the reads would let the up rail's deposit
+    // contaminate the dn rail's read.
+    if (!anchor.fading) {
+        const SampleT incomingUp = railInterpolate(up_, upWrite_, upDelayAt(anchor.anchor));
+        const SampleT incomingDn = railInterpolate(dn_, dnWrite_, dnDelayAt(anchor.anchor));
+        railDeposit(up_, upWrite_, upDelayAt(anchor.anchor), toBridge - incomingUp);
+        railDeposit(dn_, dnWrite_, dnDelayAt(anchor.anchor), toNut - incomingDn);
+        return;
+    }
+    const auto g2 = static_cast<SampleT>(anchor.fade);
+    const SampleT g1 = SampleT(1) - g2;
+    const SampleT incomingUp = g1 * railInterpolate(up_, upWrite_, upDelayAt(anchor.anchor)) +
+                               g2 * railInterpolate(up_, upWrite_, upDelayAt(anchor.pending));
+    const SampleT incomingDn = g1 * railInterpolate(dn_, dnWrite_, dnDelayAt(anchor.anchor)) +
+                               g2 * railInterpolate(dn_, dnWrite_, dnDelayAt(anchor.pending));
+    // The EXACT TRANSPOSE of the read above: same two anchors, same two weights. That adjointness
+    // is what carries the moving seam's passivity (see the header's energy identity), and it is the
+    // whole reason the write may not simply deposit at the requested position.
+    const SampleT differenceUp = toBridge - incomingUp;
+    const SampleT differenceDn = toNut - incomingDn;
+    railDeposit(up_, upWrite_, upDelayAt(anchor.anchor), g1 * differenceUp);
+    railDeposit(up_, upWrite_, upDelayAt(anchor.pending), g2 * differenceUp);
+    railDeposit(dn_, dnWrite_, dnDelayAt(anchor.anchor), g1 * differenceDn);
+    railDeposit(dn_, dnWrite_, dnDelayAt(anchor.pending), g2 * differenceDn);
 }
 
 template <typename SampleT> void WaveguideString<SampleT>::railAcceptFromBridge(SampleT reflected) noexcept {
@@ -599,6 +735,14 @@ template <typename SampleT> void WaveguideString<SampleT>::tick() noexcept {
         advanceSmoothers();
         updateCoefficients();
     }
+
+    // The ONE place a position crossfade advances. Putting it here rather than inside the reads is
+    // what makes those reads idempotent within a sample -- so the junction seam's read and write
+    // cannot disagree about the weights, and so a caller that probes a tap twice does not
+    // accidentally run the fade at double speed.
+    for (auto& anchor : tapAnchor_)
+        advanceAnchor(anchor);
+    advanceAnchor(junctionAnchor_);
 
     SampleT toBridge = railFractionalRead(up_, upWrite_);
     SampleT toNut = railFractionalRead(dn_, dnWrite_);

@@ -4,8 +4,9 @@
 
 // DamperJunction -- see docs/plan.md section 2.5. A strictly LINEAR, MEMORYLESS two-port
 // scattering junction inserted at position p on a WaveguideString, through that class's
-// readJunctionInputs / writeJunctionOutputs seam. Task P2.2 lands it; the moving-position
-// crossfade machinery on the seam itself is Task P2.3, so p is static here. Zero JUCE includes.
+// readJunctionInputs / writeJunctionOutputs seam. Task P2.2 lands it; Task P2.3 makes p move --
+// but NOT here: the position smoother lives in StringNetwork and the dual-anchor crossfade lives on
+// WaveguideString's seam, so this class stayed memoryless in p and unchanged. Zero JUCE includes.
 //
 // ---------------------------------------------------------------------------------------------
 // THE PHYSICS (derived, not fitted -- this is what makes passivity structural)
@@ -87,9 +88,13 @@
 // ---------------------------------------------------------------------------------------------
 // Two per-sample one-pole smoothers and nothing else: the engagement ramp (driven by engage() /
 // release() with the felt time constant) and the loss depth (so a maxLoss automation move on an
-// engaged damper does not zipper). Position carries no smoother in P2.2 -- the junction is
-// memoryless in p, and the click-free motion machinery is a property of WaveguideString's seam,
-// which Task P2.3 gives the dual-anchor crossfade.
+// engaged damper does not zipper). Position carries no smoother HERE and did not grow one in P2.3
+// either -- the junction is memoryless in p, so `position01` is only ever a validated TARGET on this
+// class's surface. What makes moving it click-free is two things that both live elsewhere:
+// StringNetwork per-sample smooths it toward this target, and WaveguideString's seam reads and
+// writes the smoothed value through a dual-anchor amplitude-complementary crossfade.
+// StringNetwork::damperPosition01(stringIndex) is therefore the value in FORCE and
+// currentPosition01() below is the target it is gliding toward.
 
 namespace cnpg::dsp {
 
@@ -101,10 +106,12 @@ inline constexpr float kFeltTimeConstantMinMs = 20.0f;
 inline constexpr float kFeltTimeConstantMaxMs = 100.0f;
 
 struct DamperJunctionParams {
-    // Junction position on the string, 0 = nut, 1 = bridge. Continuously modulatable while a note
-    // rings from Task P2.3; static within a block here. StringNetwork mirrors its own
+    // Junction position on the string, 0 = nut, 1 = bridge. A validated TARGET (see the STATE note
+    // above): this class clamps it and is memoryless in it, and from Task P2.3 StringNetwork
+    // per-sample smooths toward it. StringNetwork mirrors its own
     // StringNetworkParams::damperPosition01 into this field (docs/plan.md section 2.7), so on the
-    // network's surface that one is the single source of truth.
+    // network's surface that one is the single source of truth and this is the one validation point
+    // the network's smoother then sits downstream of.
     float position01 = 0.15f;
 
     // Loss depth when fully engaged, 0..1. 1 is the matched resistive termination (see above):
