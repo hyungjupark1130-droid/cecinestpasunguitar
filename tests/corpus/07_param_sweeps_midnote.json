@@ -1,0 +1,76 @@
+{
+  "schema": "cnpg-automation/1",
+  "description": "Automation lanes for 07_param_sweeps_midnote.mid. One sweep section per held note, so a listener can attribute what they hear to one moving parameter at a time. Breakpoint times are in SECONDS from the start of the render; values are linearly interpolated between breakpoints and held flat before the first and after the last. Every value below stays inside the parameter's own shipped APVTS range (plugin/src/Parameters.cpp) -- this is an abuse case in how FAR and how FAST the knobs move, not in moving them somewhere a user could not.",
+  "lanes": [
+    {
+      "param": "pickupPosition01",
+      "comment": "Note 1 (MIDI 45, 0.5-8.0 s): tap swept from centre to hard-bridge to hard-neck and back. Checklist items 7 and 10.",
+      "breakpoints": [
+        { "time": 0.5, "value": 0.5 },
+        { "time": 2.0, "value": 0.02 },
+        { "time": 4.5, "value": 0.98 },
+        { "time": 7.0, "value": 0.5 },
+        { "time": 8.0, "value": 0.5 }
+      ]
+    },
+    {
+      "param": "pickupResonanceHz",
+      "comment": "Note 2 (MIDI 52, 8.5-16.0 s): the RLC resonance swept across most of its 100-8000 Hz range while the string rings.",
+      "breakpoints": [
+        { "time": 8.5, "value": 2500.0 },
+        { "time": 10.5, "value": 300.0 },
+        { "time": 13.0, "value": 8000.0 },
+        { "time": 15.5, "value": 2500.0 }
+      ]
+    },
+    {
+      "param": "pickupQ",
+      "comment": "Note 2, in step with the resonance sweep: broad to narrow and back.",
+      "breakpoints": [
+        { "time": 8.5, "value": 2.0 },
+        { "time": 10.5, "value": 0.7 },
+        { "time": 13.0, "value": 8.0 },
+        { "time": 15.5, "value": 2.0 }
+      ]
+    },
+    {
+      "param": "triodeDrive",
+      "comment": "Note 3 (MIDI 33, 16.5-24.0 s): drive swept 0 to 1 mid-note. Read against the RC2 caveat in docs/listening/physical-plausibility-checklist.md -- this stage is a static waveshaper and is NOT a drive-feel voicing reference.",
+      "breakpoints": [
+        { "time": 16.5, "value": 0.5 },
+        { "time": 18.0, "value": 0.0 },
+        { "time": 21.0, "value": 1.0 },
+        { "time": 23.5, "value": 0.5 }
+      ]
+    },
+    {
+      "param": "materialLossGainLow",
+      "comment": "Note 4 (MIDI 57, 24.5-31.0 s): material morph, low-frequency loop loss.",
+      "breakpoints": [
+        { "time": 24.5, "value": 0.5 },
+        { "time": 26.0, "value": 0.05 },
+        { "time": 28.5, "value": 0.95 },
+        { "time": 30.5, "value": 0.5 }
+      ]
+    },
+    {
+      "param": "materialLossGainHigh",
+      "comment": "Note 4: high-frequency loop loss, swept in opposition to the low band so the spectral tilt moves rather than the overall decay time alone.",
+      "breakpoints": [
+        { "time": 24.5, "value": 0.5 },
+        { "time": 26.0, "value": 0.95 },
+        { "time": 28.5, "value": 0.05 },
+        { "time": 30.5, "value": 0.5 }
+      ]
+    },
+    {
+      "param": "materialDispersionAmount",
+      "comment": "Note 4: dispersion from none to full and back, i.e. from an ideal string to a stiff one, mid-note.",
+      "breakpoints": [
+        { "time": 24.5, "value": 0.0 },
+        { "time": 27.0, "value": 1.0 },
+        { "time": 30.5, "value": 0.0 }
+      ]
+    }
+  ]
+}

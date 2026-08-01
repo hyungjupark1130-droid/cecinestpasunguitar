@@ -1,0 +1,55 @@
+{
+  "schema": "cnpg-corpus/1",
+  "corpusVersion": 1,
+  "comment": "Versioned, append-only MIDI phrase corpus (docs/plan.md section 4.8). See README.md for the versioning rules, the full per-phrase authoring specification, and what every field below means. corpusVersion is an integer that increments whenever a phrase is ADDED; existing phrases and their bytes never change, so a render filename carrying a corpus version identifies exactly one set of MIDI files. Version 1 is the P1 set (01, 03, 05, 07); Task P2.8 appends 02, 04, 06, 08 and bumps it to 2.",
+  "phrases": [
+    {
+      "file": "01_chromatic_singles.mid",
+      "phase": "P1",
+      "description": "Full-range single notes: a chromatic run from MIDI 21 (A0) to 108 (C8), then five sustained anchors left to ring for 3 s each, then one pitch struck at six velocities.",
+      "exercises": "Decay character across the whole range, tuning across the whole range, velocity response, silence hygiene between notes.",
+      "checklistItems": [8, 9, 11],
+      "retriggerMode": "Physical",
+      "seed": 1,
+      "sidecar": null,
+      "params": {},
+      "durationSeconds": 60.5
+    },
+    {
+      "file": "03_legato_retrigger.mid",
+      "phase": "P1",
+      "description": "Same-pitch replucks (accelerating), an ascending legato slur, a descending legato slur, a fast trill, and same-pitch replucks on a long low string. Rendered in the default retrigger mode only; the per-mode variant renders land in Task P2.8 with DamperJunction.",
+      "exercises": "RetriggerMode::Physical semantics -- repluck over a ringing string, and a pitch-changing retrigger -- plus pop-free note transitions.",
+      "checklistItems": [3, 11],
+      "retriggerMode": "Physical",
+      "seed": 3,
+      "sidecar": null,
+      "params": {},
+      "durationSeconds": 23.1
+    },
+    {
+      "file": "05_low_string_bends.mid",
+      "phase": "P1",
+      "description": "ABUSE. Aggressive +/-2-semitone bends on the lowest playable note (MIDI 21), overlapping with replucks; then 5.5 Hz vibrato on MIDI 28; then a slow dive and return on MIDI 40 with a repluck at the bottom; then a 3 Hz full-range triangle wheel back on MIDI 21. Wheel messages are 5 ms apart throughout every ramp.",
+      "exercises": "Bend cleanliness at the extremes of the range the string rails are sized for, click-freedom under continuous wheel motion, retriggers landing mid-bend.",
+      "checklistItems": [5, 12],
+      "retriggerMode": "Physical",
+      "seed": 5,
+      "sidecar": null,
+      "params": {},
+      "durationSeconds": 23.6
+    },
+    {
+      "file": "07_param_sweeps_midnote.mid",
+      "phase": "P1",
+      "description": "ABUSE. Four long held notes, one per sweep section, each with a mid-note repluck; the sidecar sweeps pickup position, then pickup resonance and Q, then triode drive, then the material morph, while the note rings.",
+      "exercises": "Pluck-position audibility, click-free and zipper-free parameter motion mid-note, triode drive character (within the static-waveshaper caveat), abuse survival.",
+      "checklistItems": [7, 10, 12],
+      "retriggerMode": "Physical",
+      "seed": 7,
+      "sidecar": "07_param_sweeps_midnote.json",
+      "params": {},
+      "durationSeconds": 33.0
+    }
+  ]
+}
