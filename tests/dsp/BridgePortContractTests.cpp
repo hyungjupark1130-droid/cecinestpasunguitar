@@ -7,6 +7,7 @@
 #include "cnpg/dsp/WaveguideString.h"
 
 #include "support/AllocationGuard.h"
+#include "support/ClickMetric.h"
 #include "support/SpectralAnalysis.h"
 
 #include <catch2/catch_template_test_macros.hpp>
@@ -296,8 +297,11 @@ TEST_CASE("CONTRACT: BridgeJunction reaches quiescence, and decoupling releases 
     // the freeze this fix exists to remove. The rigid branch is a DECISION about what the knob
     // means, not a limit, and it is documented as one.)
     //
-    // What is gated is that the step is bounded by the junction's own output level and happens ONCE:
-    // below kBridgeMinMobilityRatio, i.e. 1e-9 of full coupling, 180 dB under the shipping default.
+    // What is gated is that the step happens ONCE and is bounded by a measured constant. Note that
+    // this branch IS user-reachable -- kBridgeMinMobilityRatio includes couplingStrength == 0, which
+    // is the Bridge Coupling parameter's minimum -- so what the gesture costs through the network is
+    // measured too, in "CONTRACT: dragging Bridge Coupling to zero is click-free through the
+    // network" below. This case is the junction-level half.
     double transitionPeak = 0.0;
     frozen.scatter(incident.data(), outgoing.data(), ports);
     for (int p = 0; p < ports; ++p)
@@ -320,9 +324,17 @@ TEST_CASE("CONTRACT: BridgeJunction reaches quiescence, and decoupling releases 
     REQUIRE(frozen.isQuiescent());
     // Nothing from nothing, for ever, from the sample after the transition.
     REQUIRE(peakFromNothing == 0.0);
-    // ...and the transition itself is bounded by what the junction was radiating, not by its stored
-    // energy: it is one sample of the signal that was already there, not an impulse.
-    REQUIRE(transitionPeak <= std::sqrt(2.0 * beforeDecoupling));
+    // ...and the transition is bounded by a MEASURED constant, not by a theorem. `sqrt(2*storage)`
+    // was tried first and is worthless as a gate: with unit port impedances it equals ||s||, and
+    // |v| = 2|<(sqrt(Z_M),sqrt(Z_K)), s>| / sigma <= 2 sqrt(L) ||s|| / (sum Z_i + L) <= ||s||
+    // whenever sum Z_i >= 1, by (sqrt(L) - 1)^2 >= 0. It holds identically, so it read 0.058 against
+    // a bound of 4.77 -- 82x loose, and a change making the step 50x larger would still have passed.
+    // (Found by the P2.4 re-review; the same class as the P2.1 ruling that an assertion which cannot
+    // fail is not a test.) 0.08 is the measured 0.058078 with ~38% headroom, on a probe whose
+    // incident waves are unit-amplitude sines -- an absolute number, so it moves if the step does.
+    REQUIRE(transitionPeak <= 0.08);
+    // Non-vacuous in the other direction: the transition really is a step, not nothing.
+    REQUIRE(transitionPeak > 0.0);
 
     // ...and the same thing through the network, which is where it mattered: a network that has been
     // silent must report a storage functional heading for zero rather than parked above it.
@@ -344,6 +356,182 @@ TEST_CASE("CONTRACT: BridgeJunction reaches quiescence, and decoupling releases 
     const double afterSilence = network.energyEstimate();
     std::cout << "[contract] network storage functional after 30 s of silence: " << afterSilence << "\n";
     REQUIRE(afterSilence < 1.0e-11);
+}
+
+TEST_CASE("CONTRACT: dragging Bridge Coupling to zero is click-free through the network", "[contract]") {
+    // THE GESTURE A USER CAN ACTUALLY MAKE, gated (P2.4 re-review, N1/N2/N4). `bridgeCoupling` is an
+    // APVTS parameter over the full 0..1 unit range, so its MINIMUM is exactly the value that enters
+    // BridgeJunction's rigid branch and discards the junction's store. Earlier text in this file and
+    // in BridgeJunction claimed that branch fired "at a value no listener and no test can reach";
+    // that was false, and it is why the transition had never been measured through the network at
+    // all. It is reachable by dragging one slider to its stop while the instrument rings.
+    //
+    // ---------------------------------------------------------------------------------------------
+    // THE DECOMPOSITION, which is the whole point of this case
+    // ---------------------------------------------------------------------------------------------
+    // Decoupling the bridge is a LEGITIMATE timbral change -- the strings stop coupling, so of course
+    // the render differs. A raw click reading across the gesture therefore measures two things at
+    // once and cannot say whether the store release contributed anything. The control separates
+    // them: a gesture to `couplingStrength = 1e-6` is acoustically the same decoupling but stays in
+    // the LOADED branch, so the junction's store DECAYS instead of being discarded. The difference
+    // between the two readings is the store release's own contribution, and that is what is gated.
+    constexpr int kStrings = 6;
+    constexpr int kChord[kStrings] = {40, 45, 50, 55, 59, 64};
+    constexpr int kTailBlocks = 200;
+    constexpr double kPreSeconds = 0.25;
+    constexpr double kPostSeconds = 0.06;
+    // Bound on the store release's own contribution. Chosen from the measurement, with the
+    // reasoning stated at the gate at the end of this case.
+    constexpr double kStoreReleaseLimitDb = 0.05;
+
+    struct Config {
+        const char* what;
+        float resonanceHz;
+        float damping;
+        float from;
+        int ringBlocks; // when the knob lands
+    };
+    // The shipping default, plus the corners that make the DISCARDED STORE as large as possible
+    // relative to what the strings are doing when the knob lands -- which is the quantity being
+    // decomposed out. That means full coupling into a high-Q mode sitting on the chord (the junction
+    // holds the most), and landing the gesture LATE in the decay (the strings are quietest, so the
+    // store's share of the total motion is largest).
+    const Config configs[] = {
+        {"shipping default", 180.0f, 0.5f, 0.35f, 400},
+        {"full coupling, high-Q mode on the chord", 165.0f, 0.02f, 1.0f, 400},
+        {"...and landed late in the decay", 165.0f, 0.02f, 1.0f, 1400},
+        {"...high-Q on the chord root", 82.4f, 0.01f, 1.0f, 1400},
+    };
+
+    // `to` < 0 means "hold" (the frozen reference). rampBlocks > 0 makes it an automation ramp
+    // rather than an instant jump.
+    auto render = [&](const Config& config, float to, int rampBlocks) {
+        const int kRingBlocks = config.ringBlocks;
+        StringNetworkParams params;
+        params.pickupPosition01 = 0.87f;
+        params.exciter.noiseAmount = 0.0f;
+        params.stringMaterial.lossGainLow = 1.0f; // sustain, so the chord is still audible at the gesture
+        params.stringMaterial.lossGainHigh = 1.0f;
+        params.bridge.couplingStrength = config.from;
+        params.bridge.resonanceHz = config.resonanceHz;
+        params.bridge.damping = config.damping;
+
+        StringNetwork<float> network;
+        network.prepare(kRate, kBlock, FractionalDelayKind::Lagrange3);
+        network.setNumStrings(kStrings);
+        network.setParams(params);
+        network.reset();
+
+        BlockEventQueue events;
+        for (int s = 0; s < kStrings; ++s)
+            events.push(noteOn(s * 13, kChord[s], s));
+
+        std::vector<float> mix;
+        const int total = kRingBlocks + kTailBlocks;
+        mix.reserve(static_cast<std::size_t>(total) * static_cast<std::size_t>(kBlock));
+        for (int b = 0; b < total; ++b) {
+            if (to >= 0.0f && b >= kRingBlocks) {
+                const int step = b - kRingBlocks;
+                const float t = (rampBlocks <= 0)
+                                    ? 1.0f
+                                    : std::min(1.0f, static_cast<float>(step) / static_cast<float>(rampBlocks));
+                params.bridge.couplingStrength = config.from + (to - config.from) * t;
+                network.setParams(params);
+            }
+            network.process(events, kBlock);
+            const int channels = network.tapBuffers().numStrings();
+            for (int n = 0; n < kBlock; ++n) {
+                float sum = 0.0f;
+                for (int s = 0; s < channels; ++s) {
+                    const float* tap = network.tapBuffers().channel(s, 0);
+                    if (tap != nullptr && network.tapBuffers().isActive(s))
+                        sum += tap[n];
+                }
+                mix.push_back(sum);
+            }
+        }
+        REQUIRE(network.unbridgedTicks() == 0);
+        return mix;
+    };
+
+    // THE SPAN STARTS AT THE GESTURE, not before it. All four renders are bit-identical up to that
+    // sample, so a span with pre-roll takes its peak |dx| from the shared part and every reading
+    // comes out at exactly 0 dB -- measured, and it is the metric's documented blind spot (a
+    // non-scale-invariant peak comparison masked by concurrent legitimate motion, ClickMetric.h).
+    // The pre-window is still rendered and is used below to assert the reference has motion at all.
+    double worstStoreRelease = 0.0;
+    double worstAbsolute = 0.0;
+    const char* worstAt = "";
+    for (const Config& config : configs) {
+        const auto gestureSample = static_cast<std::size_t>(config.ringBlocks) * static_cast<std::size_t>(kBlock);
+        const auto preBegin = gestureSample - static_cast<std::size_t>(kPreSeconds * kRate);
+        const auto spanBegin = gestureSample;
+        const auto spanEnd = gestureSample + static_cast<std::size_t>(kPostSeconds * kRate);
+
+        const std::vector<float> frozen = render(config, -1.0f, 0);
+        const std::vector<float> toZero = render(config, 0.0f, 0);    // enters the rigid branch
+        const std::vector<float> toTiny = render(config, 1.0e-6f, 0); // stays loaded: the control
+        const std::vector<float> ramped = render(config, 0.0f, 94);   // ~200 ms at 48 kHz / 128
+
+        const cnpg::test::ClickMeasurement reference = cnpg::test::measureClick(frozen, kRate, spanBegin, spanEnd);
+        const double zeroDb =
+            cnpg::test::clickExcessDb(cnpg::test::measureClick(toZero, kRate, spanBegin, spanEnd), reference);
+        const double tinyDb =
+            cnpg::test::clickExcessDb(cnpg::test::measureClick(toTiny, kRate, spanBegin, spanEnd), reference);
+        const double rampDb =
+            cnpg::test::clickExcessDb(cnpg::test::measureClick(ramped, kRate, spanBegin, spanEnd), reference);
+        const double storeRelease = zeroDb - tinyDb;
+
+        std::cout << "[contract] Bridge Coupling -> 0 (" << config.what << "): instant jump " << zeroDb
+                  << " dB, control jump to 1e-6 (stays loaded, store decays) " << tinyDb
+                  << " dB, so the STORE RELEASE contributes " << storeRelease << " dB; 200 ms ramp " << rampDb
+                  << " dB (click limit " << cnpg::test::kClickMetricToleranceDb << ")\n";
+
+        // IN the state this case claims to test: the renders really differ, and the reference really
+        // has motion to normalise against.
+        INFO(config.what);
+        REQUIRE(reference.metric(reference) > 0.0);
+        // The chord really is still sounding when the knob lands: the pre-gesture window has real
+        // motion, so this is a gesture over a ringing instrument and not over a decayed one.
+        REQUIRE(cnpg::test::measureClick(frozen, kRate, preBegin, gestureSample).peakWindowAbsDiff > 0.0);
+        REQUIRE(cnpg::test::measureClick(toZero, kRate, spanBegin, spanEnd).nonFiniteSamples == 0);
+        bool differs = false;
+        for (std::size_t n = spanEnd; n < frozen.size() && !differs; ++n)
+            differs = (toZero[n] != frozen[n]);
+        REQUIRE(differs);
+
+        // THE GATE. Not the absolute reading: at the worst configuration that is dominated by the
+        // legitimate loss of coupling, which the control measures at nearly the same value. What the
+        // discarded store contributes on top of it is what this task introduced, and it is what must
+        // stay inaudible.
+        if (storeRelease > worstStoreRelease) {
+            worstStoreRelease = storeRelease;
+            worstAt = config.what;
+        }
+        worstAbsolute = std::max(worstAbsolute, zeroDb);
+        // A ramped automation move -- what a host actually sends -- must clear the click gate
+        // outright.
+        REQUIRE(rampDb <= cnpg::test::kClickMetricToleranceDb);
+    }
+
+    std::cout << "[contract] worst store-release contribution over " << std::size(configs)
+              << " configurations: " << worstStoreRelease << " dB (" << worstAt << "), limit " << kStoreReleaseLimitDb
+              << " dB; worst ABSOLUTE gesture reading " << worstAbsolute << " dB (click limit "
+              << cnpg::test::kClickMetricToleranceDb << ")\n";
+
+    // THE GATE, against a MEASURED constant with stated headroom rather than one that cannot fail.
+    // Worst measured over these configurations is ~1.5e-4 dB; the limit is 0.05 dB, a few hundred
+    // times that, which is the smallest round number that is still unambiguously inaudible and that
+    // a real regression would have to clear. (The P2.4 re-review measured up to 0.24 dB in a
+    // configuration it did not specify; that is larger than anything reachable here, and is quoted
+    // in the report as theirs rather than folded into this limit as mine.)
+    REQUIRE(worstStoreRelease <= kStoreReleaseLimitDb);
+    // Non-vacuous: if this ever reads exactly 0 the control has stopped being a control (both
+    // gestures would be taking the same branch).
+    REQUIRE(worstStoreRelease > 0.0);
+    // ...and the whole gesture, store release included, clears the standard click gate at every
+    // configuration tested.
+    REQUIRE(worstAbsolute <= cnpg::test::kClickMetricToleranceDb);
 }
 
 TEST_CASE("CONTRACT: BridgeJunction scatter is realtime-safe under a live parameter stream", "[contract]") {

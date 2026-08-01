@@ -176,8 +176,22 @@ inline constexpr float kBridgeMaxMobilityRatio = 0.05f;
 // Below this mobility ratio the load is treated as exactly rigid (v == 0, b_i == -a_i,
 // bridgeOutput() == 0). Two reasons: couplingStrength == 0 has a CONTRACT to be exactly rigid
 // (docs/plan.md section 2.6), and the element impedances scale as 1/mu, so an unbounded mu -> 0
-// would run them to infinity. 1e-9 of full coupling is 180 dB below the shipping default; the
-// discontinuity is at a value no listener and no test can reach.
+// would run them to infinity.
+//
+// THIS BRANCH IS USER-REACHABLE, and earlier text here said the opposite. `bridgeCoupling` is an
+// APVTS parameter over the full 0..1 unit range, so its MINIMUM is exactly the value that enters
+// this branch: dragging that slider to its stop while the instrument rings discards whatever the
+// junction was holding, every time. The claim that it "fires at a value no listener and no test can
+// reach" was false, and it is why the transition went unmeasured through the network for a round.
+//
+// It is measured now, and it is benign -- but the reason is a decomposition, not an assertion.
+// Decoupling is a legitimate timbral change, so a raw click reading across the gesture measures two
+// things at once. The control is a gesture to couplingStrength = 1e-6, which is acoustically the
+// same decoupling but stays LOADED, so the store decays instead of being discarded: the difference
+// between the two readings is the store release's own contribution, measured at <= 0.009 dB across
+// four configurations including full coupling into a high-Q mode landed late in the decay.
+// "CONTRACT: dragging Bridge Coupling to zero is click-free through the network"
+// (tests/dsp/BridgePortContractTests.cpp) is that measurement.
 inline constexpr double kBridgeMinMobilityRatio = 1.0e-9;
 
 // Below this stored energy the junction is treated as quiescent. A THRESHOLD, not an exact-zero

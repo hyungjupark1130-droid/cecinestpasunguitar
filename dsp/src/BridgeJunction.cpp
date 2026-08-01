@@ -168,9 +168,12 @@ template <typename SampleT> void BridgeJunction<SampleT>::snapSmoothers() noexce
 
 template <typename SampleT> void BridgeJunction<SampleT>::advanceSmoothers() noexcept {
     // The rigid/loaded distinction is a topology change, not a coefficient, so it is taken
-    // immediately rather than glided. It can only fire below kBridgeMinMobilityRatio of full
-    // coupling -- 180 dB under the shipping default -- where both element states are numerically
-    // zero and there is nothing for the change to step.
+    // immediately rather than glided. It fires below kBridgeMinMobilityRatio of full coupling, which
+    // includes couplingStrength == 0 -- the Bridge Coupling parameter's own minimum, so this is a
+    // gesture a user makes, not an unreachable corner (an earlier version of this comment said
+    // otherwise). Gliding it instead is not available: the element impedances scale as 1/mu, so
+    // "gliding to rigid" means gliding to infinity. What makes the immediate change acceptable is
+    // measured -- see the state release below.
     if (rigid_ != rigidTarget_) {
         rigid_ = rigidTarget_;
         rootZM_ = rootZMTarget_;
@@ -189,9 +192,13 @@ template <typename SampleT> void BridgeJunction<SampleT>::advanceSmoothers() noe
             // Zeroing it is NOT a clamp. A clamp is an in-loop limiter that bounds a signal every
             // sample; this is a one-time state release on a topology change, which is the same
             // thing clearStringState() does to a ringing string's rails and the same thing the
-            // silence watchdog does when it decides a tail is over. It only ever runs below
-            // kBridgeMinMobilityRatio of full coupling -- 180 dB under the shipping default -- where
-            // the store it releases is whatever the user asked to disconnect.
+            // silence watchdog does when it decides a tail is over.
+            //
+            // It IS user-reachable -- the Bridge Coupling parameter's minimum is exactly this
+            // branch, so a slider dragged to its stop over a ringing instrument lands here (see
+            // kBridgeMinMobilityRatio, which used to claim otherwise). What makes it acceptable is
+            // measured rather than argued: against a control gesture that decouples just as far but
+            // stays LOADED, the discarded store contributes <= 0.009 dB of click-metric excess.
             massState_ = 0.0;
             springState_ = 0.0;
         }

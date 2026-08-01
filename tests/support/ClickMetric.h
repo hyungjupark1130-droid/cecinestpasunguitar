@@ -7,7 +7,9 @@
 // steps: "Define the click metric here, once, for all of P2 (later tasks reference this
 // definition)"). P2.2 (damper), P2.3 (pickup morph/position), P2.4 (bridge coupling) and P2.6
 // (retrigger) all gate a state change against it; every one of them uses this file rather than
-// re-deriving a ratio of its own.
+// re-deriving a ratio of its own. P2.4's gate is "CONTRACT: dragging Bridge Coupling to zero is
+// click-free through the network" (tests/dsp/BridgePortContractTests.cpp) -- named here because
+// this sentence claimed that gate for a round before it existed.
 //
 // -----------------------------------------------------------------------------------------------
 // THE DEFINITION (verbatim from the task, then how each term is realised)

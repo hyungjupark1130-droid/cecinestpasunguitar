@@ -93,7 +93,8 @@ std::size_t analysisLengthFor(double sampleRate) {
 // Rendering the isolated string would now be measuring a topology that ships nowhere. Since what
 // section 4.5 is FOR is accepting the instrument's tuning, it renders the instrument.
 std::vector<double> renderTapChannel(FractionalDelayKind kind, double sampleRate, double f0Hz, float bendSemitones,
-                                     float lossKnob, float dispersionKnob) {
+                                     float lossKnob, float dispersionKnob,
+                                     float coupling = cnpg::dsp::BridgeAdmittanceParams{}.couplingStrength) {
     // `f0Hz` is the note's UNBENT nominal and `bendSemitones` is applied on top of it by the
     // network's own parameter path -- exactly as the isolated-string version set params.f0Hz and
     // params.bendSemitones separately. Subtracting the bend here would play a different note and
@@ -108,8 +109,10 @@ std::vector<double> renderTapChannel(FractionalDelayKind kind, double sampleRate
     params.stringMaterial.lossGainHigh = lossKnob;
     params.stringMaterial.dispersionAmount = dispersionKnob;
     params.exciter.noiseAmount = 0.0f;
-    // params.bridge is left at its struct default ON PURPOSE: that IS "default bridge admittance
-    // attached", and it is the whole point of re-pointing this render.
+    // Defaults to the struct's own couplingStrength ON PURPOSE: that IS "default bridge admittance
+    // attached", and it is the whole point of re-pointing this render. The parameter exists so one
+    // case can render the DECOUPLED control and attribute the residual (see the sweep below).
+    params.bridge.couplingStrength = coupling;
 
     cnpg::dsp::StringNetwork<float> network;
     network.prepare(sampleRate, 512, kind);
@@ -157,9 +160,11 @@ double measureF0Hz(const std::vector<double>& samples, double sampleRate, double
 }
 
 double measureCentsError(FractionalDelayKind kind, double sampleRate, int midiNote, float lossKnob = kSweepLossKnob,
-                         float dispersionKnob = 0.0f) {
+                         float dispersionKnob = 0.0f,
+                         float coupling = cnpg::dsp::BridgeAdmittanceParams{}.couplingStrength) {
     const double target = cnpg::test::midiNoteToHz(midiNote);
-    const std::vector<double> tap = renderTapChannel(kind, sampleRate, target, 0.0f, lossKnob, dispersionKnob);
+    const std::vector<double> tap =
+        renderTapChannel(kind, sampleRate, target, 0.0f, lossKnob, dispersionKnob, coupling);
     const double measured = measureF0Hz(tap, sampleRate, target);
     if (measured <= 0.0)
         return 1e9; // no usable peak -- fails every gate loudly
@@ -277,6 +282,30 @@ TEST_CASE("TUNING: P1 analytic compensation sweep", "[tuning]") {
     // come back -- and it must not have silently grown into the sanity bound.
     REQUIRE(worstGated > 0.5);
     REQUIRE(worstGated < kAnalyticSanityCents);
+
+    // THE ATTRIBUTION, and what still holds the +/-2 cent line in this file. The residual above is
+    // the LOAD's phase response, not a broken solve -- and the way to say that rather than assert it
+    // is to run the identical render with the bridge DECOUPLED, where the analytic compensation is
+    // the exact closed form it was derived as. If a future change breaks the solve itself, this
+    // fails at 2 cents while the sanity bound above would happily absorb it.
+    double worstDecoupled = 0.0;
+    int worstDecoupledNote = 0;
+    for (double sampleRate : kRates) {
+        for (int midiNote : {33, 45, 57, 69, 81, 96}) {
+            const double cents = measureCentsError(kShippingKind, sampleRate, midiNote, kSweepLossKnob, 0.0f, 0.0f);
+            INFO("decoupled control, MIDI " << midiNote << " at " << sampleRate << " Hz: " << cents << " cents");
+            REQUIRE(std::fabs(cents) <= kGateCents);
+            if (std::fabs(cents) > worstDecoupled) {
+                worstDecoupled = std::fabs(cents);
+                worstDecoupledNote = midiNote;
+            }
+        }
+    }
+    std::cout << "[tuning] DECOUPLED control (couplingStrength 0, same render otherwise): worst |error| "
+              << worstDecoupled << " cents at MIDI " << worstDecoupledNote << " (limit " << kGateCents
+              << ") -- so the residual above is the LOAD's phase response, not the analytic solve\n";
+    // ...and the two really are different measurements, by orders of magnitude.
+    REQUIRE(worstDecoupled < 0.1 * worstGated);
 }
 
 // ---------------------------------------------------------------------------------------------
