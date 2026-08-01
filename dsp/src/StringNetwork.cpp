@@ -695,13 +695,13 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
                 // enable gain" -- one scaling, on the way in -- and one is all passivity needs: the
                 // junction is a contraction on whatever it is given, so ||b|| <= ||g a|| <= ||a||
                 // already. Scaling the reflection as well would square the factor and damp the
-                // string's LOOP twice as hard as its output during a 10 ms mute, which is audible
-                // as level the string never gets back when a count reduction is reversed mid-ramp
-                // (measured: it pushed the P2.1 count-churn click reading from 1.6 dB to 3.7 dB
-                // against a 3 dB gate, with the direct tap-continuity assertion still clean --
-                // i.e. it was lost level, not a discontinuity). One factor of g per round trip is
-                // unavoidable and correct: a string that presents less to the bridge gets less
-                // back.
+                // string's LOOP twice as hard as its output during a 10 ms mute, which costs level
+                // the string never gets back when a count reduction is reversed mid-ramp. Measured
+                // on P2.1's count-churn click case against its 3 dB gate: 3.74 dB with the
+                // reflection scaled too, 2.42 dB with it unscaled -- and the DIRECT tap-continuity
+                // assertion in that same case was clean in both, i.e. it was lost level and not a
+                // discontinuity. One factor of g per round trip is unavoidable and correct: a
+                // string that presents less to the bridge gets less back.
                 //
                 // Then tick(): the accept is consumed by the very next tick, and a tick that finds
                 // none falls back to the internal rigid -1, which is the silent failure
