@@ -687,11 +687,30 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     // by construction (the string really was silent); it is now a real truncation, and this case
     // measures how big it is instead of asserting that it is small.
     //
-    // The yardstick is P2.4's own number: at couplingStrength 0.35 a sympathetically driven string
-    // peaks at -53.5 dBFS within 1 s (ADR 0006's measured table). Whatever a truncation discards, it
-    // cannot exceed the level of the thing being truncated, so the claim to check is that the
-    // discarded content sits at or below that -- and, more usefully, how far below the note that
-    // replaces it the discarded content actually was.
+    // The yardstick this case USED to gate on was P2.4's own number: at couplingStrength 0.35 a
+    // sympathetically driven string peaks at -53.5 dBFS within 1 s (ADR 0006's measured table).
+    //
+    // *** THAT NUMBER IS PRINTED AND NO LONGER ASSERTED, AND THE DEMOTION IS DELIBERATE. *** The
+    // assertion was `REQUIRE(truncatedDbfs > kP24SympatheticPeakDbfs)`, and it was wrong twice over:
+    //
+    //   1. -53.5 dBFS is DERIVED FROM couplingStrength = 0.35, and ADR 0007 D4 makes that default
+    //      PROVISIONAL pending the P2.8 listening pass -- it is confirmed or replaced by ear, and
+    //      lower values are explicitly on the table. truncatedDbfs scales with coupling too, so a
+    //      test comparing one number derived from 0.35 against another derived from 0.35 breaks the
+    //      moment the default moves, in a task that has nothing to do with retrigger semantics. No
+    //      gate in this suite may depend on that constant in a way that a change to it turns red.
+    //   2. Worse, the assertion was ABOUT the deferred rest-pitch finding below rather than about
+    //      anything this case gates. The excess exists BECAUSE an untouched string still rests at
+    //      MIDI 21. Fixing that -- which is P2.7's job, scheduled below -- drops truncatedDbfs well
+    //      under -53.5 and turns this line red as a DIRECT CONSEQUENCE OF THE FIX. An assertion that
+    //      fails when a known defect is repaired is an assertion that encodes the defect.
+    //
+    // What IS asserted instead is the precondition the measurement actually depends on and which is
+    // invariant under both of those moves: string 1 has never been played, so it rests at
+    // kMinMidiNote. That is a fact about prepare() and about midiNote_ being written only by note
+    // events -- no coupling value enters it -- and it is the fact that makes the number surprising.
+    // When P2.7 gives strings a rest pitch, this assertion is the one that must be updated, and it
+    // will be updated by the task that changed the thing it names.
     constexpr double kP24SympatheticPeakDbfs = -53.5;
 
     StringNetworkParams params = paramsFor(RetriggerMode::Physical, StringNetworkParams{}.bridge.couplingStrength);
@@ -708,6 +727,18 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     // IN THE STATE THIS CASE CLAIMS TO EXERCISE: string 1 carries real motion and owns no note.
     const double sympatheticEnergy = network.stringEnergyEstimate(1);
     REQUIRE(sympatheticEnergy > 0.0);
+
+    // THE PRECONDITION THE MEASUREMENT DEPENDS ON, asserted directly rather than through a level
+    // derived from a provisional coupling default: string 1 has never been played, so it is still
+    // tuned where prepare() left it -- kMinMidiNote. A0's harmonic series contains 110 Hz exactly
+    // (its 4th partial), which is why an untouched string is a BETTER sympathetic resonator for the
+    // note being played than a real open string would be, and therefore why the discarded level
+    // below reads high. Checked in cents so it is a statement about pitch rather than about float
+    // formatting.
+    const double restPitchHz = cnpg::test::midiNoteToHz(cnpg::dsp::kMinMidiNote);
+    const double restCentsOff = 1200.0 * std::log2(static_cast<double>(network.stringF0Hz(1)) / restPitchHz);
+    INFO("string 1 rest pitch " << network.stringF0Hz(1) << " Hz vs kMinMidiNote " << restPitchHz << " Hz");
+    REQUIRE(std::fabs(restCentsOff) < 1.0);
     const std::size_t preWindow = static_cast<std::size_t>(10 * kBlock);
     const float truncatedPeak = peakOf(sympathetic, sympathetic.size() - preWindow, sympathetic.size());
     REQUIRE(truncatedPeak > 0.0f);
@@ -729,10 +760,10 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     std::cout << "[contract] sympathetic truncation at couplingStrength " << params.bridge.couplingStrength
               << ": discarded content peaked at " << truncatedDbfs << " dBFS in the 27 ms before the attack ("
               << belowAttackDb << " dB below the note that replaced it); string energy " << sympatheticEnergy << " -> "
-              << energyAfter << ". P2.4 (ADR 0006) measured " << kP24SympatheticPeakDbfs
-              << " dBFS for a unison pair; this reads " << (truncatedDbfs - kP24SympatheticPeakDbfs)
-              << " dB HIGHER -- see the note below, it is a property of the DRIVEN string's tuning, not of the "
-                 "truncation\n";
+              << energyAfter << ". OBSERVATION, NOT A GATE: P2.4 (ADR 0006) measured " << kP24SympatheticPeakDbfs
+              << " dBFS for a unison pair at this coupling; this reads " << (truncatedDbfs - kP24SympatheticPeakDbfs)
+              << " dB HIGHER -- a property of the DRIVEN string's rest tuning, not of the truncation, and both "
+                 "numbers scale with a couplingStrength ADR 0007 D4 leaves provisional\n";
 
     // IT EXCEEDS P2.4'S FIGURE, AND THAT IS REPORTED RATHER THAN ABSORBED. P2.4 measured a unison
     // PAIR -- two strings dialled to nearly the same pitch -- which couples through one shared
@@ -740,17 +771,19 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     // at, kMinMidiNote (A0, 27.5 Hz), and A0's harmonic series contains 110 Hz exactly, as its
     // fourth partial. An untouched string is therefore a BETTER sympathetic resonator for the note
     // being played than a real open string would be, and it is the same for every string and every
-    // note, because they are all at A0 until somebody plays them.
+    // note, because they are all at A0 until somebody plays them. The rest-pitch assertion above is
+    // what pins that explanation; the dB figure is the consequence, and consequences of provisional
+    // defaults are printed, not gated.
     //
-    // *** FINDING FOR P2.7 / P2.8, not fixed here: an untouched string should rest at its OPEN
-    // TUNING, not at A0. *** NoteAllocatorParams now knows what that tuning is
-    // (openStringMidiNote), but StringNetworkParams has nowhere to put it -- midiNote_ is only ever
-    // written by a note event -- so giving strings a rest pitch is a StringNetworkParams change that
-    // moves the coupled chord goldens, and it belongs with the task that is already judging how much
-    // sympathetic resonance the instrument should have (P2.8) or already regenerating for tuning
-    // (P2.7). Recorded here with the measurement rather than left to be rediscovered.
-    //
-    REQUIRE(truncatedDbfs > kP24SympatheticPeakDbfs); // the direction of the excess is asserted, not hidden
+    // *** FINDING FOR P2.7, not fixed here: an untouched string should rest at its OPEN TUNING, not
+    // at A0. *** NoteAllocatorParams now knows what that tuning is (openStringMidiNote), but
+    // StringNetworkParams has nowhere to put it -- midiNote_ is only ever written by a note event --
+    // so giving strings a rest pitch is a StringNetworkParams change that moves the coupled chord
+    // goldens. It belongs at P2.7, the task already regenerating for tuning, and it must land BEFORE
+    // the P2.8 listening pass rather than at it: P2.8 judges how much sympathetic resonance the
+    // instrument should have, and it cannot judge that on an instrument whose idle strings are all
+    // tuned to A0. (This comment read "P2.7 / P2.8" until fixes wave 2 tightened it for exactly that
+    // reason.) Recorded here with the measurement rather than left to be rediscovered.
 
     // THE CLAIM THIS CASE GATES: the truncation does not register as a click. It has a genuine A/B
     // control pair -- the SAME attack, on the SAME string, of the SAME instrument, differing only in
@@ -771,8 +804,15 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     truncatedTap.insert(truncatedTap.end(), afterAttack.begin(), afterAttack.end());
     REQUIRE(truncatedTap.size() == quietTap.size());
 
+    // THE SPAN BEGINS ONE SAMPLE BEFORE THE ATTACK, and it did not until fixes wave 2. measureClick
+    // forms its first difference from samples[begin + 1] - samples[begin], so a span beginning AT
+    // the attack skips the one difference that spans the state clear -- i.e. it skips the
+    // discontinuity, which is the entire thing this gate is about. The case still passes with the
+    // step included (the numbers below say by how much), so this is a gate made honest rather than
+    // a defect found; the sweep case further down, where the discarded content is 20 dB louder, is
+    // where the difference between the two spans decides the answer.
     const std::size_t attackSample = sympathetic.size();
-    const std::size_t spanBegin = attackSample;
+    const std::size_t spanBegin = attackSample - 1;
     const std::size_t spanEnd = attackSample + static_cast<std::size_t>(30 * kBlock);
     const cnpg::test::ClickMeasurement quietMeasurement = cnpg::test::measureClick(quietTap, kRate, spanBegin, spanEnd);
     const cnpg::test::ClickMeasurement truncatedMeasurement =
@@ -824,10 +864,356 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
 }
 
 // ---------------------------------------------------------------------------------------------
+// what the "a released note is over" ruling COSTS, swept over note-off age
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: re-striking a released string clears it, and what that discards is measured at every age",
+          "[contract]") {
+    // THE RISK THE "A RELEASED NOTE IS OVER" RULING CREATES, measured rather than assumed.
+    //
+    // StringNetwork's "owns a note" is `sounding_` alone (fixes wave 2). A NoteOn onto a string that
+    // is merely RELEASING therefore takes the fresh path, which CLEARS the string -- so a re-strike
+    // arriving soon after a note-off throws away content that is still plainly audible, and the
+    // sooner it arrives the louder that content is. That is the price of making the predicate agree
+    // with NoteAllocator's, and it is a price paid on the most common gesture in playing.
+    //
+    // IT IS NOT THE SAME MEASUREMENT AS THE SYMPATHETIC-TRUNCATION CASE ABOVE, and assuming that one
+    // covers this one would be wrong by tens of dB. That case clears a string carrying a NEIGHBOUR'S
+    // drive -- about -47 dBFS, some 24 dB below the note that replaces it. This one clears a string
+    // carrying the decaying remains of a note the player struck himself, which 5 ms after the
+    // note-off is about 6 dB below the note replacing it. Different amounts of energy, different
+    // question, and the earlier case cannot stand in for this one.
+    //
+    // THE A/B PAIR. Test and control are the SAME instrument, the SAME re-strike, at the SAME
+    // sample, of the SAME pitch, differing only in whether an earlier note was played and released
+    // on that string -- i.e. only in whether there is anything to discard.
+    //
+    // THE PERTURBATION IS PLACED BY LEVEL, NOT AT A ROUND NUMBER OF MILLISECONDS, and that is this
+    // case's central methodological point. The step the state clear inserts is exactly the tail's
+    // INSTANTANEOUS value at the sample before the re-strike -- not its peak, not its RMS. A
+    // re-strike at a nominal age lands at an arbitrary phase of a 110 Hz waveform, so a sweep of
+    // round ages measures the waveform's phase at seven arbitrary indices and calls the result a
+    // function of age. Measured, before this placement was adopted: at 20 ms the reading came out at
+    // EXACTLY 0.00 dB while the discarded peak was -28.8 dBFS, because that particular sample
+    // happened to sit on a zero crossing -- the identical defect fixes wave 1 found in four blindly
+    // placed negative controls, here in the perturbation itself. Each age therefore searches HALF a
+    // period of the old note (219 samples, 4.56 ms at 110 Hz / 48 kHz) for the loudest tail sample
+    // and puts the re-strike on the sample AFTER it, so every row reports the worst case available
+    // near its nominal age. The actual age used is printed beside the nominal one.
+    //
+    // HALF a period rather than a whole one, and the reason is not aesthetic: a half period is the
+    // shortest window guaranteed to contain an extremum of the fundamental, and it is shorter than
+    // the 5 ms spacing between the first two swept ages. A full-period window was tried first and
+    // the 5 ms and 10 ms rows both slid onto the SAME sample at 12.35 ms -- two rows measuring one
+    // point. The distinctness of adjacent placements is asserted below so that cannot come back.
+    //
+    // THE SPAN starts ONE SAMPLE before the re-strike, and that is load-bearing rather than
+    // incidental. measureClick forms its first difference from samples[begin + 1] - samples[begin],
+    // so a span beginning AT the re-strike sample would skip the one difference that spans the state
+    // clear -- the discontinuity itself. Beginning exactly one sample earlier includes it and adds
+    // no other pre-attack signal, which matters here because the test render (unlike the control)
+    // has a live tail before the attack and a longer pre-roll would let that tail's ordinary motion
+    // enter a comparison that is supposed to be about the step.
+    //
+    // BOTH READINGS ARE GATED, per the ClickMetric header's own instruction. This change reduces
+    // level AND inserts a discontinuity, which is the documented blind spot of reading (b):
+    // clickExcessDb compares absolute peak |dx|, so a step the change itself made quiet can hide
+    // under the attack's own transient. clickExcessAgainstLevelDb re-normalises per 10 ms window by
+    // that window's own peak |x| and does not have that blind spot.
+    constexpr int kRingSamples = 100 * kBlock;  // ~267 ms: the note is fully established
+    constexpr int kTailSamples = 40 * kBlock;   // ~107 ms after the re-strike
+    constexpr int kClickSpanBlocks = 30;        // the span the click readings are taken over
+    constexpr int kDiscardWindow = 10 * kBlock; // ~27 ms, the window whose level is thrown away
+
+    // Half a period of the old note: the search window for the level placement above.
+    const int kOldPeriodSamples = static_cast<int>(std::ceil(kRate / cnpg::test::midiNoteToHz(kOldNote)));
+    const int kSearchSamples = (kOldPeriodSamples + 1) / 2;
+    REQUIRE(kSearchSamples > 1);
+    // Shorter than the closest spacing in the sweep, which is what stops two rows collapsing.
+    REQUIRE(static_cast<double>(kSearchSamples) / kRate < 0.005);
+
+    // The sweep, in milliseconds of note-off age. 5 ms is about half a round trip of the old note;
+    // 500 ms is a note a listener would call finished. Every point is inside the window in which
+    // `releasing_` was still true and the SHIPPED P2.6 code took the retrigger path, because the
+    // silence watchdog needs the outgoing bridge wave under kSilenceFloor for a whole
+    // kSilenceWindowSeconds window before it clears anything.
+    const std::vector<double> kNominalAgesMs{5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0};
+
+    struct Arm {
+        std::vector<float> tap;
+        double engagementBefore = 0.0;
+        double energyBefore = 0.0;
+        double engagementAfter = 0.0;
+        int rampAfter = 0;
+        bool fadeAfter = false;
+    };
+
+    // One arm. `restrikeSample` is absolute; a value of -1 renders the note-off and then nothing at
+    // all, which is the release-only reference the placement is read from.
+    auto renderArm = [&](RetriggerMode mode, bool playOldNote, int restrikeSample, int totalSamples) {
+        StringNetwork<float> network;
+        configure(network, paramsFor(mode));
+        Arm arm;
+        arm.tap.reserve(static_cast<std::size_t>(totalSamples));
+
+        BlockEventQueue queue;
+        auto run = [&](int samples) {
+            int done = 0;
+            while (done < samples) {
+                const int chunk = std::min(kBlock, samples - done);
+                network.process(queue, chunk);
+                const float* channel = network.tapBuffers().channel(0, 0);
+                REQUIRE(channel != nullptr);
+                arm.tap.insert(arm.tap.end(), channel, channel + chunk);
+                done += chunk;
+            }
+        };
+
+        if (playOldNote)
+            queue.push(noteOn(0, kOldNote));
+        run(kRingSamples);
+        if (playOldNote)
+            queue.push(noteOff(0, kOldNote));
+
+        if (restrikeSample < 0) {
+            run(totalSamples - kRingSamples);
+            return arm;
+        }
+
+        run(restrikeSample - kRingSamples);
+
+        // THE STATE THE RULING IS ABOUT, sampled at the instant the re-strike lands.
+        arm.engagementBefore = static_cast<double>(network.damperEngagement(0));
+        arm.energyBefore = network.stringEnergyEstimate(0);
+
+        queue.push(noteOn(0, kNewNote));
+        run(1); // one sample, so the snapshot below is the re-strike itself and not 128 samples of it
+        arm.engagementAfter = static_cast<double>(network.damperEngagement(0));
+        arm.rampAfter = network.retuneRampSamplesRemaining(0);
+        arm.fadeAfter = network.retriggerFadeActive(0);
+        run(totalSamples - restrikeSample - 1);
+        return arm;
+    };
+
+    // THE RELEASE-ONLY REFERENCE. Note on, note off, then nothing: this is the pre-re-strike history
+    // of every test arm below, because nothing touches the string between the note-off and the
+    // re-strike. It is therefore both the thing that gets discarded and the waveform the placement is
+    // read off, and the identity is ASSERTED per row rather than assumed.
+    const int kMaxAgeSamples = static_cast<int>(std::lround(kNominalAgesMs.back() * 0.001 * kRate));
+    const int kReleaseSamples = kRingSamples + kMaxAgeSamples + 2 * kOldPeriodSamples;
+    const Arm releaseOnly = renderArm(RetriggerMode::Physical, true, -1, kReleaseSamples);
+
+    struct Row {
+        double nominalAgeMs = 0.0;
+        double actualAgeMs = 0.0;
+        double discardedStepDbfs = 0.0; // the ONE sample the clear replaces -- the step itself
+        double discardedPeakDbfs = 0.0; // peak over the 27 ms before the re-strike
+        double belowAttackDb = 0.0;
+        double engagementBefore = 0.0;
+        double excessDb = 0.0;
+        double levelExcessDb = 0.0;
+        double hardCutDb = 0.0;
+    };
+    std::vector<Row> rows;
+
+    for (const double nominalAgeMs : kNominalAgesMs) {
+        INFO("nominal note-off age " << nominalAgeMs << " ms");
+        const int nominal = kRingSamples + static_cast<int>(std::lround(nominalAgeMs * 0.001 * kRate));
+        // The loudest tail sample within one period of the nominal age; the re-strike goes on the
+        // sample AFTER it, so that sample is the one the state clear replaces.
+        const std::size_t loudest = loudestSample(releaseOnly.tap, static_cast<std::size_t>(nominal),
+                                                  static_cast<std::size_t>(nominal + kSearchSamples));
+        const auto restrike = static_cast<int>(loudest) + 1;
+        const double actualAgeMs = 1000.0 * static_cast<double>(restrike - kRingSamples) / kRate;
+        const int totalSamples = restrike + kTailSamples;
+
+        const Arm test = renderArm(RetriggerMode::Physical, true, restrike, totalSamples);
+        const Arm control = renderArm(RetriggerMode::Physical, false, restrike, totalSamples);
+        REQUIRE(test.tap.size() == static_cast<std::size_t>(totalSamples));
+        REQUIRE(control.tap.size() == test.tap.size());
+
+        // THE PLACEMENT IS ON THE REAL WAVEFORM: the test arm's tail over the period the placement
+        // searched is bit-identical to the release-only render it was read from. Without this the
+        // level placement would be a claim about a different render than the one being measured.
+        const auto tailBegin = static_cast<std::ptrdiff_t>(restrike - kSearchSamples);
+        REQUIRE(
+            std::equal(test.tap.begin() + tailBegin, test.tap.begin() + restrike, releaseOnly.tap.begin() + tailBegin));
+
+        // NON-VACUITY OF THE PAIR, in state rather than by inference. The test arm really is
+        // releasing -- the felt is down and the string still carries energy -- and the control arm
+        // really has nothing to discard.
+        REQUIRE(test.engagementBefore > 0.0);
+        REQUIRE(test.energyBefore > 0.0);
+        REQUIRE(control.engagementBefore == 0.0);
+        REQUIRE(control.energyBefore == 0.0);
+        const bool controlSilentBefore =
+            std::all_of(control.tap.begin(), control.tap.begin() + restrike, [](float x) { return x == 0.0f; });
+        REQUIRE(controlSilentBefore);
+
+        // THE RULING, ASSERTED DIRECTLY rather than inferred from the audio (the P2.1 binding
+        // ruling). A re-strike on a releasing string takes the FRESH path: the state is cleared, so
+        // the damper is reset fully open on that same sample -- not ramped open over the felt's own
+        // time constant, which is what the shipped `sounding_ || releasing_` predicate did and what
+        // cost the corpus 4.88 dB. No retune ramp is started either, and no Synth fade, because
+        // there is no old note to glide from or fade out.
+        REQUIRE(test.engagementAfter == 0.0);
+        REQUIRE(test.rampAfter == 0);
+        REQUIRE_FALSE(test.fadeAfter);
+
+        // AND THE WHOLE OF WHAT THE TRUNCATION DOES IS ONE SAMPLE WIDE. From the re-strike onward
+        // the two renders are BIT-IDENTICAL: the clear is total, the coupling is off, and the
+        // exciter contributes no history at the shipped noiseAmount of 0. So the click readings
+        // below are not a summary of a diffuse difference -- they are the exact size of a single
+        // step, and the difference signal between the A and B arms is the release tail before the
+        // re-strike and exactly zero after it. That is the linearity between perturbation and tap
+        // that the click metric's causal reading requires, established rather than argued.
+        const bool identicalAfterRestrike =
+            std::equal(test.tap.begin() + restrike, test.tap.end(), control.tap.begin() + restrike);
+        REQUIRE(identicalAfterRestrike);
+
+        const auto spanBegin = static_cast<std::size_t>(restrike - 1);
+        const auto spanEnd = static_cast<std::size_t>(restrike + kClickSpanBlocks * kBlock);
+        const cnpg::test::ClickMeasurement controlClick =
+            cnpg::test::measureClick(control.tap, kRate, spanBegin, spanEnd);
+        const cnpg::test::ClickMeasurement testClick = cnpg::test::measureClick(test.tap, kRate, spanBegin, spanEnd);
+        REQUIRE(controlClick.medianAbsDiff > 0.0);
+        REQUIRE(controlClick.peakStepToLevel > 0.0);
+        REQUIRE(testClick.nonFiniteSamples == 0);
+        REQUIRE(testClick.subnormalSamples == 0);
+
+        const double excessDb = cnpg::test::clickExcessDb(testClick, controlClick);
+        const double levelExcessDb = cnpg::test::clickExcessAgainstLevelDb(testClick, controlClick);
+
+        // THE NEGATIVE CONTROL, level-placed (fixes wave 1's standing instruction, and the reason
+        // for it: a hard cut's peak |dx| IS the sample value it lands on, so a blindly placed cut
+        // measures the waveform's phase rather than the metric's sensitivity and can PASS the gate
+        // it exists to fail). Placed in the CONTROL render, which is the reference both readings are
+        // taken against, so its number is on the same footing as excessDb.
+        const std::size_t cutSample = loudestSample(control.tap, static_cast<std::size_t>(restrike), spanEnd);
+        REQUIRE(std::fabs(control.tap[cutSample]) > 0.0f);
+        std::vector<float> hardCut = control.tap;
+        std::fill(hardCut.begin() + static_cast<std::ptrdiff_t>(cutSample), hardCut.end(), 0.0f);
+        const double hardCutDb =
+            cnpg::test::clickExcessDb(cnpg::test::measureClick(hardCut, kRate, spanBegin, spanEnd), controlClick);
+        // THE GATE HAS TEETH AT THIS AGE. Asserted inside the loop because it is a property of the
+        // measurement rather than of the result: a toothless row makes its own reading meaningless
+        // whatever the table says afterwards.
+        REQUIRE(hardCutDb > cnpg::test::kClickMetricToleranceDb);
+
+        const double stepLevel = std::fabs(static_cast<double>(test.tap[static_cast<std::size_t>(restrike - 1)]));
+        const double discardedPeak = static_cast<double>(
+            peakOf(test.tap, static_cast<std::size_t>(restrike - kDiscardWindow), static_cast<std::size_t>(restrike)));
+        const double attackPeak = static_cast<double>(peakOf(test.tap, static_cast<std::size_t>(restrike), spanEnd));
+        REQUIRE(attackPeak > 0.0);
+        REQUIRE(discardedPeak > 0.0);
+
+        rows.push_back(Row{nominalAgeMs, actualAgeMs, dbOf(stepLevel), dbOf(discardedPeak),
+                           dbOf(discardedPeak / attackPeak), test.engagementBefore, excessDb, levelExcessDb,
+                           hardCutDb});
+    }
+
+    // Printed as a table BEFORE anything is judged, so a failing row cannot hide the shape of the
+    // sweep the case exists to produce.
+    for (const Row& row : rows)
+        std::cout << "[contract] note-off age " << row.nominalAgeMs << " ms (placed at " << row.actualAgeMs
+                  << " ms, the loudest tail sample in the half period after it): the discarded step is "
+                  << row.discardedStepDbfs << " dBFS, the 27 ms before the re-strike peak at " << row.discardedPeakDbfs
+                  << " dBFS (" << row.belowAttackDb << " dB below the re-strike), felt engagement "
+                  << row.engagementBefore << "; click excess " << row.excessDb << " dB, per-window level-normalised "
+                  << row.levelExcessDb << " dB (limit " << cnpg::test::kClickMetricToleranceDb
+                  << "), level-placed hard-cut control " << row.hardCutDb << " dB\n";
+
+    REQUIRE(rows.size() == kNominalAgesMs.size());
+    // THE SWEEP IS NOT DEGENERATE: the earliest re-strike discards far more than the latest, which
+    // is the whole reason age is swept rather than probed at one point. If this collapsed, every row
+    // would be measuring the same thing and the gate would be one point wearing seven hats.
+    REQUIRE(rows.front().discardedStepDbfs - rows.back().discardedStepDbfs > 40.0);
+    // ...and no two rows landed on the same sample, which is the failure mode the half-period search
+    // window exists to prevent and which a full-period one actually produced.
+    for (std::size_t i = 1; i < rows.size(); ++i) {
+        INFO("rows " << (i - 1) << " and " << i);
+        REQUIRE(rows[i].actualAgeMs > rows[i - 1].actualAgeMs);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // WHERE THE LINE ACTUALLY FALLS, asserted from BOTH sides rather than picked
+    // -------------------------------------------------------------------------------------------
+    // *** A RE-STRIKE SOON AFTER A NOTE-OFF IS A CLICK, AND IT ALWAYS HAS BEEN. *** Near the
+    // note-off the discarded tail is only about 6 dB below the note replacing it, and dropping it to
+    // zero in one sample reads roughly 20 dB over the criterion on BOTH readings -- about two thirds
+    // of a full hard cut, in dB.
+    //
+    // THAT IS NOT A DEFECT THIS RULING INTRODUCES. It is exactly what the code did before P2.6:
+    // 77b0430's handleEvent sends any note arriving on a releasing string down its
+    // `!pluckOverRinging` branch, which calls clearStringState -- and the comment there asserted the
+    // opposite in words, "a string mid-release ... its tail is already attenuated, so clearing it is
+    // inaudible". No test ever re-struck a releasing string, so nothing measured it, and the claim
+    // stood unchallenged from P2.2 to here. The shipped P2.6 predicate masked the click by accident,
+    // at a cost of 4.88 dB of corpus RMS on the commonest gesture in playing; wave 2 takes the mask
+    // off, and this case is the first thing in the project to look underneath it.
+    //
+    // So the criterion is asserted where it holds and the FAILURE is asserted where it does not, and
+    // both directions are gated. Asserting only the passing half would let a future change quietly
+    // widen the bad region; asserting only the shape would let one quietly appear inside the clean
+    // one. The threshold is measured, not chosen: it is the first swept age at which both readings
+    // clear 3 dB, and the row before it is required to fail.
+    constexpr double kClickFreeFromMs = 50.0;
+
+    for (const Row& row : rows) {
+        INFO("nominal note-off age " << row.nominalAgeMs << " ms, placed at " << row.actualAgeMs << " ms");
+        // At every age the truncation is strictly milder than discarding the whole render at its
+        // loudest sample. This is the bound that holds everywhere, and it is what says the short-age
+        // reading is a real truncation rather than a broken measurement.
+        REQUIRE(row.excessDb < row.hardCutDb);
+
+        if (row.nominalAgeMs >= kClickFreeFromMs) {
+            REQUIRE(row.excessDb <= cnpg::test::kClickMetricToleranceDb);
+            REQUIRE(row.levelExcessDb <= cnpg::test::kClickMetricToleranceDb);
+        } else {
+            // NOT a tolerated failure: an ASSERTED one. This is the finding, pinned in the direction
+            // that matters -- if a later change makes an early re-strike click-free, this line goes
+            // red and whoever made it has to come and move the boundary deliberately.
+            REQUIRE(row.excessDb > cnpg::test::kClickMetricToleranceDb);
+            REQUIRE(row.levelExcessDb > cnpg::test::kClickMetricToleranceDb);
+        }
+    }
+
+    const auto firstClean = std::find_if(
+        rows.begin(), rows.end(), [](const Row& row) { return row.excessDb <= cnpg::test::kClickMetricToleranceDb; });
+    REQUIRE(firstClean != rows.end());
+    REQUIRE(firstClean != rows.begin());
+    REQUIRE(firstClean->nominalAgeMs == kClickFreeFromMs);
+    const double worstCleanDb = std::max_element(firstClean, rows.end(), [](const Row& a, const Row& b) {
+                                    return a.excessDb < b.excessDb;
+                                })->excessDb;
+
+    std::cout << "[contract] re-strike over a released string: the state clear IS a click for note-off ages under "
+              << kClickFreeFromMs << " ms (worst " << rows.front().excessDb << " dB at " << rows.front().actualAgeMs
+              << " ms, against a level-placed hard cut of " << rows.front().hardCutDb << " dB) and clean from "
+              << kClickFreeFromMs << " ms up (worst " << worstCleanDb
+              << " dB). This is pre-P2.6 behaviour restored and first measured, not new -- see the comment above\n";
+
+    // BOTH MODES TAKE THE SAME PATH, because the predicate is mode-independent -- worth one direct
+    // assertion rather than an argument, since Synth's whole purpose is to fade before it clears and
+    // it does NOT do so here: there is no live note to fade. Asserted as bit-identity of the two
+    // renders, the strongest available form of "the same code ran".
+    const int fiftyMs = kRingSamples + static_cast<int>(std::lround(0.050 * kRate));
+    const Arm physical = renderArm(RetriggerMode::Physical, true, fiftyMs, fiftyMs + kTailSamples);
+    const Arm synth = renderArm(RetriggerMode::Synth, true, fiftyMs, fiftyMs + kTailSamples);
+    REQUIRE_FALSE(synth.fadeAfter);
+    REQUIRE(synth.engagementAfter == 0.0);
+    REQUIRE(synth.rampAfter == 0);
+    REQUIRE(synth.tap.size() == physical.tap.size());
+    REQUIRE(synth.tap == physical.tap);
+    std::cout << "[contract] a re-strike 50 ms after the note-off renders bit-identically in Physical and Synth: "
+              << synth.tap.size() << " samples, both on the fresh path, neither fading nor ramping\n";
+}
+
+// ---------------------------------------------------------------------------------------------
 // the refused clause
 // ---------------------------------------------------------------------------------------------
 
-TEST_CASE("CONTRACT: a retrigger damper choke buys suppression only with elapsed time, and charges the attack for it",
+TEST_CASE("CONTRACT: a retrigger damper choke has no state left to act on, and buying one costs elapsed time",
           "[contract]") {
     // THE EVIDENCE BEHIND A REFUSAL (see dsp/src/StringNetwork.cpp, the Physical pitch-change
     // branch). docs/plan.md P2.6 asks a pitch-changing retrigger to perform a "damper choke (fast
@@ -840,8 +1226,7 @@ TEST_CASE("CONTRACT: a retrigger damper choke buys suppression only with elapsed
     // made fewer passes than the content already going round, so the balance really does shift for
     // that long. TO FIRST ORDER, ONCE ONE ROUND TRIP HAS ELAPSED, both occupy the same modal series
     // of the same string at the same rate and a damper acting from the re-excitation onward moves
-    // the level of the whole result rather than the balance inside it. The transient is why this
-    // case measures the balance instead of arguing it.
+    // the level of the whole result rather than the balance inside it.
     //
     // The one thing a damper can do outright is act FIRST, on the old content alone, before the
     // pluck exists -- which is exactly what the plan's own ordering ("choke, ramp, THEN
@@ -849,15 +1234,45 @@ TEST_CASE("CONTRACT: a retrigger damper choke buys suppression only with elapsed
     // itself budgets. 30 ms of latency on every legato note is not a playable instrument, and Q3
     // defers audible-slide behaviour besides.
     //
-    // Measured with the SHIPPED machinery rather than with code kept alive to be measured: a
-    // note-off placed 10.7 ms before the restrike engages the felt for real. Two numbers come out
-    // of the same pair of renders -- what the choke removed from the old note (a direct reading of
-    // the storage functional, not a spectrum), and what it then cost the re-attack that followed.
+    // -----------------------------------------------------------------------------------------
+    // FIXES WAVE 2 STRENGTHENED THE REFUSAL AND BROKE THE OLD MEASUREMENT, and both are recorded.
+    // -----------------------------------------------------------------------------------------
+    // The original form of this case built an engaged felt out of the SHIPPED machinery -- a
+    // note-off 10.7 ms before the restrike -- and measured two things from one pair of renders: the
+    // choke took 1.4925 dB (amplitude) out of the old note's stored energy and charged the re-attack
+    // 1.2233 dB for it, netting 0.2692 dB on the balance. Those numbers were taken at 0eb52b9 and
+    // they were true of that code.
+    //
+    // They are not reproducible here, and the reason is the point rather than an inconvenience.
+    // Wave 2's ownership ruling makes a released note OVER, so a note-off no longer leaves a string
+    // that a later NoteOn re-triggers -- it leaves a string that a later NoteOn CLEARS. The two arms
+    // of the old comparison therefore stopped differing only in the felt and started differing in
+    // which path ran, which is not a measurement of a choke. (Measured, for the record: the
+    // attack-cost reading collapses from -1.2233 dB to -0.2070 dB, and what remains is the missing
+    // superposition of the old note in the un-choked arm, not a damper cost.)
+    //
+    // What replaces it is stronger than what it replaced, because it refuses the clause on
+    // REACHABILITY rather than on cost:
+    //
+    //   (a) The path the plan's clause names -- Physical, pitch changing, plucking over a live note
+    //       -- runs only on a SOUNDING string, and a sounding string's damper is provably at 0: the
+    //       only thing that engages one is the note-off branch, which clears `sounding_` on the same
+    //       line, and landSynthFade's pending note-off, which does the same. So there is nothing to
+    //       choke WITH unless new code engages it, and section (a) asserts the engagement is 0 on
+    //       both sides of exactly that re-strike. A build that added the choke fails it.
+    //   (b) The path where the felt IS down -- a re-strike on a released string -- already discards
+    //       the old content ENTIRELY and resets the felt to fully open on the same sample. The
+    //       choke's stated goal is to make the old note quieter relative to the new one; that path
+    //       already achieves it completely, and at no cost to the attack. Section (b) asserts both.
+    //
+    //   (c) And the half of the original measurement that still stands, because it is about the felt
+    //       and not about the retrigger: suppression is bought with ELAPSED TIME. Section (c)
+    //       measures what 10.7 ms of felt takes out of a ringing string, with no re-strike involved
+    //       at all -- which is the quantity the plan would have to spend latency to obtain.
     constexpr int kRingBlocks = 200;
     constexpr int kChokeBlocks = 4; // 10.7 ms at 48 kHz / 128, well inside the plan's 30 ms budget
-    constexpr int kAttackBlocks = 12;
 
-    auto run = [](bool chokeFirst) {
+    SECTION("(a) the path the clause names has no engagement to choke with") {
         StringNetwork<float> network;
         configure(network, paramsFor(RetriggerMode::Physical));
         std::vector<float> out;
@@ -865,62 +1280,219 @@ TEST_CASE("CONTRACT: a retrigger damper choke buys suppression only with elapsed
         first.push(noteOn(0, kOldNote));
         renderInto(network, first, kRingBlocks, out);
 
-        if (chokeFirst) {
-            BlockEventQueue release;
-            release.push(noteOff(0, kOldNote));
-            renderInto(network, release, kChokeBlocks, out);
-        } else {
-            BlockEventQueue idle;
-            renderInto(network, idle, kChokeBlocks, out);
-        }
+        // IN STATE: the string owns a live note and its felt is open.
+        REQUIRE(network.energyEstimate() > 0.0);
+        REQUIRE(network.damperEngagement(0) == 0.0f);
 
-        struct Result {
-            double energyAtRestrike;
-            float engagementAtRestrike;
-            float attackPeak;
-        };
-        Result result{};
-        result.energyAtRestrike = network.energyEstimate();
-        result.engagementAtRestrike = network.damperEngagement(0);
-
-        const std::size_t restrikeSample = out.size();
         BlockEventQueue restrike;
         restrike.push(noteOn(0, kNewNote));
-        renderInto(network, restrike, kAttackBlocks, out);
-        result.attackPeak = peakOf(out, restrikeSample, out.size());
-        return result;
+        network.process(restrike, 1);
+
+        // THE PITCH-CHANGE BRANCH RAN -- non-vacuity, so the assertion below is about that branch.
+        REQUIRE(network.retuneRampSamplesRemaining(0) > 0);
+        REQUIRE(network.energyEstimate() > 0.0); // rails kept: this is the retrigger path
+        // ...AND THE FELT NEVER CAME DOWN. This is the refusal as an assertion: the shipped branch
+        // does not engage the damper, and a build that inserted the plan's "fast engage()" would
+        // read non-zero here on the very sample it was inserted.
+        REQUIRE(network.damperEngagement(0) == 0.0f);
+        renderInto(network, restrike, 4, out);
+        REQUIRE(network.damperEngagement(0) == 0.0f);
+    }
+
+    SECTION("(b) where the felt IS down, the old note is discarded whole and the attack pays nothing") {
+        auto run = [](bool releaseFirst) {
+            StringNetwork<float> network;
+            configure(network, paramsFor(RetriggerMode::Physical));
+            std::vector<float> out;
+            BlockEventQueue first;
+            first.push(noteOn(0, kOldNote));
+            renderInto(network, first, kRingBlocks, out);
+
+            BlockEventQueue between;
+            if (releaseFirst)
+                between.push(noteOff(0, kOldNote));
+            renderInto(network, between, kChokeBlocks, out);
+
+            struct Result {
+                double energyAtRestrike = 0.0;
+                float engagementAtRestrike = 0.0f;
+                float engagementAfterRestrike = 0.0f;
+                double energyAfterRestrike = 0.0;
+                float attackPeak = 0.0f;
+            };
+            Result result{};
+            result.energyAtRestrike = network.energyEstimate();
+            result.engagementAtRestrike = network.damperEngagement(0);
+
+            const std::size_t restrikeSample = out.size();
+            BlockEventQueue restrike;
+            restrike.push(noteOn(0, kNewNote));
+            network.process(restrike, 1);
+            result.engagementAfterRestrike = network.damperEngagement(0);
+            renderInto(network, restrike, 12, out);
+            result.attackPeak = peakOf(out, restrikeSample, out.size());
+            result.energyAfterRestrike = network.energyEstimate();
+            return result;
+        };
+
+        const auto held = run(false);    // the note is still held: the re-strike is a retrigger
+        const auto released = run(true); // the note was released 10.7 ms ago: the re-strike is fresh
+
+        // IN STATE: one arm really has a felt on the string and the other really does not.
+        REQUIRE(held.engagementAtRestrike == 0.0f);
+        REQUIRE(released.engagementAtRestrike > 0.05f);
+        REQUIRE(held.energyAtRestrike > 0.0);
+        REQUIRE(released.energyAtRestrike > 0.0);
+
+        // THE FELT IS GONE ON THE SAMPLE OF THE RE-STRIKE, not ramped away over the felt time. That
+        // is what says the choke has nothing left to charge the attack for: the pluck lands into a
+        // fully open damper either way.
+        REQUIRE(released.engagementAfterRestrike == 0.0f);
+        REQUIRE(held.engagementAfterRestrike == 0.0f);
+
+        const double attackCostDb =
+            dbOf(static_cast<double>(released.attackPeak) / static_cast<double>(held.attackPeak));
+        std::cout << "[contract] refused choke (a): the shipped pitch-change branch leaves the felt at 0 engagement, "
+                     "so there is nothing to choke with; (b) after a note-off "
+                  << (1000.0 * kChokeBlocks * kBlock / kRate) << " ms earlier the felt reads "
+                  << released.engagementAtRestrike
+                  << " at the re-strike and exactly 0 one sample later -- the old note is discarded WHOLE and the "
+                     "re-attack is "
+                  << attackCostDb
+                  << " dB against the held-note arm, which is the missing superposition, not a "
+                     "damper cost\n";
+
+        // The remaining difference is small AND it is in the direction of the missing old note
+        // rather than of a damped attack: under a decibel, where the original engaged-felt reading
+        // was -1.2233 dB. Bounded rather than pinned, because it is a superposition residue and not
+        // a designed quantity.
+        REQUIRE(attackCostDb < 0.0);
+        REQUIRE(attackCostDb > -1.0);
+    }
+
+    SECTION("(c) suppression is bought with elapsed time, and that half of the old measurement stands") {
+        // No re-strike anywhere in this section: it measures what the felt alone does to a ringing
+        // string over the interval the plan would have to spend before re-exciting. This is the
+        // quantity the choke trades latency for, and it is real.
+        auto storedEnergyAfter = [](bool releaseFirst) {
+            StringNetwork<float> network;
+            configure(network, paramsFor(RetriggerMode::Physical));
+            std::vector<float> out;
+            BlockEventQueue first;
+            first.push(noteOn(0, kOldNote));
+            renderInto(network, first, kRingBlocks, out);
+
+            BlockEventQueue between;
+            if (releaseFirst)
+                between.push(noteOff(0, kOldNote));
+            renderInto(network, between, kChokeBlocks, out);
+            return network.energyEstimate();
+        };
+
+        const double plain = storedEnergyAfter(false);
+        const double choked = storedEnergyAfter(true);
+        REQUIRE(plain > 0.0);
+        REQUIRE(choked > 0.0);
+        const double suppressionDb = dbOf(choked / plain) * 0.5; // energy -> amplitude
+
+        std::cout << "[contract] refused choke (c): " << (1000.0 * kChokeBlocks * kBlock / kRate)
+                  << " ms of felt takes " << suppressionDb
+                  << " dB (amplitude) out of a ringing string's stored energy -- the whole of what a choke buys, and "
+                     "it is bought with latency on every legato note\n";
+
+        // IT WORKS, AND IT WORKS BY ACTING FIRST. The suppression is real and it was bought with
+        // 10.7 ms of elapsed time in which no new note existed. That is the trade the refusal
+        // declines, and declining it is a judgement about playability, not about whether the felt
+        // does anything.
+        REQUIRE(suppressionDb < -1.0);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// the one residual path on which the two ownership predicates can still differ
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: a string removed from the active count stops owning its note within the enable ramp",
+          "[contract]") {
+    // WHAT BOUNDS THE ONE REMAINING DISAGREEMENT between NoteAllocator::owned_ and
+    // StringNetwork::sounding_, and why it is a bound rather than a defect.
+    //
+    // A NoteOff for a note whose string has left the active count (or been muted) cannot be
+    // delivered: StringNetwork::handleEvent drops any event for such a string at its own early
+    // returns. NoteAllocator therefore declines to emit it, releases the ownership, and counts it on
+    // unaddressableNoteOffCount() (fixes wave 2). The allocator is then correct and the NETWORK is
+    // the one holding a stale flag: `sounding_` is still true on a string whose note is over.
+    //
+    // What makes that bounded rather than open-ended is the enable ramp. A removed string ramps to
+    // silence over kEnableRampSeconds and the per-sample loop clears its state -- and its
+    // sounding_/releasing_ flags -- on the sample the ramp lands on zero. So the disagreement lives
+    // for at most one enable ramp plus the block it lands in, after which the two levels agree again
+    // and agree on "free". THIS CASE ASSERTS THAT BOUND, because it is the invariant the whole
+    // argument rests on: lengthen the ramp, or stop clearing the flags there, and the disagreement
+    // becomes permanent.
+    //
+    // *** THE RESIDUAL, PRINTED AND NOT ASSERTED: a count that dips and RETURNS inside the ramp. ***
+    // If the count comes back before the ramp lands, the flags are never cleared, and a fresh note
+    // on that string is taken as a retrigger of a note the player already released -- it keeps rails
+    // that were never damped and glides f0 from the old pitch. It is reachable only by an automation
+    // ride that crosses the owning string's index and returns inside 10 ms with a note-off in
+    // between, which is Check B's gesture played very fast. It is NOT asserted here, deliberately:
+    // the honest fix is to let a NoteOff through handleEvent's addressability gate (a NoteOff for a
+    // string being ramped silent is harmless -- it only moves flags), and an assertion pinning
+    // today's behaviour would go red the moment somebody made it. Reported in
+    // task-P2.6-fixes-wave2.md instead, with this measurement.
+    constexpr int kRampSamples = 480; // kEnableRampSeconds * kRate = 10 ms at 48 kHz
+
+    auto probe = [](int samplesOutOfCount) {
+        StringNetwork<float> network;
+        configure(network, paramsFor(RetriggerMode::Physical), 2);
+
+        BlockEventQueue events;
+        events.push(noteOn(0, kOldNote, 1));
+        for (int b = 0; b < 100; ++b)
+            network.process(events, kBlock);
+        REQUIRE(network.stringEnergyEstimate(1) > 0.0);
+
+        network.setNumStrings(1); // string 1 leaves; its enable ramp starts
+
+        // The note-off the allocator would have declined to emit, pushed here anyway so this case
+        // reproduces exactly what StringNetwork sees: an event it drops at its early return.
+        BlockEventQueue undeliverable;
+        undeliverable.push(noteOff(0, kOldNote, 1));
+        network.process(undeliverable, 1);
+        REQUIRE(network.damperEngagement(1) == 0.0f); // dropped: the felt never came down
+
+        for (int done = 1; done < samplesOutOfCount;) {
+            const int chunk = std::min(kBlock, samplesOutOfCount - done);
+            BlockEventQueue idle;
+            network.process(idle, chunk);
+            done += chunk;
+        }
+
+        network.setNumStrings(2); // ...and back
+        BlockEventQueue restrike;
+        restrike.push(noteOn(0, kNewNote, 1));
+        network.process(restrike, 1);
+
+        struct Result {
+            int rampAfter = 0;
+        };
+        return Result{network.retuneRampSamplesRemaining(1)};
     };
 
-    const auto plain = run(false);
-    const auto choked = run(true);
+    // THE BOUND: one whole enable ramp plus the block it lands in is enough. The string has stopped
+    // owning its note, so the re-strike is a FRESH note -- no retune ramp is started.
+    const auto settled = probe(kRampSamples + kBlock);
+    REQUIRE(settled.rampAfter == 0);
 
-    // IN STATE: one arm really has a felt on the string and the other really does not.
-    REQUIRE(plain.engagementAtRestrike == 0.0f);
-    REQUIRE(choked.engagementAtRestrike > 0.05f);
-    REQUIRE(plain.energyAtRestrike > 0.0);
-    REQUIRE(choked.energyAtRestrike > 0.0);
-
-    const double suppressionDb = dbOf(choked.energyAtRestrike / plain.energyAtRestrike) * 0.5; // energy -> amplitude
-    const double attackCostDb = dbOf(static_cast<double>(choked.attackPeak) / static_cast<double>(plain.attackPeak));
-
-    std::cout << "[contract] refused choke, measured on the shipped felt (" << (1000.0 * kChokeBlocks * kBlock / kRate)
-              << " ms before the restrike, engagement " << choked.engagementAtRestrike << "): the old note's stored "
-              << "energy fell " << suppressionDb << " dB (amplitude), and the re-attack that followed was "
-              << attackCostDb << " dB quieter than without the choke\n";
-
-    std::cout << "[contract] refused choke, NET effect on the balance the choke exists to change: "
-              << (suppressionDb - attackCostDb) << " dB\n";
-
-    // (a) IT WORKS, AND IT WORKS BY ACTING FIRST. The suppression is real and it was bought with
-    //     10.7 ms of elapsed time in which no new note existed.
-    REQUIRE(suppressionDb < -1.0);
-    // (b) AND IT CHARGES THE ATTACK. The same felt is still on the string when the pluck arrives --
-    //     it decays with the felt time constant, not with the ramp -- so the note the player just
-    //     asked for comes out quieter by very nearly the same amount.
-    REQUIRE(attackCostDb < -0.5);
-    // (c) THE REFUSAL, IN ONE NUMBER. What the choke changed about the BALANCE between the old note
-    //     and the new one -- the only thing a choke could be for -- is the difference between those
-    //     two, and it is under half a decibel. The damper took from both, because it is linear and
-    //     they share a string. Everything it bought, it charged for.
-    REQUIRE(std::fabs(suppressionDb - attackCostDb) < 0.5);
+    // THE RESIDUAL, measured and printed. Two milliseconds out of the count is not enough, and the
+    // re-strike is taken as a retrigger of a note that was already released.
+    const auto hurried = probe(96); // 2 ms
+    std::cout << "[contract] a string that left the active count stops owning its note within the "
+              << (1000.0 * kRampSamples / kRate) << " ms enable ramp: after "
+              << (1000.0 * (kRampSamples + kBlock) / kRate)
+              << " ms out of the count a re-strike starts no retune ramp (" << settled.rampAfter
+              << " samples). OBSERVATION, NOT A GATE: after only 2 ms it starts one of " << hurried.rampAfter
+              << " samples -- the flag had not been cleared yet, which is the one residual disagreement "
+                 "between the two ownership predicates and is bounded by that ramp\n";
 }

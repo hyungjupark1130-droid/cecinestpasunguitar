@@ -472,23 +472,47 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
     // first chord. So "has state" and "is playing something" came apart, and the retrigger paths
     // below are about the second one:
     //
-    //   - A string that owns a note is being RE-struck. There is an old note to be continuous with
-    //     (Physical) or to be replaced cleanly (Synth), and that is what RetriggerMode decides
-    //     between.
+    //   - A string that is SOUNDING owns a note. It is being RE-struck: there is a live note to be
+    //     continuous with (Physical) or to be replaced cleanly (Synth), and that is what
+    //     RetriggerMode decides between.
     //   - A string that owns none is being struck for the FIRST time, whatever else it may be
-    //     carrying. There is no old note. Retuning its sympathetic motion from whatever pitch the
-    //     string was last left at -- kMinMidiNote for a string nobody has played -- would glide
-    //     inaudible content across two and a half octaves to make a point no listener can hear, and
-    //     the same fresh attack would then sound different depending on whether a neighbour
-    //     happened to be ringing. The state is cleared, exactly as it was through P2.3.
+    //     carrying -- a release tail, a neighbour's sympathetic drive, both. There is no live note.
+    //     Retuning that motion from whatever pitch the string was last left at -- kMinMidiNote for
+    //     a string nobody has played -- would glide inaudible content across two and a half octaves
+    //     to make a point no listener can hear, and the same fresh attack would then sound
+    //     different depending on whether a neighbour happened to be ringing. The state is cleared,
+    //     exactly as it was through P2.3.
     //
-    // NoteAllocator draws the same line with the same predicate for allocation ("idle" is "owns no
-    // note", never "is silent"), so the two levels cannot disagree about which strings are free.
+    // A RELEASED NOTE IS OVER, AND THAT IS WHY THIS READS `sounding_` ALONE. It shipped as
+    // `sounding_ || releasing_`, which made the two levels disagree for the whole span between a
+    // note-off and its tail dying -- the most common state in ordinary playing, and hundreds of
+    // milliseconds to seconds long, because `releasing_` is cleared only by the silence watchdog
+    // (below in process(): the outgoing bridge wave must stay under kSilenceFloor for a whole
+    // kSilenceWindowSeconds window). NoteAllocator releases its ownership the instant it EMITS the
+    // note-off, so through that whole span the allocator handed out a string it believed was fresh
+    // and this function took the retrigger path -- plucking into a felt still most of the way
+    // closed, which then ramped open on the damper's own time constant. Measured on the P1 corpus:
+    // phrase 01 (note after note, nothing overlapping) lost 4.88 dB of RMS against the pre-P2.6
+    // parent, reaching 10.99 dB in individual 2 s windows, and isolating the two halves attributed
+    // -5.33 dB of that to the ramped-off felt against +0.45 dB gained by keeping the rails. The
+    // retained tail was worth 0.45 dB and sat about 39 dB down; the price was an uncontrolled,
+    // articulation-dependent level swing on the commonest gesture there is.
     //
-    // WHAT THAT COSTS, MEASURED NOT ASSUMED: clearing a sympathetically ringing string discards
-    // real motion. tests/dsp/RetriggerModeTests.cpp quantifies it against the level of the note
-    // that replaces it and against the sympathetic response P2.4 measured.
-    const bool ownsNote = sounding_[index] || releasing_[index];
+    // NoteAllocator asks the SAME question of the same event stream -- `owned_[i]`, set by the
+    // note-on it emits and cleared by the note-off it emits (dsp/include/cnpg/dsp/NoteAllocator.h).
+    // The two can therefore differ only where an event was DROPPED between them, and every such
+    // drop is counted: queueOverflowCount() (the event never reached this queue) and
+    // unaddressableNoteOffCount() (the string left the active count or was muted, so this function
+    // would have discarded the event at its own early returns above). There is no path that lets
+    // them disagree silently, which is exactly the property the shipped `|| releasing_` destroyed.
+    //
+    // WHAT THIS COSTS, MEASURED NOT ASSUMED, because it is a real cost and not a free win: a
+    // re-strike now CLEARS a string that is still audibly releasing, and the earlier the re-strike
+    // the louder the content thrown away. tests/dsp/RetriggerModeTests.cpp sweeps note-off age from
+    // 5 ms to 500 ms and reports the discarded level and the click excess at each, against a
+    // genuine A/B control and a level-placed hard cut. Clearing a sympathetically ringing string is
+    // quantified in the same file against the note that replaces it.
+    const bool ownsNote = sounding_[index];
 
     if (!ownsNote) {
         midiNote_[index] = static_cast<std::uint8_t>(note);
@@ -512,10 +536,20 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
     // -------------------------------------------------------------------------------------------
     // release(), ramped and not snapped: the rails under this junction are full, and a scattering
     // coefficient that jumps while a waveform is passing through it is precisely the click
-    // clearStringState() is allowed to make and this path is not. Before P2.6 the engagement here
-    // was always already 0 and this call was the no-op its own comment predicted would "become
-    // load-bearing the moment P2.6 adds a path that plucks over a damped string" -- it now does,
-    // because a restrike on a RELEASING string reaches here instead of clearing it.
+    // clearStringState() is allowed to make and this path is not.
+    //
+    // IT IS A NO-OP TODAY, AND SAYING SO IS THE POINT. Reaching here means `sounding_[index]` is
+    // true, and the only thing that engages a damper is the note-off branch above -- which clears
+    // `sounding_` on the same line -- or landSynthFade()'s pending-note-off, which does the same.
+    // So the engagement is provably already 0 whenever this runs, and the call moves nothing. It
+    // shipped in fixes wave 1 with a comment claiming it had "become load-bearing, because a
+    // restrike on a RELEASING string reaches here instead of clearing it"; the wave-2 predicate
+    // above sends exactly that restrike down the fresh path instead, so the claim is retracted and
+    // the call is back to being what its P2.2 comment originally called it -- the correct thing to
+    // do the moment any future path plucks over an engaged damper, kept because the alternative is
+    // a silent dependency on a two-hop argument about which flags can be true together.
+    // tests/dsp/RetriggerModeTests.cpp asserts the engagement is 0 across the restrike rather than
+    // leaving that argument unchecked.
     dampers_[index].release();
 
     if (midiNote_[index] != static_cast<std::uint8_t>(note)) {

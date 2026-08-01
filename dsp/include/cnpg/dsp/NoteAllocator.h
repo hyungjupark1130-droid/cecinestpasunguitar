@@ -29,12 +29,32 @@
 //     string is ringing a little.
 //   - Taking it as "free" -- which is what this class does -- is right for allocation, and leaves
 //     the audible consequence (a fresh attack on a sympathetically ringing string discards that
-//     motion) where it belongs: in StringNetwork, which is the only thing that can see it. The
-//     same ownership predicate decides both, so the two levels cannot drift apart -- StringNetwork
-//     treats "sounding_ || releasing_" as "owns a note" for exactly the same reason.
+//     motion) where it belongs: in StringNetwork, which is the only thing that can see it.
 //
-// A CC64-held NoteOff does NOT free the string. The note is still ringing (that is what the pedal
-// does), so the string is still busy and a later NoteOn has to steal it like any other.
+// THE TWO LEVELS ASK THE SAME QUESTION OF THE SAME EVENT STREAM, and that is a checkable claim
+// rather than a slogan. This class sets owned_[i] on the NoteOn it EMITS and clears it on the
+// NoteOff it EMITS; StringNetwork::handleEvent sets sounding_[i] on the NoteOn it CONSUMES and
+// clears it on the NoteOff it consumes. Same two edges, same stream, so the two flags can differ
+// only where an emitted event failed to arrive -- and every way that can happen is counted:
+// queueOverflowCount() (the destination queue was full) and unaddressableNoteOffCount() (the
+// string had left the active count or been muted, so StringNetwork would have discarded the event
+// at its own early returns). No path drops one silently. What is NOT claimed is that the flags
+// agree at every instant: allocate() runs for a whole block before StringNetwork consumes any of
+// it, so within one block this class is ahead by up to a block, and a Synth retrigger fade holds a
+// note-off for up to kSynthFadeSeconds before applying it (StringNetwork::landSynthFade). Both
+// windows are bounded, neither level can observe the other inside one, and neither is a drop.
+//
+// This paragraph previously claimed the predicates "cannot drift apart" while StringNetwork read
+// "sounding_ || releasing_" -- a predicate that stayed true for the whole tail of a released note,
+// i.e. for most of ordinary playing. They drifted for hundreds of milliseconds at a time and the
+// audible cost was 4.88 dB of corpus RMS. Fixed at the StringNetwork end (a released note is over)
+// rather than here, because THIS class's line -- ownership, set and cleared by the two events it
+// emits -- was the right one.
+//
+// A CC64-held NoteOff does NOT free the string, and that is not an exception to the paragraph
+// above: the NoteOff has not been emitted yet. The note is still ringing (that is what the pedal
+// does), the string is still busy at both levels, and a later NoteOn has to steal it like any
+// other.
 
 namespace cnpg::dsp {
 
@@ -164,7 +184,10 @@ class NoteAllocator {
     // counter moving anywhere. Releasing before reassigning is what keeps the invariant.
     //
     // NoteOff (including a NoteOn with velocity 0). Emitted only if the (channel, note) still owns
-    // a string. With the pedal down it is HELD instead, and the string stays owned.
+    // a string. With the pedal down it is HELD instead, and the string stays owned. If the owning
+    // string can no longer be ADDRESSED, the ownership is still released but no event is emitted --
+    // StringNetwork would discard it -- and unaddressableNoteOffCount() increments. The same rule
+    // applies to a held NoteOff released by a pedal-up.
     //
     // CC64. Value >= kSustainPedalDownThreshold is pedal-down; while down, NoteOffs are held per
     // string. On pedal-up every held NoteOff is emitted at the pedal-release sample offset in
@@ -181,16 +204,17 @@ class NoteAllocator {
     bool sustainActive() const noexcept;
 
     // ---- diagnostics ---------------------------------------------------------------------------
-    // All three are cumulative since construction, prepare() or the last reset(), matching
+    // All four are cumulative since construction, prepare() or the last reset(), matching
     // EventQueue::droppedCount()'s convention. They exist because every failure mode this class has
     // is SILENT -- a note that produces no NoteEvent sounds exactly like a note that was never
     // played -- and a counter nobody reads is a counter that lies, so every [contract] case in the
-    // suite asserts all three, zero everywhere except where the case is about the drop itself.
+    // suite asserts all four, zero everywhere except where the case is about the drop itself.
     //
-    // THREE counters, not one, because the three failures need three different fixes: the note was
+    // FOUR counters, not one, because the four failures need four different fixes: the note was
     // outside the instrument's design envelope (fix the input), the note was inside it and the
-    // tuning or zone table had nowhere to put it (fix the table), or the allocation succeeded and
-    // the destination queue was full (a note that never stops).
+    // tuning or zone table had nowhere to put it (fix the table), the note-off's string had been
+    // automated out from under it (nothing to fix -- but the count/enable gesture is what to look
+    // at), or the allocation succeeded and the destination queue was full (a note that never stops).
 
     // NoteOns that no enabled, in-count string could play (outside every fingering span, or outside
     // every zone). The mode's designed-in failure, not a bug: a 6-string EADGBE instrument cannot
@@ -205,6 +229,18 @@ class NoteAllocator {
     // it could sound. Counted rather than dropped in silence so cnpg_render fails a corpus that
     // contains one instead of reporting every statistic as healthy.
     std::uint32_t outOfRangeNoteCount() const noexcept;
+
+    // NoteOffs whose owning string could no longer be ADDRESSED -- it left the active count, or its
+    // enable went false, both automatable while the note is held. StringNetwork::handleEvent
+    // discards every event for such a string at its own early returns, so emitting one is a
+    // guaranteed silent drop; this class declines to emit it, releases the ownership as it would
+    // have, and counts it here. Fixes wave 1 fixed and gated the NoteOn half of this (the restrike
+    // is reassigned, because a note looking for somewhere to sound has somewhere to go) and
+    // reported this half unfixed; wave 2 closes it. A non-zero reading is not a defect in this
+    // class: it means a numStrings or stringEnabled automation move landed under a held note, which
+    // is a legal gesture whose consequence is that the note-off had nowhere to be delivered. The
+    // string is silenced by StringNetwork's own enable ramp regardless, so nothing is left stuck.
+    std::uint32_t unaddressableNoteOffCount() const noexcept;
 
     // NoteEvents this class produced and the destination queue refused because it was full
     // (BlockEventQueue holds 256 per block, shared with everything else the host sent). Distinct
@@ -262,6 +298,7 @@ class NoteAllocator {
 
     std::uint32_t unassignableNoteCount_ = 0;
     std::uint32_t outOfRangeNoteCount_ = 0;
+    std::uint32_t unaddressableNoteOffCount_ = 0;
     std::uint32_t queueOverflowCount_ = 0;
 };
 

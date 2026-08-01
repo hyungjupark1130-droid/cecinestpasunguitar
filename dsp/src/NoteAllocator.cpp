@@ -32,6 +32,7 @@ void NoteAllocator::reset() noexcept {
     sustainDown_ = false;
     unassignableNoteCount_ = 0;
     outOfRangeNoteCount_ = 0;
+    unaddressableNoteOffCount_ = 0;
     queueOverflowCount_ = 0;
 }
 
@@ -183,7 +184,15 @@ void NoteAllocator::allocate(const RawMidiEvent* events, int numEvents, BlockEve
                     const auto index = static_cast<std::size_t>(s);
                     if (!owned_[index] || !heldNoteOff_[index])
                         continue;
-                    emitNoteOff(s, raw.sampleOffset, outEvents);
+                    // ...and a string that left the count or was muted UNDER the pedal gives its
+                    // note back on the counter instead of into an event StringNetwork would
+                    // discard. Same rule as the direct NoteOff below, for the same reason, and the
+                    // reason this loop still visits every slot rather than only the in-count ones:
+                    // the OWNERSHIP has to be released either way.
+                    if (stringAddressable(s))
+                        emitNoteOff(s, raw.sampleOffset, outEvents);
+                    else
+                        ++unaddressableNoteOffCount_;
                     owned_[index] = false;
                     heldNoteOff_[index] = false;
                 }
@@ -246,6 +255,28 @@ void NoteAllocator::allocate(const RawMidiEvent* events, int numEvents, BlockEve
                 continue; // stale: the note no longer owns a string (stolen, or never assigned)
 
             const auto index = static_cast<std::size_t>(owner);
+            if (!stringAddressable(owner)) {
+                // THE NoteOff HALF of the restrike bug fixes wave 1 fixed and reported. The owning
+                // string left the active count or was muted while the note was held, so
+                // StringNetwork::handleEvent would discard this event at its own early returns with
+                // nothing moving anywhere. There is no reassignment available here -- a NoteOff is
+                // not a note looking for somewhere to sound, it is the end of one -- so the answer
+                // is the counter, and the ownership is released exactly as it would have been.
+                //
+                // Not emitted at all, rather than emitted-and-discarded: emitting occupies a queue
+                // slot that a real event may need, and an event this class KNOWS will be dropped is
+                // one it should not push. Releasing the ownership here is what keeps the string free
+                // for the next note and keeps a later stale NoteOff for the same (channel, note)
+                // from finding an owner.
+                //
+                // The string is silent either way -- StringNetwork ramps a removed or disabled
+                // string out over kEnableRampSeconds and clears sounding_/releasing_ when the ramp
+                // lands on zero -- so nothing is stuck. What was missing was the diagnostic.
+                ++unaddressableNoteOffCount_;
+                owned_[index] = false;
+                heldNoteOff_[index] = false;
+                continue;
+            }
             if (sustainDown_) {
                 // Held, not emitted. The string stays OWNED: the note is still ringing, which is
                 // what the pedal is for, so the string is not free for a later NoteOn to take
@@ -277,6 +308,8 @@ bool NoteAllocator::sustainActive() const noexcept { return sustainDown_; }
 std::uint32_t NoteAllocator::unassignableNoteCount() const noexcept { return unassignableNoteCount_; }
 
 std::uint32_t NoteAllocator::outOfRangeNoteCount() const noexcept { return outOfRangeNoteCount_; }
+
+std::uint32_t NoteAllocator::unaddressableNoteOffCount() const noexcept { return unaddressableNoteOffCount_; }
 
 std::uint32_t NoteAllocator::queueOverflowCount() const noexcept { return queueOverflowCount_; }
 

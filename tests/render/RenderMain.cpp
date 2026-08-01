@@ -906,6 +906,11 @@ struct RenderStats {
     // NoteOn outside kMinMidiNote..kMaxMidiNote. Reported separately because the fix differs -- this
     // one says the .mid file asks for a note the instrument was never designed to sound.
     std::uint32_t outOfRangeNotes = 0;
+    // ...and the fourth: a NoteOff whose string had left the active count or been muted, which
+    // StringNetwork would have discarded. This tool never automates numStrings or stringEnabled, so
+    // a non-zero reading here means something in the chain moved a count the render did not ask to
+    // move -- which is exactly why it is reported and failed on rather than merely available.
+    std::uint32_t unaddressableNoteOffs = 0;
 };
 
 // MIDI status nibbles this layer reads directly, exactly as plugin/src/PluginProcessor.cpp does:
@@ -1004,8 +1009,9 @@ void renderPhrase(const MidiFileContents& midi, const RenderSpec& spec, std::vec
         noteEvents.clear();
         allocator.allocate(rawEvents.data(), static_cast<int>(rawEvents.size()), noteEvents);
         stats.droppedNoteEvents += noteEvents.droppedCount();
-        stats.unassignableNotes = allocator.unassignableNoteCount(); // cumulative; not a per-block sum
-        stats.outOfRangeNotes = allocator.outOfRangeNoteCount();     // cumulative; not a per-block sum
+        stats.unassignableNotes = allocator.unassignableNoteCount();         // cumulative; not a per-block sum
+        stats.outOfRangeNotes = allocator.outOfRangeNoteCount();             // cumulative; not a per-block sum
+        stats.unaddressableNoteOffs = allocator.unaddressableNoteOffCount(); // cumulative, likewise
 
         {
             // Exactly the guard PluginProcessor::processBlock() engages around the identical calls.
@@ -1205,9 +1211,10 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
     std::printf("    %lld samples (%.3f s), %lld MIDI event(s), peak %.2f dBFS, rms %.2f dBFS, dc %.2f dBFS\n",
                 stats.numSamples, stats.durationSeconds, stats.midiEvents, dbOf(stats.peak), dbOf(stats.rms),
                 dbOf(std::fabs(stats.dcOffset)));
-    std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u unassignableNotes=%u outOfRangeNotes=%u%s\n",
+    std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u unassignableNotes=%u outOfRangeNotes=%u "
+                "unaddressableNoteOffs=%u%s\n",
                 stats.nonFiniteSamples, stats.subnormalSamples, stats.droppedNoteEvents, stats.unassignableNotes,
-                stats.outOfRangeNotes,
+                stats.outOfRangeNotes, stats.unaddressableNoteOffs,
                 verifyDeterminism ? " determinism=verified(2 in-process renders bit-identical)" : "");
     std::fflush(stdout);
 
@@ -1233,6 +1240,13 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
                      "cnpg_render: %s contains %u note(s) outside the instrument's MIDI %d..%d design envelope, "
                      "which were rejected before allocation -- the render is missing notes the phrase contains\n",
                      label.c_str(), stats.outOfRangeNotes, cnpg::dsp::kMinMidiNote, cnpg::dsp::kMaxMidiNote);
+        return false;
+    }
+    if (stats.unaddressableNoteOffs > 0) {
+        std::fprintf(stderr,
+                     "cnpg_render: %s left %u note-off(s) undeliverable -- the owning string had left the active "
+                     "count or been disabled, so StringNetwork would have discarded them\n",
+                     label.c_str(), stats.unaddressableNoteOffs);
         return false;
     }
 

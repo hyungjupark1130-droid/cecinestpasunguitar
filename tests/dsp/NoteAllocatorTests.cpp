@@ -175,6 +175,7 @@ TEST_CASE("NoteAllocator: notes outside kMinMidiNote..kMaxMidiNote are rejected"
     // rejections are the envelope check and the second counter is where they land.
     REQUIRE(allocator.unassignableNoteCount() == 0);
     REQUIRE(allocator.outOfRangeNoteCount() == 2);
+    REQUIRE(allocator.unaddressableNoteOffCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 
@@ -223,6 +224,7 @@ TEST_CASE("NoteAllocator: every CC except 64 is ignored, and CC64 itself emits n
     REQUIRE_FALSE(allocator.sustainActive()); // no CC64 arrived, so the pedal never moved
     REQUIRE(outEvents.size() == 2);           // the two CC messages produced no NoteEvent
     REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.unaddressableNoteOffCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 
     // ...and CC64 itself is a pedal, not a note: it moves state and emits nothing on its own.
@@ -267,6 +269,7 @@ TEST_CASE("NoteAllocator: setParams switches AllocationMode live, on the next no
     REQUIRE(secondOut.peek()->stringIndex == 1);
     REQUIRE(allocator.stringForNote(0, 60) == 1);
     REQUIRE(allocator.unassignableNoteCount() == 0);
+    REQUIRE(allocator.unaddressableNoteOffCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 

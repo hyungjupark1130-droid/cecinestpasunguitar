@@ -52,6 +52,7 @@ std::vector<NoteEvent> drain(BlockEventQueue& queue) {
 void requireNoDrops(const NoteAllocator& allocator) {
     REQUIRE(allocator.unassignableNoteCount() == 0);
     REQUIRE(allocator.outOfRangeNoteCount() == 0);
+    REQUIRE(allocator.unaddressableNoteOffCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 
@@ -172,6 +173,7 @@ TEST_CASE("CONTRACT: a note in no zone emits nothing, counts, and reports no str
     // All three assertions the criterion names, together: no event, the counter moved, and the
     // note reports no string.
     REQUIRE(allocator.unassignableNoteCount() == 2);
+    REQUIRE(allocator.unaddressableNoteOffCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
     REQUIRE(allocator.stringForNote(0, 40) == -1);
     REQUIRE(allocator.stringForNote(0, 90) == -1);
@@ -209,6 +211,7 @@ TEST_CASE("CONTRACT: an empty zone claims nothing, including its own bounds", "[
     REQUIRE(emitted[0].midiNote == 64);
     REQUIRE(emitted[0].stringIndex == 1);
     REQUIRE(allocator.unassignableNoteCount() == 2); // both of the inverted zone's own bounds
+    REQUIRE(allocator.unaddressableNoteOffCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 

@@ -722,125 +722,139 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a retrigger snaps the damper open over cl
     // being zeroed in the same breath. Both halves are asserted directly -- that the snap happens
     // (otherwise the next note would be plucked into a fully engaged felt and arrive dead), and
     // that the state it happens over is cleared (otherwise it is a click).
-    StringNetwork<float> network;
-    configure(network, paramsWith(100.0f)); // the slowest felt, so the ramp is easy to catch mid-flight
-
-    BlockEventQueue events;
-    events.push(noteOn(0, 45));
-    for (int b = 0; b < 200; ++b)
-        network.process(events, kBlock);
-    REQUIRE(network.damperEngagement(0) == 0.0f);
-
-    BlockEventQueue release;
-    release.push(noteOff(0, 45));
-    for (int b = 0; b < 20; ++b) // ~53 ms into a 100 ms ramp
-        network.process(release, kBlock);
-
-    // Genuinely MID-RAMP, asserted rather than assumed -- this is the P2.1 trap, where a state
-    // change placed outside the window under test passed against the defect bit-identically.
-    const float midRamp = network.damperEngagement(0);
-    INFO("engagement at the retrigger " << midRamp);
-    REQUIRE(midRamp > 0.05f);
-    REQUIRE(midRamp < 0.95f);
-    REQUIRE(network.energyEstimate() > 0.0); // ...and the string is still ringing under it
-
-    // -----------------------------------------------------------------------------------------
-    // TASK P2.6 SPLIT THIS IN TWO, and both halves are worth having.
-    // -----------------------------------------------------------------------------------------
-    // Through P2.3 EVERY pitch-changing retrigger took the re-init path, so the snap was reached
-    // from there and this case measured it there. P2.6 gives RetriggerMode real semantics and the
-    // two modes now take opposite paths over exactly this state -- a string mid-release, still
-    // ringing, with a felt half-way down:
     //
-    //   Physical RAMPS the damper open (release(), the felt time) and KEEPS the rails, because the
-    //   waves passing through the junction are not zeros and a coefficient that jumps through them
-    //   is the click this pairing exists to prevent. The snap would be a defect here.
-    //   Synth FADES to exactly zero first and only then clears, which restores the invariant --
-    //   the snap happens over zeros -- and the re-attack is bit-identical to a fresh instance.
+    // -----------------------------------------------------------------------------------------
+    // P2.6 SPLIT THIS IN TWO. FIXES WAVE 2 REJOINED IT, and the invariant never moved.
+    // -----------------------------------------------------------------------------------------
+    // Through P2.3 every pitch-changing retrigger took the re-init path, so the snap was reached
+    // from there. P2.6 made RetriggerMode real and had the two modes take OPPOSITE paths over a
+    // string mid-release -- Physical ramping the damper open over kept rails, Synth fading to zero
+    // and then snapping -- and this case asserted that disagreement from both sides.
     //
-    // So the invariant is unchanged ("the snap happens only over cleared state") and it is now
-    // asserted from both sides: that Physical does NOT snap, and that Synth does and lands clean.
+    // Wave 2's ownership ruling removes the disagreement rather than re-tuning it: a released note
+    // is over, so "owns a note" is `sounding_` alone and a re-strike on a merely RELEASING string
+    // is a fresh note in either mode. Both modes therefore snap here, and both snap over rails
+    // clearStringState() zeroes on the same call -- which is the invariant this case has always
+    // been about, now with no exception to it.
+    //
+    // WHERE PHYSICAL GENUINELY KEEPS THE RAILS is a re-strike on a still-SOUNDING string, and the
+    // second section asserts what the damper does there: nothing, because the felt was never down.
+    // That is what makes "the snap happens only over cleared state" a complete statement instead of
+    // half of one -- the other path has no engagement to snap in the first place, and a build that
+    // added one (the refused damper choke) would fail that section.
 
-    StringNetworkParams physicalParams = paramsWith(100.0f);
-    physicalParams.retriggerMode = RetriggerMode::Physical;
-    network.setParams(physicalParams);
+    auto ringThenReleaseHalfway = [](StringNetwork<float>& network) {
+        BlockEventQueue events;
+        events.push(noteOn(0, 45));
+        for (int b = 0; b < 200; ++b)
+            network.process(events, kBlock);
+        REQUIRE(network.damperEngagement(0) == 0.0f);
 
-    BlockEventQueue retrigger;
-    retrigger.push(noteOn(0, 52));
-    network.process(retrigger, kBlock);
+        BlockEventQueue release;
+        release.push(noteOff(0, 45));
+        for (int b = 0; b < 20; ++b) // ~53 ms into a 100 ms ramp
+            network.process(release, kBlock);
 
-    // RAMPED, NOT SNAPPED. The engagement is on its way down from the mid-ramp value above, and it
-    // is emphatically not 0 -- one block is 2.67 ms against a 100 ms felt.
-    const float afterPhysical = network.damperEngagement(0);
-    INFO("engagement one block after a Physical retrigger " << afterPhysical << " (was " << midRamp << ")");
-    REQUIRE(afterPhysical > 0.0f);
-    REQUIRE(afterPhysical < midRamp); // releasing, not engaging
-    // ...and the state was kept: the string is not a fresh instance.
-    REQUIRE(network.energyEstimate() > 0.0);
+        // Genuinely MID-RAMP, asserted rather than assumed -- this is the P2.1 trap, where a state
+        // change placed outside the window under test passed against the defect bit-identically.
+        const float midRamp = network.damperEngagement(0);
+        INFO("engagement at the retrigger " << midRamp);
+        REQUIRE(midRamp > 0.05f);
+        REQUIRE(midRamp < 0.95f);
+        REQUIRE(network.energyEstimate() > 0.0); // ...and the string is still ringing under it
+        return midRamp;
+    };
 
-    // Now the Synth half, from the same mid-ramp state, on its own instance.
-    StringNetworkParams synthParams = paramsWith(100.0f);
-    synthParams.retriggerMode = RetriggerMode::Synth;
+    SECTION("mid-release, in EITHER mode: the snap happens, and the state it happens over is cleared") {
+        for (const RetriggerMode mode : {RetriggerMode::Physical, RetriggerMode::Synth}) {
+            StringNetworkParams params = paramsWith(100.0f); // slowest felt, so the ramp is easy to catch
+            params.retriggerMode = mode;
+            const bool physical = mode == RetriggerMode::Physical;
+            INFO("retrigger mode " << (physical ? "Physical" : "Synth"));
 
-    StringNetwork<float> synth;
-    configure(synth, synthParams);
-    BlockEventQueue synthEvents;
-    synthEvents.push(noteOn(0, 45));
-    for (int b = 0; b < 200; ++b)
-        synth.process(synthEvents, kBlock);
-    BlockEventQueue synthRelease;
-    synthRelease.push(noteOff(0, 45));
-    for (int b = 0; b < 20; ++b)
-        synth.process(synthRelease, kBlock);
-    const float synthMidRamp = synth.damperEngagement(0);
-    INFO("Synth engagement at the retrigger " << synthMidRamp);
-    REQUIRE(synthMidRamp > 0.05f);
-    REQUIRE(synthMidRamp < 0.95f);
+            StringNetwork<float> network;
+            configure(network, params);
+            const float midRamp = ringThenReleaseHalfway(network);
 
-    BlockEventQueue synthRetrigger;
-    synthRetrigger.push(noteOn(0, 52));
-    std::vector<float> revived;
-    for (int b = 0; b < 60; ++b) {
-        synth.process(synthRetrigger, kBlock);
-        if (b == 0) {
-            // The fade landed inside this very block (2 ms at 48 kHz is 96 samples of a 128-sample
-            // block), and the snap went with it.
-            REQUIRE_FALSE(synth.retriggerFadeActive(0));
-            REQUIRE(synth.retriggerFadeGain(0) == 1.0f);
-            REQUIRE(synth.damperEngagement(0) == 0.0f); // snapped, over zeros
+            BlockEventQueue retrigger;
+            retrigger.push(noteOn(0, 52));
+            std::vector<float> revived;
+            for (int b = 0; b < 60; ++b) {
+                network.process(retrigger, kBlock);
+                if (b == 0) {
+                    // SNAPPED, not ramped -- and snapped on the retrigger sample itself, not after
+                    // a fade: there is no live note to fade out, so no fade is started in either
+                    // mode. One block is 2.67 ms against a 100 ms felt, so a ramped engagement
+                    // would still be within a few percent of midRamp here.
+                    INFO("engagement one block after the retrigger, was " << midRamp);
+                    REQUIRE_FALSE(network.retriggerFadeActive(0));
+                    REQUIRE(network.retriggerFadeGain(0) == 1.0f);
+                    REQUIRE(network.damperEngagement(0) == 0.0f);
+                    REQUIRE(network.damperLossDepth(0) == params.damper.maxLoss); // the depth snapped too
+                    REQUIRE(network.retuneRampSamplesRemaining(0) == 0);          // and no retune ramp
+                }
+                const float* channel = network.tapBuffers().channel(0, 0);
+                revived.insert(revived.end(), channel, channel + kBlock);
+            }
+
+            // THE STATE THE SNAP HAPPENED OVER REALLY WAS CLEARED, in the strongest form available:
+            // from the retrigger sample onward the render is BIT-IDENTICAL to the same note plucked
+            // on a string that never rang and was never damped. Nothing of the damped tail and no
+            // residual engagement survived into it. Note there is no offset to allow for now -- the
+            // 2 ms of Synth-fade latency this comparison used to carry is gone, because the fade
+            // does not run over a string that owns no note.
+            StringNetwork<float> fresh;
+            configure(fresh, params);
+            BlockEventQueue freshEvents;
+            freshEvents.push(noteOn(0, 52));
+            std::vector<float> expected;
+            for (int b = 0; b < 60; ++b) {
+                fresh.process(freshEvents, kBlock);
+                const float* channel = fresh.tapBuffers().channel(0, 0);
+                expected.insert(expected.end(), channel, channel + kBlock);
+            }
+
+            float peak = 0.0f;
+            for (float value : revived)
+                peak = std::max(peak, std::fabs(value));
+            REQUIRE(peak > 0.001f); // non-vacuous: the retriggered note really sounds
+            REQUIRE(revived.size() == expected.size());
+            REQUIRE(revived == expected);
         }
-        const float* channel = synth.tapBuffers().channel(0, 0);
-        revived.insert(revived.end(), channel, channel + kBlock);
     }
 
-    // The state the snap happened over really was cleared: from the sample the fade landed, the
-    // render is BIT-IDENTICAL to the same note plucked on a string that never rang and was never
-    // damped. Nothing of the damped tail, and no residual engagement, survived into it. The first
-    // fadeSamples + 1 samples are the fade itself, which by construction is NOT in the fresh
-    // render -- that is the 2 ms of latency a Synth retrigger costs, and it is asserted below
-    // rather than skipped past silently.
-    const int fadeSamples = static_cast<int>(std::lround(cnpg::dsp::kSynthFadeSeconds * kRate));
-    StringNetwork<float> fresh;
-    configure(fresh, synthParams);
-    BlockEventQueue freshEvents;
-    freshEvents.push(noteOn(0, 52));
-    std::vector<float> expected;
-    for (int b = 0; b < 60; ++b) {
-        fresh.process(freshEvents, kBlock);
-        const float* channel = fresh.tapBuffers().channel(0, 0);
-        expected.insert(expected.end(), channel, channel + kBlock);
-    }
+    SECTION("over a SOUNDING string, Physical keeps the rails and there is no engagement to snap") {
+        // The other path, and the reason the invariant is complete. A re-strike on a string whose
+        // note the player is still holding takes the Physical retrigger path: rails kept, f0 glided
+        // on the retune ramp, nothing cleared. The damper is 0 before the re-strike and 0 after it,
+        // because only a note-off engages it and a note-off is what makes the string stop sounding.
+        // So there is no snap here and no ramp-open either -- the release() call on that path is a
+        // no-op, and this is what says so.
+        //
+        // A build that added the plan's refused "damper choke (fast engage())" to this path would
+        // fail the second assertion below, which makes this the cheapest standing guard against the
+        // refusal being quietly undone.
+        StringNetworkParams params = paramsWith(100.0f);
+        params.retriggerMode = RetriggerMode::Physical;
+        StringNetwork<float> network;
+        configure(network, params);
 
-    float peak = 0.0f;
-    for (float value : revived)
-        peak = std::max(peak, std::fabs(value));
-    REQUIRE(peak > 0.001f); // non-vacuous: the retriggered note really sounds
+        BlockEventQueue events;
+        events.push(noteOn(0, 45));
+        for (int b = 0; b < 200; ++b)
+            network.process(events, kBlock);
+        REQUIRE(network.damperEngagement(0) == 0.0f);
+        const double energyBefore = network.energyEstimate();
+        REQUIRE(energyBefore > 0.0);
 
-    // The fade's last sample is exactly zero, and the note starts on the next one.
-    REQUIRE(revived[static_cast<std::size_t>(fadeSamples) - 1] == 0.0f);
-    for (std::size_t i = static_cast<std::size_t>(fadeSamples) + 1; i < revived.size(); ++i) {
-        INFO("sample " << i);
-        REQUIRE(revived[i] == expected[i - static_cast<std::size_t>(fadeSamples)]);
+        BlockEventQueue retrigger;
+        retrigger.push(noteOn(0, 52));
+        network.process(retrigger, kBlock);
+
+        REQUIRE(network.damperEngagement(0) == 0.0f);       // nothing engaged it, nothing snapped it
+        REQUIRE(network.energyEstimate() > 0.0);            // the rails were kept
+        REQUIRE(network.retuneRampSamplesRemaining(0) > 0); // ...and the pitch is gliding, not jumping
+        REQUIRE_FALSE(network.retriggerFadeActive(0));
     }
 }
 

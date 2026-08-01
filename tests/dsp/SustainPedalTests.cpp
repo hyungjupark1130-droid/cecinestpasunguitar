@@ -74,6 +74,7 @@ std::vector<NoteEvent> drain(BlockEventQueue& queue) {
 void requireNoDrops(const NoteAllocator& allocator) {
     REQUIRE(allocator.unassignableNoteCount() == 0);
     REQUIRE(allocator.outOfRangeNoteCount() == 0);
+    REQUIRE(allocator.unaddressableNoteOffCount() == 0);
     REQUIRE(allocator.queueOverflowCount() == 0);
 }
 
@@ -416,6 +417,7 @@ TEST_CASE("CONTRACT: six strings under the pedal damp together on one sample wit
         }
 
         REQUIRE(local.unassignableNoteCount() == 0);
+        REQUIRE(local.unaddressableNoteOffCount() == 0);
         REQUIRE(local.queueOverflowCount() == 0);
     };
 

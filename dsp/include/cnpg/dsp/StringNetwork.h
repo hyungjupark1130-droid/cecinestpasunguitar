@@ -48,13 +48,15 @@
 //     spacing, aperture and polarity -- and because widening the storage is cheap inside the task
 //     that is already rewriting it.
 //   - Retrigger (P2.6). Both RetriggerMode states are real, and both act only on a string that
-//     OWNS A NOTE (sounding or releasing). Physical: a same-pitch restrike plucks over the ringing
-//     state; a pitch change retargets f0 and glides it with WaveguideString's one-shot retune ramp
-//     while the RAILS ARE KEPT, which is what makes the old note continue into the new one --
-//     "emergent legato" is the preserved state, not a slide effect. Synth: a kSynthFadeSeconds
-//     fade to silence, a full state clear, then re-init and re-excite at the new pitch, so nothing
-//     of the old note survives. A NoteOn on a string that owns NO note is not a retrigger at all
-//     and takes neither path -- see the note-ownership paragraph in handleEvent().
+//     OWNS A NOTE -- which means SOUNDING, i.e. a note the player has not released. Physical: a
+//     same-pitch restrike plucks over the ringing state; a pitch change retargets f0 and glides it
+//     with WaveguideString's one-shot retune ramp while the RAILS ARE KEPT, which is what makes the
+//     old note continue into the new one -- "emergent legato" is the preserved state, not a slide
+//     effect. Synth: a kSynthFadeSeconds fade to silence, a full state clear, then re-init and
+//     re-excite at the new pitch, so nothing of the old note survives. A NoteOn on a string that
+//     owns NO note is not a retrigger at all and takes neither path -- see the note-ownership
+//     paragraph in handleEvent(), which also records what fixes wave 2 measured when this predicate
+//     read "sounding or releasing" instead (4.88 dB of corpus RMS on the note-after-note path).
 //     The plan's "damper choke" clause is REFUSED with a derivation; see handleEvent().
 //   - NoteOff (P2.2). PHYSICS, not an envelope any more: the note-off engages the string's
 //     DamperJunction with the felt time constant and the string is damped by a real resistive
@@ -124,7 +126,9 @@ inline constexpr double kRetuneRampSeconds = 0.030;
 // full rail and a state clear, so it exists to make that clear click-free and nothing more; its
 // length is therefore pure latency (the re-excitation waits for it) and the shortest duration that
 // does the job is the right one. 96 samples at 48 kHz, and only on a retrigger over a string that
-// is already sounding -- a fresh note on an idle string is not delayed at all.
+// is already sounding -- a fresh note on an idle string is not delayed at all, and neither is one
+// arriving over a string whose note has been RELEASED: a released note is over, so that is a fresh
+// note in either mode and the two modes render it bit-identically (tests/dsp/RetriggerModeTests.cpp).
 inline constexpr double kSynthFadeSeconds = 0.002;
 
 struct StringNetworkParams {
@@ -525,7 +529,15 @@ template <typename SampleT> class StringNetwork {
 
     // Per-string state, one contiguous array per field (SoA).
     std::array<std::uint8_t, kMaxStrings> midiNote_{};
+    // "The player is holding a note on this string." THE ownership predicate, and the one
+    // handleEvent() reads to decide whether a NoteOn is a retrigger -- NoteAllocator::owned_ asks
+    // the same question of the same two events (see that header). Set by the note-on this class
+    // consumes, cleared by the note-off it consumes and by the enable ramp landing on zero.
     std::array<bool, kMaxStrings> sounding_{};
+    // "A note was released here and its tail has not died yet." NOT ownership: a released note is
+    // over, and a NoteOn arriving over one is a fresh note, not a retrigger. Set by the note-off,
+    // cleared by the silence watchdog -- which can be seconds later, and reading this as ownership
+    // is what made the two levels disagree for the whole of that time (fixes wave 2).
     std::array<bool, kMaxStrings> releasing_{};
     // "This string carries motion", independent of whether anyone played it (Task P2.4). Under
     // bidirectional coupling a string can be ringing with no note of its own -- that IS sympathetic
