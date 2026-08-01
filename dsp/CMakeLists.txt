@@ -7,6 +7,7 @@
 
 add_library(cnpg_dsp STATIC
     src/CabFilter.cpp
+    src/DamperJunction.cpp
     src/ModuleGraph.cpp
     src/NoteAllocator.cpp
     src/OutputGain.cpp

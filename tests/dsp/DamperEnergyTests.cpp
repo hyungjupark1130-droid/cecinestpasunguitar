@@ -1,0 +1,582 @@
+#include "cnpg/dsp/Common.h"
+#include "cnpg/dsp/DamperJunction.h"
+#include "cnpg/dsp/EventQueue.h"
+#include "cnpg/dsp/StringNetwork.h"
+#include "cnpg/dsp/WaveguideString.h"
+
+#include "support/AllocationGuard.h"
+
+#include <catch2/catch_template_test_macros.hpp>
+#include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <limits>
+#include <utility>
+#include <vector>
+
+// DamperEnergyTests -- Task P2.2's passivity and transparency gates for DamperJunction.
+//
+// Three things live here, and they are the same claim measured at three altitudes:
+//
+//   1. Tier-1 [energy] (docs/plan.md section 4.2): the 2x2 scattering matrix is passive over the
+//      canonical grid. This is the algebra.
+//   2. Transparency [contract]: at engagement 0 scatter() is a BIT-EXACT pass-through, and the
+//      permanently in-line seam therefore costs a ringing string nothing measurable. This is the
+//      same matrix at one grid point, plus what the surrounding WaveguideString seam does with it.
+//   3. Tier-3 [energy]: a plucked network with real losses only ever dissipates, dampers engaged
+//      or not. This is the algebra actually holding inside the loop it was built for.
+//
+// The felt-time-constant VALIDATION and the engagement ramp's continuity are here too, because
+// they are properties of the junction itself; the felt time's audible consequence (how long a
+// note-off takes to silence) is tests/dsp/DamperFeltTimeTests.cpp, and the position-dependent
+// modal behaviour is tests/dsp/DamperNodeSuppressionTests.cpp.
+
+using cnpg::dsp::BlockEventQueue;
+using cnpg::dsp::DamperJunction;
+using cnpg::dsp::DamperJunctionParams;
+using cnpg::dsp::FractionalDelayKind;
+using cnpg::dsp::NoteEvent;
+using cnpg::dsp::NoteEventType;
+using cnpg::dsp::StringNetwork;
+using cnpg::dsp::StringNetworkParams;
+
+namespace {
+
+constexpr double kRate = 48000.0;
+constexpr int kBlock = 128;
+
+// Closed-form 2x2 SVD. Deliberately the GENERAL formula rather than the symmetric shortcut the
+// derivation in DamperJunction.h licenses: the test must measure the matrix it is handed, not
+// re-assume the structure it is supposed to be checking.
+//
+//   E = (a+d)/2, F = (a-d)/2, G = (c+b)/2, H = (c-b)/2
+//   sigma_max = sqrt(E^2 + H^2) + sqrt(F^2 + G^2)
+double spectralNorm2x2(const double* rowMajor) {
+    const double a = rowMajor[0];
+    const double b = rowMajor[1];
+    const double c = rowMajor[2];
+    const double d = rowMajor[3];
+    const double e = 0.5 * (a + d);
+    const double f = 0.5 * (a - d);
+    const double g = 0.5 * (c + b);
+    const double h = 0.5 * (c - b);
+    return std::hypot(e, h) + std::hypot(f, g);
+}
+
+// docs/plan.md section 4.2, tier 1: "position01 in {0.0, 0.1, ..., 1.0} x engagement in
+// {0, 0.25, 0.5, 0.75, 1} (via setEngagementImmediate) x maxLoss in {0, 0.5, 1}". Referenced from
+// this one place so the grid is stated once.
+constexpr std::array<float, 5> kGridEngagements{0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
+constexpr std::array<float, 3> kGridMaxLosses{0.0f, 0.5f, 1.0f};
+constexpr int kGridPositions = 11; // 0.0, 0.1, ... 1.0
+
+NoteEvent noteOn(int sampleOffset, int midiNote, int stringIndex, float velocity = 0.8f) {
+    NoteEvent event{};
+    event.type = NoteEventType::NoteOn;
+    event.sampleOffset = sampleOffset;
+    event.stringIndex = static_cast<std::uint8_t>(stringIndex);
+    event.channel = 0;
+    event.midiNote = static_cast<std::uint8_t>(midiNote);
+    event.velocity = velocity;
+    event.pluckPosition = 0.28f;
+    event.hardness = 0.5f;
+    return event;
+}
+
+NoteEvent noteOff(int sampleOffset, int midiNote, int stringIndex) {
+    NoteEvent event = noteOn(sampleOffset, midiNote, stringIndex);
+    event.type = NoteEventType::NoteOff;
+    event.pluckPosition = cnpg::dsp::kUnspecifiedNoteParam;
+    event.hardness = cnpg::dsp::kUnspecifiedNoteParam;
+    return event;
+}
+
+// Puts a junction into an exactly-known state: parameters applied, loss depth snapped onto
+// maxLoss by reset(), engagement snapped by setEngagementImmediate. Every caller then ASSERTS it
+// is in that state rather than assuming the sequence worked -- the P2.1 review's standing lesson.
+template <typename SampleT>
+void placeAt(DamperJunction<SampleT>& damper, float position01, float maxLoss, float engagement) {
+    DamperJunctionParams params;
+    params.position01 = position01;
+    params.maxLoss = maxLoss;
+    damper.prepare(kRate, kBlock);
+    damper.setParams(params);
+    damper.reset();
+    damper.setEngagementImmediate(engagement);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------------------------
+// tier 1: the scattering matrix is passive, by construction, over the canonical grid
+// ---------------------------------------------------------------------------------------------
+
+TEMPLATE_TEST_CASE("ENERGY/T1: DamperJunction scattering matrix is passive", "[energy]", float, double) {
+    // docs/plan.md section 4.2, tier 1 -- the grid is defined there and referenced here (see
+    // kGridEngagements / kGridMaxLosses / kGridPositions above), never restated as new numbers.
+    constexpr double kNormLimit = 1.0 + 1.0e-12;
+
+    double worstNorm = 0.0;
+    float worstAt[3] = {0.0f, 0.0f, 0.0f};
+
+    for (int positionStep = 0; positionStep < kGridPositions; ++positionStep) {
+        const auto position01 = static_cast<float>(positionStep) / static_cast<float>(kGridPositions - 1);
+        for (float maxLoss : kGridMaxLosses) {
+            for (float engagement : kGridEngagements) {
+                DamperJunction<TestType> damper;
+                placeAt(damper, position01, maxLoss, engagement);
+
+                // The grid point is REALLY the grid point. Without this the sweep could be
+                // measuring one state 165 times and nobody would know.
+                INFO("p " << position01 << " maxLoss " << maxLoss << " engagement " << engagement);
+                REQUIRE(damper.currentPosition01() == position01);
+                REQUIRE(damper.currentLossDepth() == maxLoss);
+                REQUIRE(damper.currentEngagement() == engagement);
+
+                double matrix[4] = {0.0, 0.0, 0.0, 0.0};
+                damper.copyScatteringMatrix(matrix);
+                const double norm = spectralNorm2x2(matrix);
+
+                REQUIRE(std::isfinite(norm));
+                REQUIRE(norm <= kNormLimit);
+                if (norm > worstNorm) {
+                    worstNorm = norm;
+                    worstAt[0] = position01;
+                    worstAt[1] = maxLoss;
+                    worstAt[2] = engagement;
+                }
+
+                // Exact transparency at engagement 0 -- section 4.2 asks for it inside this same
+                // case: "Additionally asserts exact transparency (S = anti-diagonal pass-through)
+                // at engagement 0". maxLoss is irrelevant there, which the grid covers.
+                const double product = static_cast<double>(engagement) * static_cast<double>(maxLoss);
+                if (product == 0.0) {
+                    REQUIRE(matrix[0] == 0.0);
+                    REQUIRE(matrix[1] == 1.0);
+                    REQUIRE(matrix[2] == 1.0);
+                    REQUIRE(matrix[3] == 0.0);
+                }
+
+                // NON-VACUITY, and the reason this case cannot quietly become a tautology: a
+                // junction that never damps anything is trivially passive. At full engagement and
+                // full depth the matrix must ANNIHILATE the symmetric (displacement-carrying)
+                // mode -- S (1,1)^T == 0, the matched resistive termination -- while the
+                // antisymmetric mode, which puts a node on the damper and cannot be dissipated,
+                // must pass at exactly unit gain.
+                if (product == 1.0) {
+                    REQUIRE(matrix[0] + matrix[1] == 0.0);
+                    REQUIRE(matrix[2] + matrix[3] == 0.0);
+                    REQUIRE(matrix[0] - matrix[1] == -1.0);
+                }
+
+                // The matrix does not depend on WHERE the junction sits: position selects the
+                // point on the string the seam reads and writes, and the two-port itself is
+                // memoryless in p. Asserted against the p = 0 point of the same (maxLoss,
+                // engagement) pair so the grid's position axis is checked rather than merely
+                // swept.
+                DamperJunction<TestType> atOrigin;
+                placeAt(atOrigin, 0.0f, maxLoss, engagement);
+                double originMatrix[4] = {0.0, 0.0, 0.0, 0.0};
+                atOrigin.copyScatteringMatrix(originMatrix);
+                for (int i = 0; i < 4; ++i)
+                    REQUIRE(matrix[i] == originMatrix[i]);
+            }
+        }
+    }
+
+    std::cout << "[energy] T1 DamperJunction |S|_2: worst " << worstNorm << " over the section-4.2 grid (limit "
+              << kNormLimit << "), at position " << worstAt[0] << " maxLoss " << worstAt[1] << " engagement "
+              << worstAt[2] << "\n";
+
+    // The junction is lossless-or-dissipative everywhere and ACTIVE nowhere: the worst norm over
+    // the whole grid is exactly the unit gain of the undissipatable antisymmetric mode.
+    REQUIRE(worstNorm == 1.0);
+}
+
+TEST_CASE("ENERGY/T1: DamperJunction stays passive for conductances far outside the parameter range", "[energy]") {
+    // The passivity argument in DamperJunction.h claims to hold for ANY non-negative junction
+    // conductance, not merely for the parameter range the grid sweeps -- that is the difference
+    // between passive by construction and passive by clamping. The clamps are on the parameters,
+    // so the way to probe past them is to drive the engagement smoother to arbitrary values
+    // through the one entry point that sets it directly, including values a caller has no
+    // business passing.
+    for (float engagement : {-1.0f, -0.0f, 0.5f, 1.0f, 3.0f, 1.0e30f, std::numeric_limits<float>::quiet_NaN()}) {
+        DamperJunction<float> damper;
+        damper.prepare(kRate, kBlock);
+        damper.setParams(DamperJunctionParams{});
+        damper.reset();
+        damper.setEngagementImmediate(engagement);
+
+        // Out-of-range input resolves into 0..1 rather than reaching the coefficients raw.
+        const float settled = damper.currentEngagement();
+        INFO("requested engagement " << engagement << " resolved to " << settled);
+        REQUIRE(settled >= 0.0f);
+        REQUIRE(settled <= 1.0f);
+
+        double matrix[4] = {0.0, 0.0, 0.0, 0.0};
+        damper.copyScatteringMatrix(matrix);
+        for (double value : matrix)
+            REQUIRE(std::isfinite(value));
+        REQUIRE(spectralNorm2x2(matrix) <= 1.0 + 1.0e-12);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// transparency: the junction is permanently in-line, and at engagement 0 that costs nothing
+// ---------------------------------------------------------------------------------------------
+
+TEMPLATE_TEST_CASE("CONTRACT: DamperJunction at engagement 0 is a bit-exact pass-through", "[contract]", float,
+                   double) {
+    // docs/plan.md Task P2.2 acceptance: "a unit test that DamperJunction::scatter() at
+    // engagement 0 is bit-exact pass-through (toBridge == fromNut, toNut == fromBridge)".
+    const TestType operands[] = {TestType(0),
+                                 TestType(-0.0),
+                                 TestType(1),
+                                 TestType(-1),
+                                 TestType(0.7071067811865476),
+                                 TestType(-3.3333333e-3),
+                                 TestType(1.0e-30),
+                                 TestType(-1.0e-30),
+                                 TestType(1.7e18)};
+
+    for (float maxLoss : kGridMaxLosses) {
+        DamperJunction<TestType> damper;
+        placeAt(damper, 0.37f, maxLoss, 0.0f);
+        REQUIRE(damper.currentEngagement() == 0.0f); // in the state this case claims to test
+
+        for (TestType fromNut : operands) {
+            for (TestType fromBridge : operands) {
+                TestType toBridge = TestType(12345);
+                TestType toNut = TestType(-12345);
+                damper.scatter(fromNut, fromBridge, toBridge, toNut);
+
+                INFO("maxLoss " << maxLoss << " fromNut " << fromNut << " fromBridge " << fromBridge);
+                REQUIRE(toBridge == fromNut);
+                REQUIRE(toNut == fromBridge);
+
+                // Stronger than the criterion where it is available: identical BIT PATTERNS, not
+                // merely equal values. Excluded for zero operands only, and for one reason worth
+                // recording: with both operands negative zero, `a - (0 * (a + b))` is
+                // -0.0 - (-0.0) == +0.0. Every subsequent arithmetic operation treats those two
+                // zeros identically, and == already covers the case, so the seam is unaffected --
+                // but a memcmp would call it a difference, and pretending otherwise would be
+                // dressing up the claim.
+                if (fromNut != TestType(0)) {
+                    REQUIRE(std::memcmp(&toBridge, &fromNut, sizeof(TestType)) == 0);
+                }
+                if (fromBridge != TestType(0)) {
+                    REQUIRE(std::memcmp(&toNut, &fromBridge, sizeof(TestType)) == 0);
+                }
+
+                // ...and the engagement really has not crept: the ramp is parked, so every one of
+                // these samples was scattered by the same transparent junction.
+                REQUIRE(damper.currentEngagement() == 0.0f);
+            }
+        }
+    }
+}
+
+TEST_CASE("CONTRACT: DamperJunction bypassing the loss is transparent at full engagement", "[contract]") {
+    // The energy-test hook StringNetwork::setLosslessTestMode forwards (docs/plan.md section 2.7).
+    // The resistive junction loss is this class's only intentional loss, so bypassing it can only
+    // mean "transparent", and the engagement ramp must keep running underneath so that switching
+    // the bypass back off resumes where the ramp had got to rather than restarting it.
+    DamperJunction<float> damper;
+    placeAt(damper, 0.5f, 1.0f, 1.0f);
+    REQUIRE(damper.currentEngagement() == 1.0f);
+
+    damper.setLossBypassed(true);
+    float toBridge = 0.0f;
+    float toNut = 0.0f;
+    damper.scatter(0.25f, -0.75f, toBridge, toNut);
+    REQUIRE(toBridge == 0.25f);
+    REQUIRE(toNut == -0.75f);
+
+    double matrix[4] = {0.0, 0.0, 0.0, 0.0};
+    damper.copyScatteringMatrix(matrix);
+    REQUIRE(matrix[0] == 0.0);
+    REQUIRE(matrix[1] == 1.0);
+    REQUIRE(matrix[2] == 1.0);
+    REQUIRE(matrix[3] == 0.0);
+
+    // The ramp underneath is untouched, and the junction damps again the moment the bypass lifts.
+    REQUIRE(damper.currentEngagement() == 1.0f);
+    damper.setLossBypassed(false);
+    damper.scatter(0.25f, -0.75f, toBridge, toNut);
+    REQUIRE(toBridge != 0.25f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// the engagement ramp itself (every state change gets a DIRECT assertion, P2.1 review ruling)
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("CONTRACT: DamperJunction validates the felt time constant into 20..100 ms", "[contract]") {
+    // docs/plan.md section 2.5: "20-100 ms engage/release ramp", and Task P2.2: "a one-pole ramp
+    // with time constant feltTimeConstantMs (validated into 20..100 ms)". Asserted twice over:
+    // once on the validated value the junction reports, and once on the ramp it actually runs,
+    // because the first without the second would only prove a number was stored.
+    struct Case {
+        float requested;
+        float expected;
+    };
+    const Case cases[] = {{40.0f, 40.0f},
+                          {20.0f, 20.0f},
+                          {100.0f, 100.0f},
+                          {0.0f, cnpg::dsp::kFeltTimeConstantMinMs},
+                          {-5.0f, cnpg::dsp::kFeltTimeConstantMinMs},
+                          {19.999f, cnpg::dsp::kFeltTimeConstantMinMs},
+                          {5000.0f, cnpg::dsp::kFeltTimeConstantMaxMs},
+                          {std::numeric_limits<float>::infinity(), cnpg::dsp::kFeltTimeConstantMaxMs},
+                          {std::numeric_limits<float>::quiet_NaN(), cnpg::dsp::kFeltTimeConstantMinMs}};
+
+    for (const Case& testCase : cases) {
+        DamperJunction<float> damper;
+        damper.prepare(kRate, kBlock);
+        DamperJunctionParams params;
+        params.feltTimeConstantMs = testCase.requested;
+        damper.setParams(params);
+        damper.reset();
+
+        INFO("requested " << testCase.requested);
+        REQUIRE(damper.currentFeltTimeConstantMs() == testCase.expected);
+
+        // The ramp really runs at the validated time constant: after exactly one time constant a
+        // one-pole engage() has covered 1 - 1/e of the distance.
+        damper.engage();
+        const auto samples = static_cast<int>(std::lround(static_cast<double>(testCase.expected) * 0.001 * kRate));
+        float sink = 0.0f;
+        for (int n = 0; n < samples; ++n)
+            damper.scatter(0.0f, 0.0f, sink, sink);
+        const double reached = static_cast<double>(damper.currentEngagement());
+        INFO("after one time constant the ramp reached " << reached);
+        REQUIRE(std::fabs(reached - (1.0 - std::exp(-1.0))) < 0.005);
+    }
+}
+
+TEST_CASE("CONTRACT: DamperJunction engagement ramps continuously and settles exactly", "[contract]") {
+    // THE direct state assertion for the engage/release state change. The click metric on the
+    // rendered audio is a separate, weaker observation (tests/dsp/DamperFeltTimeTests.cpp holds
+    // it); this one measures the state itself, which is what the P2.1 review's ruling asks for.
+    constexpr float kFeltMs = 20.0f; // the fastest legal ramp, i.e. the largest legal step
+    DamperJunction<float> damper;
+    damper.prepare(kRate, kBlock);
+    DamperJunctionParams params;
+    params.feltTimeConstantMs = kFeltMs;
+    params.maxLoss = 1.0f;
+    damper.setParams(params);
+    damper.reset();
+
+    REQUIRE(damper.currentEngagement() == 0.0f);
+
+    // One one-pole step can never exceed coeff * 1, and the settle snap can never exceed the
+    // settle epsilon -- so this is the whole bound on any single-sample move of the ramp.
+    const double coeff = 1.0 - std::exp(-1.0 / (static_cast<double>(kFeltMs) * 0.001 * kRate));
+    const double stepLimit = coeff * (1.0 + 1.0e-9) + 1.0e-9;
+
+    auto runRamp = [&](int samples) {
+        double worstStep = 0.0;
+        double worstCoefficientStep = 0.0;
+        float previous = damper.currentEngagement();
+        double previousG = 0.0;
+        {
+            double matrix[4] = {0.0, 0.0, 0.0, 0.0};
+            damper.copyScatteringMatrix(matrix);
+            previousG = -matrix[0];
+        }
+        for (int n = 0; n < samples; ++n) {
+            float sink = 0.0f;
+            damper.scatter(0.0f, 0.0f, sink, sink);
+            const float now = damper.currentEngagement();
+            worstStep = std::max(worstStep, std::fabs(static_cast<double>(now - previous)));
+            previous = now;
+
+            double matrix[4] = {0.0, 0.0, 0.0, 0.0};
+            damper.copyScatteringMatrix(matrix);
+            const double g = -matrix[0];
+            worstCoefficientStep = std::max(worstCoefficientStep, std::fabs(g - previousG));
+            previousG = g;
+        }
+        return std::pair<double, double>{worstStep, worstCoefficientStep};
+    };
+
+    damper.engage();
+    const auto engageSteps = runRamp(static_cast<int>(0.5 * kRate)); // 25 time constants
+    INFO("worst engage step " << engageSteps.first << " against limit " << stepLimit);
+    REQUIRE(engageSteps.first <= stepLimit);
+    // ...and so does the coefficient the audio path actually multiplies by: g = s / (s + 1) has
+    // dg/ds = 1 / (1 + s)^2 <= 1, so the loss coefficient can never move FASTER than the
+    // engagement behind it. That, not the engagement value, is what a click would come from.
+    REQUIRE(engageSteps.second <= stepLimit);
+    REQUIRE(engageSteps.second <= engageSteps.first * (1.0 + 1.0e-9));
+    // "Fully engaged" is a reachable state, exactly, not an asymptote.
+    REQUIRE(damper.currentEngagement() == 1.0f);
+
+    damper.release();
+    const auto releaseSteps = runRamp(static_cast<int>(0.5 * kRate));
+    INFO("worst release step " << releaseSteps.first << " against limit " << stepLimit);
+    REQUIRE(releaseSteps.first <= stepLimit);
+    REQUIRE(releaseSteps.second <= stepLimit);
+    REQUIRE(releaseSteps.second <= releaseSteps.first * (1.0 + 1.0e-9));
+    // ...and so is "fully released", which is what restores the bit-exact transparency above.
+    REQUIRE(damper.currentEngagement() == 0.0f);
+    float toBridge = 0.0f;
+    float toNut = 0.0f;
+    damper.scatter(0.3f, -0.4f, toBridge, toNut);
+    REQUIRE(toBridge == 0.3f);
+    REQUIRE(toNut == -0.4f);
+
+    std::cout << "[contract] DamperJunction ramp at " << kFeltMs << " ms: worst engagement step " << engageSteps.first
+              << ", worst scattering-coefficient step " << engageSteps.second << " (limit " << stepLimit << ")\n";
+}
+
+TEST_CASE("CONTRACT: DamperJunction reset and setParams behave as the lifecycle documents", "[contract]") {
+    DamperJunction<float> damper;
+    damper.prepare(kRate, kBlock);
+
+    DamperJunctionParams params;
+    params.position01 = 0.42f;
+    params.maxLoss = 0.75f;
+    damper.setParams(params);
+    damper.reset();
+
+    // reset() snaps the loss depth onto the parameter and the engagement to 0.
+    REQUIRE(damper.currentLossDepth() == 0.75f);
+    REQUIRE(damper.currentEngagement() == 0.0f);
+    REQUIRE(damper.currentPosition01() == 0.42f);
+
+    damper.engage();
+    float sink = 0.0f;
+    for (int n = 0; n < 4800; ++n)
+        damper.scatter(0.5f, 0.25f, sink, sink);
+    REQUIRE(damper.currentEngagement() > 0.9f);
+
+    damper.reset();
+    REQUIRE(damper.currentEngagement() == 0.0f);
+    REQUIRE(damper.currentLossDepth() == 0.75f);
+    damper.reset(); // twice equals once
+    REQUIRE(damper.currentEngagement() == 0.0f);
+
+    // Out-of-range parameters resolve rather than reaching the coefficients.
+    DamperJunctionParams wild;
+    wild.position01 = 4.0f;
+    wild.maxLoss = -2.0f;
+    damper.setParams(wild);
+    damper.reset();
+    REQUIRE(damper.currentPosition01() == 1.0f);
+    REQUIRE(damper.currentLossDepth() == 0.0f);
+
+    wild.position01 = std::numeric_limits<float>::quiet_NaN();
+    wild.maxLoss = std::numeric_limits<float>::quiet_NaN();
+    damper.setParams(wild);
+    damper.reset();
+    REQUIRE(damper.currentPosition01() == 0.0f);
+    REQUIRE(damper.currentLossDepth() == 0.0f);
+}
+
+TEST_CASE("CONTRACT: DamperJunction scatter allocates nothing", "[contract]") {
+    DamperJunction<float> damper;
+    damper.prepare(kRate, kBlock);
+    damper.setParams(DamperJunctionParams{});
+    damper.reset();
+
+    cnpg::test::resetAllocationCount();
+    float toBridge = 0.0f;
+    float toNut = 0.0f;
+    for (int n = 0; n < 100000; ++n) {
+        if ((n % 4096) == 0)
+            damper.engage();
+        if ((n % 4096) == 2048)
+            damper.release();
+        damper.scatter(static_cast<float>(std::sin(0.01 * n)), static_cast<float>(std::cos(0.013 * n)), toBridge,
+                       toNut);
+    }
+    REQUIRE(cnpg::test::allocationCount() == 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// tier 3: a plucked network with real losses only ever dissipates, dampers engaged or not
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("ENERGY/T3: lossy network only dissipates with dampers engaged", "[energy]") {
+    // docs/plan.md section 4.2 tier 3, and Task P2.2's acceptance "Tier-3 [energy] still passes
+    // with dampers engaged". SCOPE: the tier-3 case section 4.2 describes runs against the
+    // coupled network, and the bridge does not carry a load until Task P2.4/P2.5 -- which is why
+    // that task's file list owns tests/dsp/NetworkEnergyTierThreeTests.cpp. What is measurable
+    // TODAY, and what this task is responsible for, is that inserting a permanently in-line
+    // dissipative two-port into every string's loop does not turn a monotone decay into growth.
+    // So this is tier 3 at the scope this task can honestly gate: 6 strings, staggered plucks,
+    // default material, the shipping float32 instantiation, run once with the dampers idle and
+    // once with every damper engaged.
+    constexpr int kStrings = 6;
+    constexpr int kBlocks = 1200; // ~3.2 s at 48 kHz
+    constexpr int kExcitationBlocks = 60;
+    constexpr double kRelativeTolerance = 1.0e-6; // absorbs float32 state rounding, per section 4.2
+
+    auto run = [](bool engageDampers) {
+        StringNetworkParams params;
+        params.pickupPosition01 = 0.87f;
+        StringNetwork<float> network;
+        network.prepare(kRate, kBlock, FractionalDelayKind::Lagrange3);
+        network.setNumStrings(kStrings);
+        network.setParams(params);
+        network.reset();
+
+        BlockEventQueue events;
+        for (int s = 0; s < kStrings; ++s)
+            events.push(noteOn(s * 17, 40 + 5 * s, s));
+
+        std::vector<double> energies;
+        energies.reserve(static_cast<std::size_t>(kBlocks));
+        for (int b = 0; b < kBlocks; ++b) {
+            if (engageDampers && b == kExcitationBlocks) {
+                BlockEventQueue offs;
+                for (int s = 0; s < kStrings; ++s)
+                    offs.push(noteOff(0, 40 + 5 * s, s));
+                network.process(offs, kBlock);
+            } else {
+                network.process(events, kBlock);
+            }
+            if (b >= kExcitationBlocks)
+                energies.push_back(network.energyEstimate());
+        }
+        return energies;
+    };
+
+    for (bool engageDampers : {false, true}) {
+        const std::vector<double> energies = run(engageDampers);
+        REQUIRE(energies.size() > 2);
+        REQUIRE(energies.front() > 0.0); // non-vacuous: there really was energy to dissipate
+
+        double worstGrowth = 0.0;
+        std::size_t worstAt = 0;
+        for (std::size_t k = 1; k < energies.size(); ++k) {
+            const double previous = energies[k - 1];
+            const double growth = (previous > 0.0) ? (energies[k] / previous - 1.0) : 0.0;
+            if (growth > worstGrowth) {
+                worstGrowth = growth;
+                worstAt = k;
+            }
+        }
+
+        std::cout << "[energy] T3 " << (engageDampers ? "dampers engaged" : "dampers idle")
+                  << ": worst per-block growth " << worstGrowth << " at block " << worstAt << " (limit "
+                  << kRelativeTolerance << "), start " << energies.front() << " -> end " << energies.back() << "\n";
+
+        INFO((engageDampers ? "dampers engaged" : "dampers idle")
+             << ": worst growth " << worstGrowth << " at block " << worstAt);
+        REQUIRE(worstGrowth <= kRelativeTolerance);
+
+        // ...and the dampers really did their job: engaging them takes the network to silence
+        // inside this render, which the idle run does not reach.
+        if (engageDampers)
+            REQUIRE(energies.back() == 0.0);
+        else
+            REQUIRE(energies.back() > 0.0);
+    }
+}
