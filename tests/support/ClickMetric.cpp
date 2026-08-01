@@ -44,6 +44,8 @@ ClickMeasurement measureClick(const float* samples, std::size_t count, double sa
             ++result.nonFiniteSamples;
         else if (std::fpclassify(value) == FP_SUBNORMAL)
             ++result.subnormalSamples;
+        else
+            result.peakAbsSample = std::max(result.peakAbsSample, std::fabs(static_cast<double>(value)));
     }
 
     if (last - begin < 2)
@@ -63,12 +65,20 @@ ClickMeasurement measureClick(const float* samples, std::size_t count, double sa
     for (std::size_t start = 0; start < absDiff.size(); start += windowSamples) {
         const std::size_t stop = std::min(start + windowSamples, absDiff.size());
         double windowPeak = 0.0;
-        for (std::size_t i = start; i < stop; ++i)
+        double windowLevel = 0.0;
+        for (std::size_t i = start; i < stop; ++i) {
             windowPeak = std::max(windowPeak, absDiff[i]);
+            // absDiff[i] was formed from samples[begin + i] and its predecessor.
+            windowLevel = std::max(windowLevel, std::fabs(static_cast<double>(samples[begin + 1 + i])));
+        }
         if (windowPeak > result.peakWindowAbsDiff) {
             result.peakWindowAbsDiff = windowPeak;
             result.peakWindowStart = start;
         }
+        // The step-to-level reading, taken PER WINDOW so a span that decays across itself cannot
+        // hide a jump behind its own loud beginning -- see the second companion in the header.
+        if (windowLevel > 0.0)
+            result.peakStepToLevel = std::max(result.peakStepToLevel, windowPeak / windowLevel);
     }
 
     return result;
@@ -103,6 +113,17 @@ double clickExcessAgainstResidualDb(const ClickMeasurement& test, const ClickMea
     if (!(testMetric > 0.0))
         return -std::numeric_limits<double>::infinity();
     return 20.0 * std::log10(testMetric / referenceMetric);
+}
+
+double clickExcessAgainstLevelDb(const ClickMeasurement& test, const ClickMeasurement& reference) {
+    // Each render's peak |dx| against its OWN peak |x| over the same span -- see the header. Both
+    // ratios are dimensionless shape numbers, so a level change of any size divides out and only a
+    // change in waveform shape moves the result.
+    if (!(reference.peakStepToLevel > 0.0) || !std::isfinite(reference.peakStepToLevel))
+        return std::numeric_limits<double>::infinity(); // a degenerate reference gates nothing
+    if (!(test.peakStepToLevel > 0.0))
+        return -std::numeric_limits<double>::infinity();
+    return 20.0 * std::log10(test.peakStepToLevel / reference.peakStepToLevel);
 }
 
 } // namespace cnpg::test

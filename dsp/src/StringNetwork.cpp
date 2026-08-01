@@ -68,10 +68,13 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
     // setNumStrings() must never allocate afterwards.
     strings_.resize(static_cast<std::size_t>(kMaxStrings));
     exciters_.resize(static_cast<std::size_t>(kMaxStrings));
+    dampers_.resize(static_cast<std::size_t>(kMaxStrings));
     for (int s = 0; s < kMaxStrings; ++s) {
         strings_[static_cast<std::size_t>(s)].prepare(sampleRate_, maxBlockSize_, kind);
         strings_[static_cast<std::size_t>(s)].setAnalyticTuningCompensation(0.0f);
         exciters_[static_cast<std::size_t>(s)].prepare(sampleRate_, maxBlockSize_);
+        dampers_[static_cast<std::size_t>(s)].prepare(sampleRate_, maxBlockSize_);
+        dampers_[static_cast<std::size_t>(s)].setLossBypassed(lossless_);
         midiNote_[static_cast<std::size_t>(s)] = static_cast<std::uint8_t>(kMinMidiNote);
         portImpedance_[static_cast<std::size_t>(s)] = strings_[static_cast<std::size_t>(s)].portImpedance();
     }
@@ -85,7 +88,7 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
     bridgeBuffer_.assign(static_cast<std::size_t>(maxBlockSize_), SampleT(0));
 
     positionSmoothingCoeff_ = 1.0 - std::exp(-1.0 / (kPositionSmoothingSeconds * sampleRate_));
-    releaseCoeff_ = static_cast<float>(std::exp(-1.0 / (kReleaseTimeConstantSeconds * sampleRate_)));
+    silenceWindowSamples_ = std::max(1, static_cast<int>(std::lround(kSilenceWindowSeconds * sampleRate_)));
     enableRampStep_ = static_cast<float>(1.0 / std::max(1.0, kEnableRampSeconds * sampleRate_));
 
     if (port_ == nullptr)
@@ -105,12 +108,16 @@ template <typename SampleT> void StringNetwork<SampleT>::reset() noexcept {
     const bool prepared = !strings_.empty();
     for (int s = 0; s < kMaxStrings; ++s) {
         if (prepared) {
-            strings_[static_cast<std::size_t>(s)].reset();
+            // clearStringState covers the string, the damper and the watchdog together -- see its
+            // declaration for why those three always move as one.
+            clearStringState(s);
             exciters_[static_cast<std::size_t>(s)].reset();
+        } else {
+            silencePeak_[static_cast<std::size_t>(s)] = 0.0f;
+            silenceCount_[static_cast<std::size_t>(s)] = 0;
         }
         sounding_[static_cast<std::size_t>(s)] = false;
         releasing_[static_cast<std::size_t>(s)] = false;
-        releaseGain_[static_cast<std::size_t>(s)] = 1.0f;
         portIncident_[static_cast<std::size_t>(s)] = SampleT(0);
         portOutgoing_[static_cast<std::size_t>(s)] = SampleT(0);
     }
@@ -238,11 +245,33 @@ template <typename SampleT> void StringNetwork<SampleT>::updateLoopStringCount()
     loopStrings_ = std::clamp(required, 1, kMaxStrings);
 }
 
+template <typename SampleT> void StringNetwork<SampleT>::clearStringState(int stringIndex) noexcept {
+    if (strings_.empty())
+        return;
+    const auto index = static_cast<std::size_t>(stringIndex);
+    strings_[index].reset();
+    // Snapping the engagement is a DISCONTINUITY in the junction's scattering coefficients, and
+    // the only reason it is inaudible is that the line above just made every wave the junction
+    // scatters a zero. That is the whole invariant, and it is why this pairing is a function
+    // rather than a convention.
+    dampers_[index].setEngagementImmediate(0.0f);
+    silencePeak_[index] = 0.0f;
+    silenceCount_[index] = 0;
+}
+
 template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int stringIndex) noexcept {
     if (strings_.empty())
         return;
 
     const auto index = static_cast<std::size_t>(stringIndex);
+
+    // The damper's own parameter set, with position01 mirrored from the network's
+    // damperPosition01 (docs/plan.md section 2.7) -- so the network's surface has exactly one
+    // position field and DamperJunctionParams::position01 is a module-level detail.
+    DamperJunctionParams damperParams = params_.damper;
+    damperParams.position01 = params_.damperPosition01;
+    dampers_[index].setParams(damperParams);
+
     WaveguideStringParams p;
     p.f0Hz = static_cast<float>(midiNoteToHz(static_cast<int>(midiNote_[index])));
     // Bend and the per-string tuning offset compose additively in semitones and reach the string
@@ -258,6 +287,18 @@ template <typename SampleT> float StringNetwork<SampleT>::tapPosition01(int stri
     if (stringIndex < 0 || stringIndex >= kMaxStrings || tapIndex < 0 || tapIndex >= kMaxTapsPerString)
         return 0.0f;
     return static_cast<float>(tapSmoothed_[static_cast<std::size_t>(tapSlot(stringIndex, tapIndex))]);
+}
+
+template <typename SampleT> float StringNetwork<SampleT>::damperEngagement(int stringIndex) const noexcept {
+    if (dampers_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0.0f;
+    return dampers_[static_cast<std::size_t>(stringIndex)].currentEngagement();
+}
+
+template <typename SampleT> float StringNetwork<SampleT>::damperPosition01(int stringIndex) const noexcept {
+    if (dampers_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0.0f;
+    return dampers_[static_cast<std::size_t>(stringIndex)].currentPosition01();
 }
 
 // ------------------------------------------------------------------------------------------
@@ -279,7 +320,16 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
         if (!sounding_[index])
             return; // already released, or never sounded: nothing to damp
         sounding_[index] = false;
-        releasing_[index] = true; // the release ramps on from wherever the gain currently is
+        releasing_[index] = true;
+        // THE note-off (Task P2.2). The felt comes down on the string with its own time constant;
+        // nothing touches the output. engage() only retargets a one-pole ramp that is currently at
+        // 0, and DamperJunction advances that ramp AFTER the sample it scatters, so this very
+        // sample is still bit-exactly the undamped one and the damping starts on the next.
+        dampers_[index].engage();
+        // The watchdog starts its first window here rather than carrying whatever a previous
+        // release left behind.
+        silencePeak_[index] = 0.0f;
+        silenceCount_[index] = 0;
         return;
     }
 
@@ -295,12 +345,22 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
     if (!pluckOverRinging) {
         midiNote_[index] = static_cast<std::uint8_t>(note);
         applyStringParams(stringIndex); // retarget f0 first...
-        strings_[index].reset();        // ...so reset() snaps the smoothers onto the NEW pitch
+        clearStringState(stringIndex);  // ...so reset() snaps the smoothers onto the NEW pitch
+    } else {
+        // Plucking over a ringing string: the finger comes OFF, so the damper ramps away with the
+        // same felt time it arrived with. Ramped, not snapped -- the rails under this junction are
+        // full, and a coefficient that jumps while a waveform is passing through it is precisely
+        // the click clearStringState() is allowed to make and this path is not. Today the
+        // engagement here is always already 0 (only a NoteOff engages it, and a NoteOff clears
+        // `sounding_`, which this branch requires), so release() is a no-op that becomes load-
+        // bearing the moment P2.6 adds a path that plucks over a damped string.
+        dampers_[index].release();
     }
 
     sounding_[index] = true;
     releasing_[index] = false;
-    releaseGain_[index] = 1.0f;
+    silencePeak_[index] = 0.0f;
+    silenceCount_[index] = 0;
 
     exciters_[index].setParams(params_.exciter);
     exciters_[index].trigger(event.velocity, resolveNoteParam(event.pluckPosition, params_.exciter.defaultPosition),
@@ -362,10 +422,11 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
     const int numTaps = numTapsPerString_;
     const double smoothingCoeff = positionSmoothingCoeff_;
     const float rampStep = enableRampStep_;
-    const float releaseCoeff = releaseCoeff_;
+    const int silenceWindow = silenceWindowSamples_;
     SampleT* const tapBase = tapStorage_.data();
     WaveguideString<SampleT>* const strings = strings_.data();
     PluckExciter<SampleT>* const exciters = exciters_.data();
+    DamperJunction<SampleT>* const dampers = dampers_.data();
 
     for (int n = 0; n < count; ++n) {
         // Sample-accurate consumption: every event whose (clamped) offset has been reached fires
@@ -411,10 +472,9 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
                     // The fade has landed on silence: clear the string rather than leave a muted
                     // tail ringing forever underneath a gain of zero. This is what lets the trip
                     // count drop on a later block, and what makes energyEstimate() tell the truth.
-                    strings[index].reset();
+                    clearStringState(s);
                     sounding_[index] = false;
                     releasing_[index] = false;
-                    releaseGain_[index] = 1.0f;
                 }
             }
 
@@ -456,26 +516,54 @@ template <typename SampleT> void StringNetwork<SampleT>::process(BlockEventQueue
             if (excitation != SampleT(0))
                 strings[index].injectAt(exciters[index].latchedPosition01(), excitation);
 
-            // Multiplying by an exactly-1.0f gain is exact in IEEE-754, so a string that is neither
-            // releasing nor ramping is bit-identical to one carrying no envelope at all.
-            const auto envelope = static_cast<SampleT>(releaseGain_[index] * gain);
+            // THE DAMPER, permanently in-line (Task P2.2). Read the two waves arriving at the
+            // junction, scatter them through the linear passive two-port, write the difference
+            // back. At engagement 0 the scatter is a bit-exact pass-through, so the difference is
+            // exactly 0.0 and these three calls cost the ringing string nothing at all -- which is
+            // why "CONTRACT: StringNetwork renders the isolated string bit-exactly" still holds
+            // with the junction in the loop. There is deliberately NO engagement test around this:
+            // a compiled-out damper is a second topology, and the transparency claim is worth
+            // exactly as much as the fact that it is measured on the shipping one.
+            const float damperPosition = dampers[index].currentPosition01();
+            SampleT fromNut = SampleT(0);
+            SampleT fromBridge = SampleT(0);
+            strings[index].readJunctionInputs(damperPosition, fromNut, fromBridge);
+            SampleT toBridge = SampleT(0);
+            SampleT toNut = SampleT(0);
+            dampers[index].scatter(fromNut, fromBridge, toBridge, toNut);
+            strings[index].writeJunctionOutputs(damperPosition, toBridge, toNut);
+
+            // Multiplying by an exactly-1.0f gain is exact in IEEE-754, so a string that is not
+            // ramping is bit-identical to one carrying no envelope at all. Nothing else multiplies
+            // the tap any more: a note-off is the damper's work, not a gain's.
+            const auto envelope = static_cast<SampleT>(gain);
             for (int t = 0; t < numTaps; ++t) {
                 const std::size_t slot = base + static_cast<std::size_t>(t);
                 const SampleT tap = strings[index].readTapAt(static_cast<float>(tapSmoothed_[slot])) * envelope;
                 tapBase[slot * stride + static_cast<std::size_t>(n)] = tap;
             }
-            portIncident_[index] = strings[index].railOutgoingAtBridge() * static_cast<SampleT>(gain);
+            const SampleT outgoing = strings[index].railOutgoingAtBridge();
+            portIncident_[index] = outgoing * static_cast<SampleT>(gain);
 
             if (releasing_[index]) {
-                releaseGain_[index] *= releaseCoeff;
-                if (releaseGain_[index] <= kReleaseFloor) {
-                    // Inaudible: clear the string rather than leave it ringing under a vanishing
-                    // gain, so energyEstimate() tells the truth and the decayed tail costs
-                    // nothing. The exciter is deliberately NOT reset -- reseeding its PRNG would
-                    // make a render depend on note history.
-                    releaseGain_[index] = 0.0f;
-                    releasing_[index] = false;
-                    strings[index].reset();
+                // Silence watchdog. Measured on the wave leaving the string at the bridge, not on
+                // the tap: the tap can sit on a node of whatever partial is still ringing and
+                // report silence that is not there, whereas every mode circulates through the
+                // bridge by construction. The peak is taken over a whole window before it is
+                // judged, so a zero crossing cannot end a note early -- see kSilenceWindowSeconds.
+                silencePeak_[index] = std::max(silencePeak_[index], std::fabs(static_cast<float>(outgoing)));
+                if (++silenceCount_[index] >= silenceWindow) {
+                    const bool silent = silencePeak_[index] < kSilenceFloor;
+                    silencePeak_[index] = 0.0f;
+                    silenceCount_[index] = 0;
+                    if (silent) {
+                        // Inaudible: clear the string rather than tick a dead one forever, so
+                        // energyEstimate() tells the truth and the tail costs nothing. The exciter
+                        // is deliberately NOT reset -- reseeding its PRNG would make a render
+                        // depend on note history.
+                        releasing_[index] = false;
+                        clearStringState(s);
+                    }
                 }
             }
         }
@@ -510,6 +598,13 @@ template <typename SampleT> void StringNetwork<SampleT>::setLosslessTestMode(boo
     lossless_ = lossless;
     for (auto& string : strings_)
         string.setLossBypassed(lossless);
+    // docs/plan.md section 2.7: "forwards to strings/dampers/bridge". The damper's resistive
+    // junction loss is its only intentional loss, so bypassing it makes the junction transparent
+    // -- note that this is a convenience, not a requirement of the tier-2 bound: a dissipative
+    // element can never violate a per-block NON-INCREASE, and DamperJunction's passivity is
+    // structural (see its header), which the tier-1 grid gates independently.
+    for (auto& damper : dampers_)
+        damper.setLossBypassed(lossless);
     if (port_ != nullptr)
         port_->setLossBypassed(lossless);
 }

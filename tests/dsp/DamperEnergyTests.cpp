@@ -1,10 +1,13 @@
 #include "cnpg/dsp/Common.h"
 #include "cnpg/dsp/DamperJunction.h"
 #include "cnpg/dsp/EventQueue.h"
+#include "cnpg/dsp/PluckExciter.h"
 #include "cnpg/dsp/StringNetwork.h"
 #include "cnpg/dsp/WaveguideString.h"
 
 #include "support/AllocationGuard.h"
+#include "support/SpectralAnalysis.h"
+#include "support/StringIrScenarios.h"
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -310,6 +313,143 @@ TEST_CASE("CONTRACT: DamperJunction bypassing the loss is transparent at full en
     damper.setLossBypassed(false);
     damper.scatter(0.25f, -0.75f, toBridge, toNut);
     REQUIRE(toBridge != 0.25f);
+}
+
+TEST_CASE("CONTRACT: a permanently in-line damper at engagement 0 costs the string nothing", "[contract]") {
+    // docs/plan.md Task P2.2 acceptance, second half: "The junction stays permanently in-line -- no
+    // compiled-out comparison exists, because the fractional seam interpolates even at zero
+    // engagement; instead, an engagement-0 string impulse response is compared to the no-damper
+    // reference via the layer-(a) feature invariants (first 8 partials +/-2 cents, T60 +/-10%) plus
+    // a stated non-zero waveform tolerance, and the P2.7 calibration table absorbs the seam's group
+    // delay."
+    //
+    // THE STATED TOLERANCE IS 1e-7 (kStringIrGoldenAtol, the same number section 4.3 layer (b)
+    // uses), and the measured difference is reported below. It comes out at exactly 0.0, and that
+    // is not luck: WaveguideString::writeJunctionOutputs deposits only the DIFFERENCE between the
+    // junction's outputs and the waves it just read, and a transparent scatter() returns those same
+    // waves bit-for-bit, so the deposit is exactly 0.0f into both rails. The seam interpolates
+    // (twice on the read side, twice more on the write side, every sample, for every string) and
+    // then adds nothing. There is consequently no group delay for P2.7's table to absorb either --
+    // the brief allows for one, and the construction does not produce one.
+    //
+    // The feature invariants are measured anyway rather than skipped as implied by bit-identity:
+    // they are what the acceptance criterion names, and they are what will still be meaningful in
+    // P2.3 when the moving-junction crossfade makes the seam genuinely non-exact.
+    constexpr double kSeconds = 3.0;
+    constexpr float kPluck = 0.28f;
+    constexpr float kPickup = 0.87f;
+
+    // Three junction positions at the file's own rate/note, plus the extreme the golden IRs are
+    // captured at (MIDI 21 at 44.1 kHz -- the longest rail this instrument has, and the scenario
+    // where a 1-ulp perturbation has the most room to grow over three seconds).
+    struct Scenario {
+        int midiNote;
+        double sampleRate;
+        float damperPosition;
+    };
+    const Scenario scenarios[] = {{45, kRate, 0.15f}, {45, kRate, 0.5f}, {45, kRate, 0.87f}, {21, 44100.0, 0.15f}};
+
+    for (const Scenario& scenario : scenarios) {
+        const int kMidiNote = scenario.midiNote;
+        const double rate = scenario.sampleRate;
+        const float damperPosition = scenario.damperPosition;
+        StringNetworkParams params;
+        params.pickupPosition01 = kPickup;
+        params.damperPosition01 = damperPosition;
+        params.damper.maxLoss = 1.0f; // irrelevant at engagement 0, and that is part of the claim
+        params.exciter.noiseAmount = 0.25f;
+
+        StringNetwork<float> network;
+        network.prepare(rate, kBlock, FractionalDelayKind::Lagrange3);
+        network.setNumStrings(1);
+        network.setParams(params);
+        network.reset();
+        REQUIRE(network.damperPosition01(0) == damperPosition);
+        REQUIRE(network.damperEngagement(0) == 0.0f); // in the state this case claims to test
+
+        BlockEventQueue events;
+        events.push(noteOn(0, kMidiNote, 0));
+
+        // The NO-DAMPER reference: the same string, exciter and tap driven by hand, with no
+        // junction in the loop at all. This is the comparison the acceptance criterion names, and
+        // it is the only way to have one -- there is no build of StringNetwork without the seam.
+        cnpg::dsp::WaveguideString<float> string;
+        string.prepare(rate, kBlock, FractionalDelayKind::Lagrange3);
+        cnpg::dsp::WaveguideStringParams stringParams;
+        stringParams.f0Hz = static_cast<float>(440.0 * std::exp2((static_cast<double>(kMidiNote) - 69.0) / 12.0));
+        string.setParams(stringParams);
+        string.setAnalyticTuningCompensation(0.0f);
+        string.reset();
+
+        cnpg::dsp::PluckExciter<float> exciter;
+        exciter.prepare(rate, kBlock);
+        cnpg::dsp::PluckExciterParams exciterParams;
+        exciterParams.noiseAmount = 0.25f;
+        exciter.setParams(exciterParams);
+        exciter.trigger(0.8f, kPluck, 0.5f);
+
+        const auto totalSamples = static_cast<std::size_t>(kSeconds * rate);
+        std::vector<double> withDamper;
+        std::vector<double> withoutDamper;
+        withDamper.reserve(totalSamples);
+        withoutDamper.reserve(totalSamples);
+
+        double worstDifference = 0.0;
+        while (withDamper.size() < totalSamples) {
+            network.process(events, kBlock);
+            const float* channel = network.tapBuffers().channel(0, 0);
+            REQUIRE(channel != nullptr);
+            for (int n = 0; n < kBlock && withDamper.size() < totalSamples; ++n) {
+                const float excitation = exciter.renderSample();
+                if (excitation != 0.0f)
+                    string.injectAt(exciter.latchedPosition01(), excitation);
+                const float direct = string.readTapAt(kPickup);
+                string.tick();
+
+                withDamper.push_back(static_cast<double>(channel[n]));
+                withoutDamper.push_back(static_cast<double>(direct));
+                worstDifference = std::max(worstDifference, std::fabs(static_cast<double>(channel[n] - direct)));
+            }
+        }
+
+        const cnpg::test::StringIrFeatures damped = cnpg::test::extractStringIrFeatures(withDamper, rate, kMidiNote);
+        const cnpg::test::StringIrFeatures reference =
+            cnpg::test::extractStringIrFeatures(withoutDamper, rate, kMidiNote);
+
+        double worstCents = 0.0;
+        for (std::size_t partial = 0; partial < damped.partialHz.size(); ++partial) {
+            if (!(damped.partialHz[partial] > 0.0) || !(reference.partialHz[partial] > 0.0))
+                continue;
+            worstCents =
+                std::max(worstCents,
+                         std::fabs(cnpg::test::centsBetween(damped.partialHz[partial], reference.partialHz[partial])));
+        }
+        double worstT60Ratio = 0.0;
+        for (std::size_t band = 0; band < damped.bandT60.size(); ++band) {
+            if (!(damped.bandT60[band] > 0.0) || !(reference.bandT60[band] > 0.0))
+                continue;
+            worstT60Ratio = std::max(worstT60Ratio, std::fabs(damped.bandT60[band] / reference.bandT60[band] - 1.0));
+        }
+
+        std::cout << "[contract] in-line damper at engagement 0, MIDI " << kMidiNote << " at " << rate
+                  << " Hz, p = " << damperPosition << ": worst |waveform difference| " << worstDifference
+                  << " (stated tolerance " << cnpg::test::kStringIrGoldenAtol << "), worst partial shift " << worstCents
+                  << " cents (limit 2), worst band-T60 change " << (100.0 * worstT60Ratio) << "% (limit 10)\n";
+
+        INFO("MIDI " << kMidiNote << " at " << rate << " Hz, damper position " << damperPosition
+                     << ": worst difference " << worstDifference << ", worst cents " << worstCents
+                     << ", worst T60 ratio " << worstT60Ratio);
+        REQUIRE(worstDifference <= cnpg::test::kStringIrGoldenAtol);
+        REQUIRE(worstCents <= 2.0);
+        REQUIRE(worstT60Ratio <= 0.10);
+        // The measured value, asserted: bit-identity, not merely a tolerance met. If a future change
+        // to the seam makes this stop holding, the tolerance above still gates the audible claim but
+        // THIS line is what says the change happened.
+        REQUIRE(worstDifference == 0.0);
+        // Non-vacuous on both sides.
+        REQUIRE(worstCents >= 0.0);
+        REQUIRE(reference.partialHz[0] > 0.0);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

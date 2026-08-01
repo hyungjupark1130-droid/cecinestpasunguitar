@@ -247,6 +247,92 @@ double bandT60Seconds(const std::vector<double>& samples, double sampleRate, dou
     return -60.0 / slope;
 }
 
+std::vector<double> partialEnvelope(const std::vector<double>& samples, double sampleRate, double partialHz,
+                                    double bandwidthHz) {
+    std::vector<double> envelope(samples.size(), 0.0);
+    if (samples.empty() || !(sampleRate > 0.0) || !(partialHz > 0.0) || !(bandwidthHz > 0.0))
+        return envelope;
+
+    constexpr int kSections = 4;
+    const double a = 1.0 - std::exp(-kTwoPi * bandwidthHz / sampleRate);
+    const double step = kTwoPi * partialHz / sampleRate;
+
+    double realState[kSections] = {0.0, 0.0, 0.0, 0.0};
+    double imagState[kSections] = {0.0, 0.0, 0.0, 0.0};
+    double phase = 0.0;
+
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        double re = samples[i] * std::cos(phase);
+        double im = -samples[i] * std::sin(phase);
+        for (int s = 0; s < kSections; ++s) {
+            realState[s] += a * (re - realState[s]);
+            imagState[s] += a * (im - imagState[s]);
+            re = realState[s];
+            im = imagState[s];
+        }
+        // x2: heterodyning a real cosine of amplitude A puts A/2 at DC and A/2 at -2f, and the
+        // cascade keeps only the DC term.
+        envelope[i] = 2.0 * std::hypot(re, im);
+
+        phase += step;
+        if (phase >= kTwoPi)
+            phase -= kTwoPi; // keeps the trig argument small enough to stay accurate over minutes
+    }
+    return envelope;
+}
+
+double partialT60Seconds(const std::vector<double>& envelope, double sampleRate, std::size_t beginSample) {
+    if (beginSample + 32 >= envelope.size() || !(sampleRate > 0.0))
+        return -1.0;
+
+    // The reference is the envelope's own peak in the first 10 ms of the span rather than its
+    // value at the very first sample: the heterodyne cascade needs a few milliseconds to settle
+    // onto a partial, and a reference taken mid-settle would read the decay as starting from
+    // wherever the filter happened to be.
+    const auto settle = std::min(envelope.size() - beginSample, static_cast<std::size_t>(0.010 * sampleRate) + 1);
+    double reference = 0.0;
+    for (std::size_t i = beginSample; i < beginSample + settle; ++i)
+        reference = std::max(reference, envelope[i]);
+    if (!(reference > 0.0))
+        return -1.0;
+
+    const double startLevel = reference * std::pow(10.0, -5.0 / 20.0);
+    const double endLevel = reference * std::pow(10.0, -25.0 / 20.0);
+
+    std::size_t startIndex = beginSample;
+    while (startIndex < envelope.size() && envelope[startIndex] > startLevel)
+        ++startIndex;
+    std::size_t endIndex = startIndex;
+    while (endIndex < envelope.size() && envelope[endIndex] > endLevel)
+        ++endIndex;
+    if (endIndex >= envelope.size() || endIndex <= startIndex + 16)
+        return -1.0;
+
+    double sumT = 0.0, sumY = 0.0, sumTT = 0.0, sumTY = 0.0;
+    double n = 0.0;
+    for (std::size_t i = startIndex; i <= endIndex; ++i) {
+        if (!(envelope[i] > 0.0))
+            break;
+        const double t = static_cast<double>(i) / sampleRate;
+        const double y = 20.0 * std::log10(envelope[i] / reference);
+        sumT += t;
+        sumY += y;
+        sumTT += t * t;
+        sumTY += t * y;
+        n += 1.0;
+    }
+    if (n < 16.0)
+        return -1.0;
+
+    const double denom = n * sumTT - sumT * sumT;
+    if (std::fabs(denom) < 1e-300)
+        return -1.0;
+    const double slope = (n * sumTY - sumT * sumY) / denom; // dB per second, negative
+    if (slope >= -1e-6)
+        return -1.0;
+    return -60.0 / slope;
+}
+
 double rmsDbfs(const std::vector<double>& samples, double sampleRate, double windowSeconds) {
     const auto count = std::min(samples.size(), static_cast<std::size_t>(windowSeconds * sampleRate));
     if (count == 0)

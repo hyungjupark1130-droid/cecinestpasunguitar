@@ -328,14 +328,22 @@ TEST_CASE("CONTRACT: StringNetwork reset is idempotent and complete", "[contract
 
 TEST_CASE("CONTRACT: StringNetwork renders the isolated string bit-exactly", "[contract]") {
     // The [tuning] gate (docs/plan.md section 4.5, +/-2 cents) and the [regression] goldens both
-    // measure a note rendered through this topology. P1's network wraps the string in an exciter,
-    // a release envelope at unity and a bridge port whose reflection is not routed back, and none
-    // of that may move a sample -- if it did, every cent measured on the isolated string would
-    // stop applying to the shipping path. Asserted at both bend extremes, since the bend reaches
-    // the string through StringNetwork's own parameter plumbing.
+    // measure a note rendered through this topology. The network wraps the string in an exciter,
+    // a permanently in-line DamperJunction and a bridge port whose reflection is not routed back,
+    // and none of that may move a sample -- if it did, every cent measured on the isolated string
+    // would stop applying to the shipping path. Asserted at both bend extremes, since the bend
+    // reaches the string through StringNetwork's own parameter plumbing.
     //
-    // P2.2 inserts DamperJunction into the loop, at which point this identity legitimately ends;
-    // that task owns re-pointing the tuning gate at the network.
+    // THIS COMMENT USED TO SAY the identity would legitimately end at Task P2.2, when the damper
+    // went into the loop. It did not, and the reason is worth recording rather than quietly
+    // deleting: WaveguideString::writeJunctionOutputs deposits only the DIFFERENCE between the
+    // junction's outputs and the waves it just read, and DamperJunction::scatter() at engagement 0
+    // returns those waves bit-for-bit (g = R/(R+2) is exactly +0 at R = 0), so the deposit is
+    // exactly 0.0f. The seam does all its interpolation on every sample of every string and then
+    // adds nothing. So the P1 identity survives P2.2 unchanged, the tuning gate did not need
+    // re-pointing, and the goldens did not need regenerating.
+    // tests/dsp/DamperEnergyTests.cpp measures the same claim over 3 s with the layer-(a) feature
+    // invariants; this case is the bit-exact version of it across kinds, bends and notes.
     constexpr int kBlocks = 200;
 
     for (FractionalDelayKind kind : {FractionalDelayKind::Lagrange3, FractionalDelayKind::Thiran1}) {
@@ -447,7 +455,13 @@ TEST_CASE("CONTRACT: StringNetwork plucks a same-pitch retrigger over the ringin
         REQUIRE(newPitch[i] == freshNewPitch[i]);
 }
 
-TEST_CASE("CONTRACT: StringNetwork NoteOff runs a fast release and then clears the string", "[contract]") {
+TEST_CASE("CONTRACT: StringNetwork NoteOff damps the string and then clears it", "[contract]") {
+    // Task P2.2 replaced the P1 release ENVELOPE with the real DamperJunction: a note-off now
+    // engages a resistive two-port at damperPosition01 with the felt time constant, and nothing
+    // multiplies the tap. What that costs and how fast it is belongs to
+    // tests/dsp/DamperFeltTimeTests.cpp; what stays here is the lifecycle contract this case
+    // always carried -- a released note eventually goes silent, its state is cleared, and a stale
+    // NoteOff does nothing.
     StringNetwork<float> network;
     configure(network, defaultParams());
 
@@ -457,13 +471,18 @@ TEST_CASE("CONTRACT: StringNetwork NoteOff runs a fast release and then clears t
     const float ringingPeak = peakOf(ringing);
     REQUIRE(ringingPeak > 0.001f);
     REQUIRE(network.tapBuffers().isActive(0));
+    REQUIRE(network.damperEngagement(0) == 0.0f); // the damper was open while the note rang
 
     BlockEventQueue release;
     release.push(noteOff(0, kMidiNote));
 
-    // The release time constant is 40 ms, so -60 dB lands at 276 ms and the -100 dB clear-out
-    // floor at 460 ms. 700 ms covers both with margin at any of the supported rates.
-    const int blocks = static_cast<int>(0.7 * kRate / kBlock);
+    // The window is longer than P1's 0.7 s, and the reason is physics rather than slack: a POINT
+    // damper at p = 0.15 has an exact node on partial 20 and cannot touch it at all, so that
+    // partial rides the string's own loop loss down while everything the damper can reach is
+    // already gone. The silence watchdog waits for the whole tail, node partials included, to fall
+    // under -100 dBFS (measured: ~0.5 s at MIDI 45, 48 kHz), which is what "clears the string"
+    // honestly means once a damper is doing the damping instead of a gain.
+    const int blocks = static_cast<int>(1.5 * kRate / kBlock);
     const std::vector<float> tail = renderTap(network, release, blocks);
 
     const std::vector<float> lastBlock(tail.end() - kBlock, tail.end());
@@ -471,6 +490,9 @@ TEST_CASE("CONTRACT: StringNetwork NoteOff runs a fast release and then clears t
     REQUIRE(peakOf(lastBlock) == 0.0f);
     REQUIRE(network.energyEstimate() == 0.0);
     REQUIRE_FALSE(network.tapBuffers().isActive(0));
+    // Cleared state and a snapped-open damper always move together, so the next note is plucked
+    // onto an undamped string rather than into the felt.
+    REQUIRE(network.damperEngagement(0) == 0.0f);
 
     // A stale NoteOff for an already-released note is a no-op, not a second release.
     BlockEventQueue stale;

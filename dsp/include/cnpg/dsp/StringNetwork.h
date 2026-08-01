@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cnpg/dsp/Common.h"
+#include "cnpg/dsp/DamperJunction.h"
 #include "cnpg/dsp/EventQueue.h"
 #include "cnpg/dsp/IBridgePort.h"
 #include "cnpg/dsp/PluckExciter.h"
@@ -20,10 +21,10 @@
 //
 // Task P1.1 landed RetriggerMode and the APVTS-wired subset of StringNetworkParams. Task P1.5
 // added StringTapBuffers, the StringNetwork class, and the remaining StringNetworkParams fields
-// except `damper`, whose DamperJunctionParams type ships in DamperJunction.h with Task P2.2 --
-// adding it here would put a P2.2-owned type in a P1 header. Task P2.1 (this file's current state)
-// scales the network out to N = 1..8 strings and widens the domain boundary to (string, tap).
-// Zero JUCE includes.
+// except `damper`, whose DamperJunctionParams type ships in DamperJunction.h. Task P2.1 scaled the
+// network out to N = 1..8 strings and widened the domain boundary to (string, tap). Task P2.2
+// (this file's current state) gives every string a real DamperJunction and deletes the P1 release
+// envelope. Zero JUCE includes.
 //
 // ---------------------------------------------------------------------------------------------
 // SCOPE (what is real here, and what is deliberately not yet)
@@ -49,10 +50,18 @@
 //     re-initializes the string at the new pitch. retriggerMode is accepted and stored, and the
 //     full Physical (damper choke -> retune ramp -> re-excite) and Synth (<= 5 ms fade) semantics
 //     complete in Task P2.6, which is also where the fade that belongs in front of that
-//     re-initialization lands -- both modes need DamperJunction, which is P2.2.
-//   - NoteOff. A fixed fast release on the string's tap contribution, followed by a state clear
-//     once it is inaudible. It is an envelope, not physics: the real felt damper is
-//     DamperJunction (P2.2), and damperPosition01/`damper` are stored for it.
+//     re-initialization lands.
+//   - NoteOff (P2.2). PHYSICS, not an envelope any more: the note-off engages the string's
+//     DamperJunction with the felt time constant and the string is damped by a real resistive
+//     two-port at damperPosition01. Nothing multiplies the tap. The P1 stand-in -- a one-pole
+//     gain on the tap contribution -- is gone, and with it the two things that were wrong with
+//     it: it damped every partial identically (so no palm mute, no node behaviour, no surviving
+//     octave) and it attenuated the OUTPUT while leaving the string's stored energy untouched, so
+//     a note-off was inaudible to energyEstimate() until the state clear caught up with it.
+//   - Silence watchdog (P2.2). A damped string still has to LEAVE the loop eventually, and the
+//     damper cannot promise that: a point contact at p has exact nodes (p = 0.15 puts one on
+//     partial 20) that it can never touch, so those partials decay on loop loss alone. The
+//     watchdog is therefore a level observation, not a timer -- see kSilenceWindowSeconds below.
 //   - Bridge. The port is driven every sample (it sees the strings' outgoing waves and publishes
 //     bridgeOutput()), but its reflected waves are NOT fed back into the strings before P2.4 --
 //     see setBridgePort() for why that is a deliberate boundary rather than an omission.
@@ -73,11 +82,18 @@ struct StringNetworkParams {
                                          // parameter -- the plugin drives it from the MIDI pitch
                                          // wheel via pitchWheelToSemitones() (MidiTranslation.h)
     float pickupPosition01 = 0.5f;       // tap position; continuously modulatable while ringing
-    float damperPosition01 = 0.15f;      // junction position; consumed by DamperJunction (P2.2)
+    float damperPosition01 = 0.15f;      // junction position; continuously modulatable while ringing
     StringMaterialParams stringMaterial; // one global shared physics set
     BridgeAdmittanceParams bridge;       // consumed by BridgeJunction (P2.4)
     PluckExciterParams exciter;
-    // DamperJunctionParams damper;  // P2.2, with DamperJunction.h (see the file comment above)
+
+    // Shared damper behaviour (Task P2.2). `damper.position01` is MIRRORED from damperPosition01
+    // above on the way into each DamperJunction, exactly as docs/plan.md section 2.7 specifies --
+    // so on this struct's surface damperPosition01 is the single source of truth and whatever a
+    // caller leaves in damper.position01 is ignored. The duplication exists because
+    // DamperJunctionParams is the module's own complete parameter set (it is what
+    // DamperJunction::setParams takes) while damperPosition01 is what the APVTS automates.
+    DamperJunctionParams damper;
 
     struct PerString {
         float tuningOffsetCents = 0.0f; // additive cents inside the same f0 smoother as the bend
@@ -269,6 +285,14 @@ template <typename SampleT> class StringNetwork {
     // WaveguideString::currentF0Hz() plays for pitch. Returns 0 for an out-of-range index.
     float tapPosition01(int stringIndex, int tapIndex) const noexcept;
 
+    // The damper state of `stringIndex` right now (Task P2.2). Engagement is the felt ramp's
+    // current value, 0..1; position is where its junction sits on the string. Exposed because
+    // every state change the damper introduces has to be gated by a DIRECT assertion on the state
+    // itself and not only by a click metric on the rendered audio -- the P2.1 review's ruling.
+    // Both return 0 for an out-of-range index.
+    float damperEngagement(int stringIndex) const noexcept;
+    float damperPosition01(int stringIndex) const noexcept;
+
   private:
     void handleEvent(const NoteEvent& event) noexcept;
     void applyStringParams(int stringIndex) noexcept;
@@ -276,6 +300,13 @@ template <typename SampleT> class StringNetwork {
     void snapTapPositions(int stringIndex) noexcept;
     void updateLoopStringCount() noexcept;
     bool stringHasState(int stringIndex) const noexcept;
+
+    // The one place a string's physical state is thrown away. Clears the rails, snaps the damper
+    // back to released, and re-arms the silence watchdog -- always together, because the damper's
+    // engagement is the only DISCONTINUOUS thing about it and it is safe exactly when the rails it
+    // scatters are zeros. Keeping the three in one function is what makes that invariant checkable
+    // rather than a rule three call sites have to remember.
+    void clearStringState(int stringIndex) noexcept;
 
     static constexpr int tapSlot(int stringIndex, int tapIndex) noexcept {
         return stringIndex * kMaxTapsPerString + tapIndex;
@@ -298,13 +329,21 @@ template <typename SampleT> class StringNetwork {
     }
     static constexpr double kDefaultTapPosition01 = 0.5;
 
-    // P1 fixed fast release, standing in for DamperJunction (P2.2): a one-pole decay applied to
-    // the string's tap contribution, after which the string's state is cleared. The time constant
-    // is stated as a TIME CONSTANT, and set to the centre of the 20..100 ms felt-time-constant
-    // window DamperJunction validates in P2.2, so replacing this envelope with the real damper is
-    // not also a change of speed. It reaches -60 dB in 276 ms and the clear-out floor in 460 ms.
-    static constexpr double kReleaseTimeConstantSeconds = 0.040;
-    static constexpr float kReleaseFloor = 1.0e-5f; // -100 dB: below this the tail is cleared
+    // The silence watchdog that replaced P1's release envelope (Task P2.2). A released string is
+    // damped by physics now, so nothing counts it down: it leaves the loop when it is OBSERVED
+    // silent, which is the only honest criterion once a point damper is doing the damping. A
+    // damper at p has exact nodes at every partial n = k/p (p = 0.15 puts one on partial 20) and
+    // is blind to them by construction, so those partials ride the loop loss down on their own
+    // schedule and a fixed release time would either cut them off audibly or hold every released
+    // string in the trip count for the worst case.
+    //
+    // Measured as a WINDOWED PEAK rather than an instantaneous level or a one-pole follower.
+    // Instantaneous fails at every zero crossing; a follower needs a seed value, and any seed is
+    // either a floor on how fast a quiet string can leave (too high) or the same zero-crossing bug
+    // (too low). One window's peak needs no seed and cannot be fooled by a zero crossing, provided
+    // the window spans a full period of the lowest note the instrument has -- 27.5 Hz, 36.4 ms.
+    static constexpr double kSilenceWindowSeconds = 0.050;
+    static constexpr float kSilenceFloor = 1.0e-5f; // -100 dBFS: below this the tail is cleared
 
     // Per-sample smoothing time for pickupPosition01, matching WaveguideString's own smoothers.
     static constexpr double kPositionSmoothingSeconds = 0.008;
@@ -332,12 +371,14 @@ template <typename SampleT> class StringNetwork {
     // states here would rewrite arithmetic the goldens and the [tuning] gate exist to pin.
     std::vector<WaveguideString<SampleT>> strings_;
     std::vector<PluckExciter<SampleT>> exciters_;
+    std::vector<DamperJunction<SampleT>> dampers_; // one per string, permanently in-line (P2.2)
 
     // Per-string state, one contiguous array per field (SoA).
     std::array<std::uint8_t, kMaxStrings> midiNote_{};
     std::array<bool, kMaxStrings> sounding_{};
     std::array<bool, kMaxStrings> releasing_{};
-    std::array<float, kMaxStrings> releaseGain_{};
+    std::array<float, kMaxStrings> silencePeak_{};  // windowed peak of the watchdog, while releasing
+    std::array<int, kMaxStrings> silenceCount_{};   // samples into the current watchdog window
     std::array<float, kMaxStrings> enableGain_{};   // 0..1, the ramp's current value
     std::array<float, kMaxStrings> enableTarget_{}; // 0 or 1
     std::array<float, kMaxStrings> portImpedance_{};
@@ -356,7 +397,7 @@ template <typename SampleT> class StringNetwork {
     double positionSmoothingCoeff_ = 0.0;
     std::array<double, kTapSlots> tapTarget_ = filledTapSlots(kDefaultTapPosition01);
     std::array<double, kTapSlots> tapSmoothed_ = filledTapSlots(kDefaultTapPosition01);
-    float releaseCoeff_ = 0.0f;
+    int silenceWindowSamples_ = 1;
     float enableRampStep_ = 1.0f;
 
     RigidBridgeTermination<SampleT> internalPort_; // the P1 termination; see setBridgePort()

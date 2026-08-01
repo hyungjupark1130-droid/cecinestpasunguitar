@@ -53,4 +53,27 @@ double bandT60Seconds(const std::vector<double>& samples, double sampleRate, dou
 // RMS in dBFS over the first `windowSeconds` of the signal.
 double rmsDbfs(const std::vector<double>& samples, double sampleRate, double windowSeconds);
 
+// Per-sample amplitude envelope of ONE partial: complex heterodyne of `partialHz` down to DC
+// followed by a cascade of four one-pole lowpasses at `bandwidthHz`, magnitude taken per sample
+// and scaled back to the partial's amplitude. Added at Task P2.2 for the node-suppression gate,
+// which has to watch two partials of the SAME note decay at wildly different rates -- an octave
+// band (bandT60Seconds above) cannot separate 110 Hz from 220 Hz, and a whole-render FFT cannot
+// show a partial that is alive at one moment and gone 200 ms later.
+//
+// Choosing `bandwidthHz` is the caller's job and it is a trade: it must be well under the spacing
+// to the neighbouring partial (four one-pole sections give 4 * 20*log10(spacing/bandwidth) dB of
+// rejection there) and the envelope can never fall FASTER than the cascade's own impulse
+// response, so a decay quicker than roughly 1/(2*pi*bandwidthHz) is reported smeared -- i.e. as
+// an UPPER bound on how fast it really was. That direction is safe for a "this partial dies fast"
+// gate and unsafe for a "this partial survives" one, which is why callers state which they need.
+std::vector<double> partialEnvelope(const std::vector<double>& samples, double sampleRate, double partialHz,
+                                    double bandwidthHz);
+
+// T60 in seconds fitted from a partial envelope starting at `beginSample`, by exactly the
+// convention bandT60Seconds uses: least-squares slope of the dB envelope over its -5 dB .. -25 dB
+// span, extrapolated to 60 dB. Returns a negative value when the span never falls that far or
+// carries too few points to fit -- callers treat that as "this partial did not decay here" rather
+// than as a failure.
+double partialT60Seconds(const std::vector<double>& envelope, double sampleRate, std::size_t beginSample);
+
 } // namespace cnpg::test

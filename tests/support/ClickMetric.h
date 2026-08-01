@@ -125,6 +125,10 @@ struct ClickMeasurement {
     double peakWindowAbsDiff = 0.0;  // max over 10 ms windows of the peak |first difference|
     std::size_t peakWindowStart = 0; // sample index (relative to the span) of the winning window
     double medianAbsDiff = 0.0;      // this render's own median |first difference| over the span
+    double peakAbsSample = 0.0;      // this render's own peak |x| over the span; reporting only
+    double peakStepToLevel = 0.0;    // max over the same 10 ms windows of (window peak |dx|) /
+                                     // (window peak |x|) -- the second companion below; not part
+                                     // of reading (b)
     long long nonFiniteSamples = 0;
     long long subnormalSamples = 0;
 
@@ -167,5 +171,41 @@ double clickExcessDb(const ClickMeasurement& test, const ClickMeasurement& refer
 // residual to be loud against, and clickExcessDb() is then the only meaningful reading.
 double clickExcessAgainstResidualDb(const ClickMeasurement& test, const ClickMeasurement& testResidual,
                                     const ClickMeasurement& reference, const ClickMeasurement& referenceResidual);
+
+// -----------------------------------------------------------------------------------------------
+// THE SECOND COMPANION (added at Task P2.2): peak |dx| against the SIGNAL'S OWN LEVEL, for a change
+// that alters the signal's DECAY RATE rather than stepping it between two settled levels
+// -----------------------------------------------------------------------------------------------
+//
+// clickExcessAgainstResidualDb above presumes there IS a settled signal after the change to
+// normalise by. Damper engagement has no such thing: it does not move a note from one level to
+// another, it changes how fast the note is FALLING, so the signal decays continuously from the
+// moment of the change and every window after it is quieter than the one before. Measured on this
+// project's own note-off renders that reading returns the accumulated level drop and nothing else
+// -- 19 dB at maxLoss 0.05, 52 dB at 1.0, both of them the damper working exactly as designed.
+//
+// clickExcessAgainstLevelDb normalises each render's peak |dx| by THAT RENDER'S OWN PEAK |x|, and
+// does it PER 10 ms WINDOW: the reading is max over windows of (window peak |dx| / window peak |x|).
+// That is the one denominator a level change of any size, shape or speed divides out of exactly,
+// because it is re-measured every 10 ms alongside the numerator. What is left is a pure shape
+// number: for a band-limited waveform it sits near 2*pi*f_max/fs, while a step worth a fraction q
+// of the signal puts the window containing it at about q. A discontinuity that the change itself
+// made quiet -- the exact blind spot reading (b) is documented to have -- still reads large,
+// because the yardstick got quiet with it.
+//
+// Per-window is not a refinement, it is the whole thing working. A single peak |x| taken over a
+// span that decays 40 dB across itself comes from the span's loud beginning, and a step late in
+// that span then hides behind it exactly as it hides in reading (b). Measured, on this project's
+// own full note-off: a 6 dB step 50 ms after the note-off reads 1.3 dB with a span-wide denominator
+// and 12 dB with the per-window one.
+//
+// Span choice still matters: measure over the POST-CHANGE window only. A span that also contains
+// the loud pre-change signal will simply take its maximum from a pre-change window, where both
+// renders are identical, and report nothing about the change at all.
+//
+// The criterion is the same 3 dB. Use it ALONGSIDE clickExcessDb, never instead of it: this reading
+// is blind to a change that is smooth but wrong, and reading (b) is blind to a jump the change made
+// quiet. Between them the level-reducing case is covered.
+double clickExcessAgainstLevelDb(const ClickMeasurement& test, const ClickMeasurement& reference);
 
 } // namespace cnpg::test

@@ -16,6 +16,8 @@ add_subdirectory(render) # cnpg_render -- Task P1.11
 add_executable(cnpg_tests
     dsp/AliasingGateTests.cpp
     dsp/DamperEnergyTests.cpp
+    dsp/DamperFeltTimeTests.cpp
+    dsp/DamperNodeSuppressionTests.cpp
     dsp/DenormalTests.cpp
     dsp/EventQueueTests.cpp
     dsp/MidiTranslationTests.cpp
