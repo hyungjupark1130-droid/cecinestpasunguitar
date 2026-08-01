@@ -7,6 +7,7 @@
 // under both the windows-msvc-release and linux-dsp-only (GCC + Clang) presets.
 
 #include "cnpg/dsp/CabFilter.h"
+#include "cnpg/dsp/DamperJunction.h"
 #include "cnpg/dsp/PickupTap.h"
 #include "cnpg/dsp/PluckExciter.h"
 #include "cnpg/dsp/SoftClipLimiter.h"
@@ -53,6 +54,27 @@ TEST_CASE("StringNetworkParams: nests StringMaterialParams and PluckExciterParam
     params.retriggerMode = RetriggerMode::Synth;
     const StringNetworkParams copy = params;
     REQUIRE(copy.retriggerMode == RetriggerMode::Synth);
+}
+
+TEST_CASE("DamperJunctionParams: default-constructs to its documented defaults", "[contract]") {
+    constexpr DamperJunctionParams params;
+    STATIC_REQUIRE(params.position01 == 0.15f);
+    STATIC_REQUIRE(params.maxLoss == 1.0f);
+    // The centre of the validated 20..100 ms window, and deliberately the same 40 ms the P1
+    // placeholder release envelope used, so Task P2.2 replacing that envelope with a real damper
+    // was not also a change of speed.
+    STATIC_REQUIRE(params.feltTimeConstantMs == 40.0f);
+    STATIC_REQUIRE(params.feltTimeConstantMs >= kFeltTimeConstantMinMs);
+    STATIC_REQUIRE(params.feltTimeConstantMs <= kFeltTimeConstantMaxMs);
+
+    // StringNetworkParams nests it, and carries its own damperPosition01 that is MIRRORED into
+    // DamperJunctionParams::position01 on the way to each junction (docs/plan.md section 2.7). The
+    // two defaults must agree, or a caller that never touches either would find the junction
+    // somewhere other than where the network's own surface says it is.
+    constexpr StringNetworkParams network;
+    STATIC_REQUIRE(network.damper.maxLoss == params.maxLoss);
+    STATIC_REQUIRE(network.damper.feltTimeConstantMs == params.feltTimeConstantMs);
+    STATIC_REQUIRE(network.damperPosition01 == params.position01);
 }
 
 TEST_CASE("PickupTapParams: default-constructs to its documented defaults", "[contract]") {

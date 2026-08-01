@@ -67,6 +67,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupPosition01), "Pickup Position",
                                                            unitRange, 0.5f));
 
+    // Damper (Task P2.2). Position and depth are the two controls that make a palm mute and a
+    // natural harmonic playable rather than emergent-only: p = 0.5 leaves a released note ringing
+    // an octave up (the 2nd harmonic has a node there and the damper cannot touch it), and a
+    // partial depth is a palm mute rather than a note-off. Felt time is exposed over exactly the
+    // window DamperJunction validates, so the knob cannot ask for a setting the module refuses.
+    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::damperPosition01), "Damper Position",
+                                                           unitRange,
+                                                           cnpg::dsp::StringNetworkParams{}.damperPosition01));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::damperMaxLoss), "Damper Depth",
+                                                           unitRange, cnpg::dsp::DamperJunctionParams{}.maxLoss));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        makeParameterID(ID::damperFeltTimeMs), "Damper Felt Time",
+        juce::NormalisableRange<float>(cnpg::dsp::kFeltTimeConstantMinMs, cnpg::dsp::kFeltTimeConstantMaxMs),
+        cnpg::dsp::DamperJunctionParams{}.feltTimeConstantMs, juce::AudioParameterFloatAttributes().withLabel("ms")));
+
     // Triode
     layout.add(
         std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::triodeDrive), "Triode Drive", unitRange, 0.5f));
@@ -136,6 +151,10 @@ RawParameterPointers collectRawParameterPointers(const juce::AudioProcessorValue
     params.pickupOutputGainDb = apvts.getRawParameterValue(ID::pickupOutputGainDb);
     params.pickupPosition01 = apvts.getRawParameterValue(ID::pickupPosition01);
 
+    params.damperPosition01 = apvts.getRawParameterValue(ID::damperPosition01);
+    params.damperMaxLoss = apvts.getRawParameterValue(ID::damperMaxLoss);
+    params.damperFeltTimeMs = apvts.getRawParameterValue(ID::damperFeltTimeMs);
+
     params.triodeDrive = apvts.getRawParameterValue(ID::triodeDrive);
     params.triodeOutputTrimDb = apvts.getRawParameterValue(ID::triodeOutputTrimDb);
     params.triodeBypass = apvts.getRawParameterValue(ID::triodeBypass);
@@ -168,6 +187,13 @@ Snapshot snapshotParameters(const RawParameterPointers& params) noexcept {
     snapshot.stringNetwork.stringMaterial.dispersionAmount = params.stringMaterialDispersionAmount->load();
 
     snapshot.stringNetwork.pickupPosition01 = params.pickupPosition01->load();
+
+    // damperPosition01 is the single source of truth on this surface; StringNetwork mirrors it into
+    // each DamperJunction's own position01 field (docs/plan.md section 2.7), so nothing writes
+    // snapshot.stringNetwork.damper.position01 here.
+    snapshot.stringNetwork.damperPosition01 = params.damperPosition01->load();
+    snapshot.stringNetwork.damper.maxLoss = params.damperMaxLoss->load();
+    snapshot.stringNetwork.damper.feltTimeConstantMs = params.damperFeltTimeMs->load();
     // AudioParameterChoice reports its selected index as a float via getRawParameterValue();
     // index 0 -> Physical, 1 -> Synth (matches the choices list in createParameterLayout()).
     snapshot.stringNetwork.retriggerMode =

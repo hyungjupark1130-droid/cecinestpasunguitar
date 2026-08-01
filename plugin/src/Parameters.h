@@ -60,6 +60,15 @@ inline constexpr const char* cabBypass = "cabBypass";
 inline constexpr const char* limiterCeilingDb = "limiterCeilingDb";
 inline constexpr const char* outputGainDb = "outputGainDb";
 
+// Damper (cnpg::dsp::DamperJunctionParams, nested under StringNetworkParams::damper, plus
+// damperPosition01 on StringNetworkParams itself -- exactly the split pickupPosition01 has, and for
+// the same reason: the POSITION is a StringNetwork-owned junction position that Task P2.3 makes
+// continuously modulatable, while depth and felt time are the junction module's own behaviour.
+// Task P2.2. The state version stays 2 (it stays 2 through all of P2, per Task P2.1).
+inline constexpr const char* damperPosition01 = "damperPosition01";
+inline constexpr const char* damperMaxLoss = "damperMaxLoss";
+inline constexpr const char* damperFeltTimeMs = "damperFeltTimeMs";
+
 // Global (cnpg::dsp::RetriggerMode, nested under StringNetworkParams::retriggerMode)
 inline constexpr const char* retriggerMode = "retriggerMode";
 
@@ -132,6 +141,10 @@ struct RawParameterPointers {
     std::atomic<float>* cabBypass = nullptr;
     std::atomic<float>* limiterCeilingDb = nullptr;
     std::atomic<float>* outputGainDb = nullptr;
+
+    std::atomic<float>* damperPosition01 = nullptr;
+    std::atomic<float>* damperMaxLoss = nullptr;
+    std::atomic<float>* damperFeltTimeMs = nullptr;
 
     std::atomic<float>* retriggerMode = nullptr;
 
