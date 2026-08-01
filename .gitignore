@@ -30,3 +30,10 @@ renders/
 
 # Controller scratch directory — never committed
 .superpowers/
+
+# Agent tooling scratch — never committed
+.claude-flow/
+
+# graphify knowledge-graph outputs and the Obsidian vault it writes into
+graphify-out/
+Cecinestpasunguitar_Graphify/
