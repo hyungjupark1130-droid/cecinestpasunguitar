@@ -250,11 +250,19 @@ template <typename SampleT> void StringNetwork<SampleT>::clearStringState(int st
         return;
     const auto index = static_cast<std::size_t>(stringIndex);
     strings_[index].reset();
+    // reset(), not setEngagementImmediate(0). Both open the damper, but the junction has a SECOND
+    // smoother -- the loss depth -- and only reset() snaps that one onto its parameter too. Using
+    // the narrower call left a maxLoss automation move gliding across a state clear, so a string
+    // cleared mid-glide came back carrying the old depth for another 8 ms. That is inaudible today
+    // (the engagement is 0, so the coefficient is 0 whatever the depth is) and it still had to go:
+    // it contradicts this junction's own documented reset contract, and "inaudible today" is a
+    // property of the current call graph rather than of the code.
+    //
     // Snapping the engagement is a DISCONTINUITY in the junction's scattering coefficients, and
     // the only reason it is inaudible is that the line above just made every wave the junction
     // scatters a zero. That is the whole invariant, and it is why this pairing is a function
     // rather than a convention.
-    dampers_[index].setEngagementImmediate(0.0f);
+    dampers_[index].reset();
     silencePeak_[index] = 0.0f;
     silenceCount_[index] = 0;
 }
@@ -293,6 +301,12 @@ template <typename SampleT> float StringNetwork<SampleT>::damperEngagement(int s
     if (dampers_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
         return 0.0f;
     return dampers_[static_cast<std::size_t>(stringIndex)].currentEngagement();
+}
+
+template <typename SampleT> float StringNetwork<SampleT>::damperLossDepth(int stringIndex) const noexcept {
+    if (dampers_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0.0f;
+    return dampers_[static_cast<std::size_t>(stringIndex)].currentLossDepth();
 }
 
 template <typename SampleT> float StringNetwork<SampleT>::damperPosition01(int stringIndex) const noexcept {

@@ -295,12 +295,17 @@ template <typename SampleT> class StringNetwork {
     // WaveguideString::currentF0Hz() plays for pitch. Returns 0 for an out-of-range index.
     float tapPosition01(int stringIndex, int tapIndex) const noexcept;
 
-    // The damper state of `stringIndex` right now (Task P2.2). Engagement is the felt ramp's
-    // current value, 0..1; position is where its junction sits on the string. Exposed because
-    // every state change the damper introduces has to be gated by a DIRECT assertion on the state
-    // itself and not only by a click metric on the rendered audio -- the P2.1 review's ruling.
-    // Both return 0 for an out-of-range index.
+    // The damper state of `stringIndex` right now (Task P2.2) -- ALL of it, which is the point:
+    // engagement is the felt ramp's current value 0..1, lossDepth is the smoothed maxLoss, and
+    // position is where the junction sits on the string. Between them they are the whole of what
+    // DamperJunction stores, and every state change any of them undergoes has to be gated by a
+    // DIRECT assertion on the state itself rather than only by a click metric on the rendered
+    // audio (the P2.1 review's ruling). lossDepth is here for a concrete reason: a smoother nobody
+    // can observe is a smoother nobody can gate, and the first bug in this seam was exactly that
+    // -- clearStringState() snapped the engagement and left the loss depth gliding.
+    // All three return 0 for an out-of-range index.
     float damperEngagement(int stringIndex) const noexcept;
+    float damperLossDepth(int stringIndex) const noexcept;
     float damperPosition01(int stringIndex) const noexcept;
 
   private:

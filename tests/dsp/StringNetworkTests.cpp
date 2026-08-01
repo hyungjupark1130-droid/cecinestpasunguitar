@@ -303,9 +303,39 @@ TEST_CASE("CONTRACT: StringNetwork reset is idempotent and complete", "[contract
     excited.setParams(moving);
     renderTap(excited, events, 1);
 
+    // Leave the DAMPER mid-flight too, on both of its smoothers, so reset() has something to clear
+    // there as well: a note-off starts the felt ramp, and a maxLoss move starts the loss-depth
+    // smoother. Asserted to be genuinely mid-glide rather than assumed -- reset() clearing a
+    // smoother that had already settled would prove nothing.
+    StringNetworkParams damperMove = moving;
+    damperMove.damper.maxLoss = 0.25f;
+    damperMove.damper.feltTimeConstantMs = 100.0f; // the slowest legal felt: easy to catch in flight
+    excited.setParams(damperMove);
+    BlockEventQueue release;
+    release.push(noteOff(0, kMidiNote));
+    renderTap(excited, release, 8); // ~21 ms into a 100 ms ramp
+    const float midRamp = excited.damperEngagement(0);
+    const float midGlide = excited.damperLossDepth(0);
+    INFO("engagement " << midRamp << ", loss depth " << midGlide);
+    REQUIRE(midRamp > 0.0f);
+    REQUIRE(midRamp < 1.0f);
+    REQUIRE(midGlide < 1.0f);  // moving down from the default 1.0...
+    REQUIRE(midGlide > 0.25f); // ...and not there yet
+
     excited.reset();
     excited.reset(); // twice must equal once
     REQUIRE(excited.energyEstimate() == 0.0);
+
+    // "Indistinguishable from a freshly prepared instance CARRYING THE SAME PARAMETERS" covers the
+    // damper's state, both smoothers of it: the felt ramp back to 0, and the loss depth SNAPPED
+    // ONTO its parameter rather than left gliding toward it. The second half is what
+    // clearStringState() calling setEngagementImmediate() instead of reset() used to get wrong.
+    REQUIRE(excited.damperEngagement(0) == 0.0f);
+    REQUIRE(excited.damperLossDepth(0) == 0.25f);
+    REQUIRE(excited.damperPosition01(0) == damperMove.damperPosition01);
+    excited.setParams(moving); // restore, so the re-pluck comparison below is against `moving`
+    excited.reset();
+    REQUIRE(excited.damperLossDepth(0) == moving.damper.maxLoss);
 
     StringNetwork<float> fresh;
     configure(fresh, moving);

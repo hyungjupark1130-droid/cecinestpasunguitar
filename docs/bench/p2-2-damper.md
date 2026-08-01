@@ -60,8 +60,13 @@ for longer than they used to, which raises the average number of strings the loo
 rendering. This is not overhead that can be optimised away without changing the physics; it is
 the physics being honest about when a string has stopped ringing.
 
-If a later phase needs the headroom back, the seam is the part with slack in it: the two reads
-in `writeJunctionOutputs` re-derive values `readJunctionInputs` computed microseconds earlier,
-and they are re-read rather than cached specifically so that a transparent junction is
-bit-exactly a no-op and the seam stays const-correct. Caching them is a legitimate optimisation
-for a task that is willing to own that trade; it is not one to make in passing.
+If a later phase needs the headroom back, the seam is the part with slack in it: the two reads in
+`writeJunctionOutputs` re-derive values `readJunctionInputs` computed a few instructions earlier,
+so roughly a third of the junction's rail traffic is redundant. Caching them across the pair would
+be **bit-identical** — same inputs, same rail contents, nothing writes between the two calls — so
+the transparency and passivity claims do not depend on the re-read, and nothing in this task's
+gates would change. It is left as it is only because it would mean giving `WaveguideString` a
+piece of per-string scratch state that lives *between* two calls and is silently wrong if a caller
+ever interleaves them, which is a real interface change and belongs to a task that wants it (P2.3
+rewrites both sides of this seam for the moving-junction crossfade and is the natural place). A
+deferred optimisation, not a constraint.

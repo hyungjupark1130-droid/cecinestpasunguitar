@@ -202,13 +202,19 @@ TEMPLATE_TEST_CASE("ENERGY/T1: DamperJunction scattering matrix is passive", "[e
     REQUIRE(worstNorm == 1.0);
 }
 
-TEST_CASE("ENERGY/T1: DamperJunction stays passive for conductances far outside the parameter range", "[energy]") {
-    // The passivity argument in DamperJunction.h claims to hold for ANY non-negative junction
-    // conductance, not merely for the parameter range the grid sweeps -- that is the difference
-    // between passive by construction and passive by clamping. The clamps are on the parameters,
-    // so the way to probe past them is to drive the engagement smoother to arbitrary values
-    // through the one entry point that sets it directly, including values a caller has no
-    // business passing.
+TEST_CASE("ENERGY/T1: DamperJunction sanitizes an out-of-range engagement into a passive one", "[energy]") {
+    // WHAT THIS CASE CAN AND CANNOT SHOW. It was first written claiming to probe "conductances far
+    // outside the parameter range", and it cannot: setEngagementImmediate() sanitizes its argument
+    // into [0, 1] before anything downstream sees it, so nothing here ever reaches the coefficients
+    // with s outside [0, 1]. What it actually shows is INPUT SANITIZATION -- that an out-of-range
+    // or NaN engagement from a caller resolves rather than propagating into the audio path -- which
+    // is worth a test on its own, and is what the title now says.
+    //
+    // The claim that ||S||_2 <= 1 for ANY non-negative conductance is carried by the derivation in
+    // DamperJunction.h (S is real symmetric with eigenvalues 1-2g and -1, and g = R/(R+2) lies in
+    // [0,1) for every R >= 0), not by a sweep. There is deliberately no entry point that hands the
+    // junction a raw conductance, because there is no entry point that lets the audio path do it
+    // either -- which is the same reason the bound is structural rather than measured.
     for (float engagement : {-1.0f, -0.0f, 0.5f, 1.0f, 3.0f, 1.0e30f, std::numeric_limits<float>::quiet_NaN()}) {
         DamperJunction<float> damper;
         damper.prepare(kRate, kBlock);
@@ -573,6 +579,74 @@ TEST_CASE("CONTRACT: DamperJunction engagement ramps continuously and settles ex
 
     std::cout << "[contract] DamperJunction ramp at " << kFeltMs << " ms: worst engagement step " << engageSteps.first
               << ", worst scattering-coefficient step " << engageSteps.second << " (limit " << stepLimit << ")\n";
+}
+
+TEST_CASE("CONTRACT: DamperJunction glides a maxLoss change instead of stepping it", "[contract]") {
+    // The junction has TWO smoothers, and the second one is a state change like any other, so the
+    // P2.1 ruling applies to it too: the engagement ramp is asserted directly above, and until now
+    // the loss depth was only ever observed at snapped values -- which would have been satisfied by
+    // an implementation that stepped it. A maxLoss automation move on an ENGAGED damper is a live
+    // change to the scattering coefficient of a junction with a full waveform passing through it,
+    // i.e. exactly the shape of thing that clicks if it steps.
+    constexpr float kFrom = 1.0f;
+    constexpr float kTo = 0.2f;
+
+    DamperJunction<float> damper;
+    placeAt(damper, 0.4f, kFrom, 1.0f);
+    REQUIRE(damper.currentLossDepth() == kFrom);
+    REQUIRE(damper.currentEngagement() == 1.0f); // fully engaged: the depth is audible right now
+
+    DamperJunctionParams moved;
+    moved.position01 = 0.4f;
+    moved.maxLoss = kTo;
+    damper.setParams(moved);
+    // setParams only RETARGETS: the value must not have moved yet.
+    REQUIRE(damper.currentLossDepth() == kFrom);
+
+    // One one-pole step over the 8 ms parameter smoother, plus the settle epsilon.
+    const double coeff = 1.0 - std::exp(-1.0 / (0.008 * kRate));
+    const double stepLimit = coeff * static_cast<double>(kFrom - kTo) + 1.0e-9;
+
+    double worstStep = 0.0;
+    double worstCoefficientStep = 0.0;
+    float previous = damper.currentLossDepth();
+    double previousG = 0.0;
+    {
+        double matrix[4] = {0.0, 0.0, 0.0, 0.0};
+        damper.copyScatteringMatrix(matrix);
+        previousG = -matrix[0];
+    }
+    bool sawIntermediate = false;
+    float sink = 0.0f;
+    for (int n = 0; n < static_cast<int>(0.2 * kRate); ++n) {
+        damper.scatter(0.5f, -0.25f, sink, sink);
+        const float now = damper.currentLossDepth();
+        worstStep = std::max(worstStep, std::fabs(static_cast<double>(now - previous)));
+        // Monotone, and strictly between the endpoints while it travels -- so this is a GLIDE and
+        // not a step that happened to land on the target.
+        REQUIRE(now <= previous);
+        if (now > kTo && now < kFrom)
+            sawIntermediate = true;
+        previous = now;
+
+        double matrix[4] = {0.0, 0.0, 0.0, 0.0};
+        damper.copyScatteringMatrix(matrix);
+        const double g = -matrix[0];
+        worstCoefficientStep = std::max(worstCoefficientStep, std::fabs(g - previousG));
+        previousG = g;
+    }
+
+    std::cout << "[contract] DamperJunction maxLoss glide " << kFrom << " -> " << kTo << ": worst depth step "
+              << worstStep << " (limit " << stepLimit << "), worst scattering-coefficient step " << worstCoefficientStep
+              << "\n";
+
+    INFO("worst depth step " << worstStep << " against limit " << stepLimit);
+    REQUIRE(sawIntermediate);
+    REQUIRE(worstStep <= stepLimit);
+    // And the quantity the audio path multiplies by moves no faster: g = s/(s+1) has dg/ds <= 1.
+    REQUIRE(worstCoefficientStep <= stepLimit);
+    // "Fully arrived" is a reachable state, exactly, like the engagement ramp's endpoints.
+    REQUIRE(damper.currentLossDepth() == kTo);
 }
 
 TEST_CASE("CONTRACT: DamperJunction reset and setParams behave as the lifecycle documents", "[contract]") {

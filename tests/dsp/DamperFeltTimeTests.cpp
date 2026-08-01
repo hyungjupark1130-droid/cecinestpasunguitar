@@ -431,11 +431,6 @@ struct ClickReadings {
     double residualExcessDb = 0.0;
     double levelExcessDb = 0.0;
     double hardCutExcessDb = 0.0;
-    // The blind-spot control: a 6 dB step taken mid-decay ON THE DAMPED RENDER, i.e. a
-    // discontinuity worth half of the signal that the damper left behind. Reading (b) is
-    // documented to miss exactly this; the level-normalised companion must catch it.
-    double blindSpotExcessDb = 0.0;
-    double blindSpotLevelExcessDb = 0.0;
     double residualLevelDropDb = 0.0; // how much level the change took out of the residual span
     long long nonFinite = 0;
     long long subnormal = 0;
@@ -498,32 +493,12 @@ ClickReadings measureNoteOffClick(float maxLoss, double postSeconds) {
         cnpg::test::measureClick(damped.tap, kRate, damped.noteOffSample, spanEnd);
     const cnpg::test::ClickMeasurement referenceAfter =
         cnpg::test::measureClick(reference.tap, kRate, damped.noteOffSample, spanEnd);
-    // THE BLIND-SPOT CONTROL. tests/support/ClickMetric.h states reading (b)'s failure mode
-    // exactly: "A state change that BOTH reduces the level AND inserts a discontinuity can pass."
-    // So build one: take the DAMPED render -- which the damper has already made quiet -- and cut
-    // 6 dB out of it instantly, 50 ms after the note-off. In absolute |dx| that step is tiny,
-    // because half of a quiet signal is a small number; against the signal that remains it is
-    // enormous, and plainly audible. Reading (b) is expected to MISS it (which the assertions
-    // below pin, so the blind spot is a measured fact and not a warning in a comment) and the
-    // level-normalised companion is expected to catch it.
-    std::vector<float> blindSpot = damped.tap;
-    const auto stepAt = damped.noteOffSample + static_cast<std::size_t>(0.050 * kRate);
-    for (std::size_t i = stepAt; i < blindSpot.size(); ++i)
-        blindSpot[i] *= 0.5f;
-
-    const cnpg::test::ClickMeasurement blindSpotMeasurement =
-        cnpg::test::measureClick(blindSpot, kRate, spanBegin, spanEnd);
-    const cnpg::test::ClickMeasurement blindSpotAfter =
-        cnpg::test::measureClick(blindSpot, kRate, damped.noteOffSample, spanEnd);
-
     ClickReadings out;
     out.excessDb = cnpg::test::clickExcessDb(dampedMeasurement, referenceMeasurement);
     out.residualExcessDb = cnpg::test::clickExcessAgainstResidualDb(dampedMeasurement, dampedResidual,
                                                                     referenceMeasurement, referenceResidual);
     out.levelExcessDb = cnpg::test::clickExcessAgainstLevelDb(dampedAfter, referenceAfter);
     out.hardCutExcessDb = cnpg::test::clickExcessDb(hardCutMeasurement, referenceMeasurement);
-    out.blindSpotExcessDb = cnpg::test::clickExcessDb(blindSpotMeasurement, referenceMeasurement);
-    out.blindSpotLevelExcessDb = cnpg::test::clickExcessAgainstLevelDb(blindSpotAfter, referenceAfter);
     out.residualLevelDropDb = (referenceResidual.medianAbsDiff > 0.0 && dampedResidual.medianAbsDiff > 0.0)
                                   ? 20.0 * std::log10(dampedResidual.medianAbsDiff / referenceResidual.medianAbsDiff)
                                   : -300.0;
@@ -558,14 +533,12 @@ TEST_CASE("CONTRACT: DamperFeltTime -- damper engagement passes the click metric
     // 2*pi*f_max/fs -- and a point damper does not attenuate uniformly: it annihilates the partials
     // with antinodes at p and leaves the ones with nodes there, which at p = 0.15 are partial 20 and
     // up. So a fully engaged damper leaves a residue that is genuinely BRIGHTER than the note was,
-    // and the companion reads that brightness (+8.9 dB at maxLoss 1.0) exactly as it would read a
-    // step. At the palm-mute depths the low partials are still present and the companion is sharp:
-    // the damper reads -0.01 / -0.04 dB and the blind-spot control +12.8 / +17.6 dB, a 13-18 dB
-    // separation. At full depth the reading saturates on the residue, which the assertions below
-    // pin by showing that ADDING the 6 dB step does not move it at all -- so the full note-off is
-    // gated by reading (b), by the structural bound on the coefficient's per-sample step
-    // (tests/dsp/DamperEnergyTests.cpp) and by the sample-by-sample continuity case above, and not
-    // by a number that has stopped being able to tell the difference.
+    // and the companion reads that brightness exactly as it would read a step. At the palm-mute
+    // depths the low partials are still present and it is sharp; at full depth it saturates on the
+    // residue, so the full note-off is gated by reading (b), by the structural bound on the
+    // coefficient's per-sample step (tests/dsp/DamperEnergyTests.cpp) and by the sample-by-sample
+    // continuity case above. The next case is what shows the companion has teeth where it is
+    // relied upon.
     struct Depth {
         float maxLoss;
         const char* name;
@@ -581,16 +554,12 @@ TEST_CASE("CONTRACT: DamperFeltTime -- damper engagement passes the click metric
                   << "): absolute excess " << readings.excessDb << " dB, LEVEL-normalised excess "
                   << readings.levelExcessDb << " dB (limit " << cnpg::test::kClickMetricToleranceDb
                   << " dB); the change took " << readings.residualLevelDropDb
-                  << " dB out of the residual span, which is what the "
-                  << "residual-normalised reading reports (" << readings.residualExcessDb
-                  << " dB, not a click); controls: hard mute " << readings.hardCutExcessDb
-                  << " dB absolute, 6 dB blind-spot step " << readings.blindSpotExcessDb
-                  << " dB absolute (missed, as documented) / " << readings.blindSpotLevelExcessDb
-                  << " dB level-normalised (caught)\n";
+                  << " dB out of the residual span, which is what the residual-normalised reading reports ("
+                  << readings.residualExcessDb << " dB, not a click); hard-mute negative control "
+                  << readings.hardCutExcessDb << " dB\n";
 
         INFO(depth.name << ": absolute " << readings.excessDb << " dB, level " << readings.levelExcessDb
-                        << " dB; controls " << readings.hardCutExcessDb << " / " << readings.blindSpotExcessDb << " / "
-                        << readings.blindSpotLevelExcessDb << " dB");
+                        << " dB; hard-mute control " << readings.hardCutExcessDb << " dB");
 
         // The scenario really is level-reducing, which is the whole premise of needing a companion.
         REQUIRE(readings.residualLevelDropDb < -3.0);
@@ -606,24 +575,104 @@ TEST_CASE("CONTRACT: DamperFeltTime -- damper engagement passes the click metric
         REQUIRE(readings.nonFinite == 0);
         REQUIRE(readings.subnormal == 0);
 
-        // ...and the blind spot it is documented to have, demonstrated on THIS render rather than
-        // inherited from P2.1: a 6 dB step taken mid-decay on the already-damped signal slips past
-        // reading (b) at every depth.
-        REQUIRE(readings.blindSpotExcessDb <= readings.hardCutExcessDb);
-
-        if (depth.companionDiscriminates) {
-            // The companion catches that step by a wide margin, and clears the damper itself.
-            REQUIRE(readings.blindSpotLevelExcessDb > cnpg::test::kClickMetricToleranceDb);
+        if (depth.companionDiscriminates)
             REQUIRE(readings.levelExcessDb <= cnpg::test::kClickMetricToleranceDb);
-            REQUIRE(readings.blindSpotLevelExcessDb > readings.levelExcessDb + 10.0);
-        } else {
-            // Saturated on the damper's own bright residue: adding the 6 dB step does not move the
-            // reading AT ALL, which is what "it has stopped discriminating here" means, stated as
-            // an assertion so it cannot silently start mattering again unnoticed.
-            REQUIRE(readings.levelExcessDb > cnpg::test::kClickMetricToleranceDb);
-            REQUIRE(std::fabs(readings.blindSpotLevelExcessDb - readings.levelExcessDb) < 1.0e-9);
-        }
+        else
+            REQUIRE(readings.levelExcessDb > cnpg::test::kClickMetricToleranceDb); // saturated; see above
     }
+}
+
+TEST_CASE("CONTRACT: DamperFeltTime -- the level-normalised reading catches a step reading (b) is blind to",
+          "[contract]") {
+    // THE CASE THAT MAKES THE COMPANION BINDING, and the one the first version of this suite got
+    // wrong. tests/support/ClickMetric.h states reading (b)'s failure mode exactly: "A state change
+    // that BOTH reduces the level AND inserts a discontinuity can pass." The first attempt at a
+    // control put a 6 dB step 50 ms after the note-off -- where the damper had barely started, so
+    // the step was worth half of a still-loud signal and reading (b) CAUGHT it at 7-10 dB. A
+    // control that the reading under test already catches demonstrates nothing about the reading
+    // that is supposed to catch it, and the companion was unbinding as a result.
+    //
+    // So the step is placed by LEVEL rather than by time: at the first moment the damper has taken
+    // the note kBlindSpotDropDb below where it was at the note-off. Halving the signal there is a
+    // discontinuity worth 6 dB of everything still audible -- plainly a click to a listener -- and
+    // an absolute |dx| far under what the undamped string was doing before the note-off, which is
+    // the denominator reading (b) compares against. Both halves are asserted: (b) misses it, the
+    // companion catches it, and the un-stepped render passes both so the span itself is fair.
+    constexpr float kMaxLoss = 0.25f; // palm-mute depth, where the companion discriminates
+    constexpr double kBlindSpotDropDb = -30.0;
+    constexpr double kNoteOffSeconds = 0.5;
+    constexpr double kTotalSeconds = 1.5;
+    constexpr double kPreSeconds = 0.25;
+
+    StringNetworkParams params = paramsWith(20.0f);
+    params.damper.maxLoss = kMaxLoss;
+    params.stringMaterial.lossGainLow = 1.0f;
+    params.stringMaterial.lossGainHigh = 1.0f;
+
+    const NoteOffRender damped = renderNoteOff(params, kNoteOffSeconds, kTotalSeconds, true);
+    const NoteOffRender reference = renderNoteOff(params, kNoteOffSeconds, kTotalSeconds, false);
+    REQUIRE(damped.engagementBefore == 0.0f);
+    REQUIRE(damped.engagementOneBlockAfter > 0.0f);
+    REQUIRE(damped.engagementOneBlockAfter < 1.0f);
+
+    // Where the damper has taken the note kBlindSpotDropDb down, measured on a 10 ms windowed peak
+    // so a zero crossing cannot be mistaken for the level.
+    const double target = static_cast<double>(damped.levelAtNoteOff) * std::pow(10.0, kBlindSpotDropDb / 20.0);
+    const double secondsToTarget = secondsUntilBelow(damped.tap, damped.noteOffSample, target);
+    REQUIRE(secondsToTarget > 0.0);
+    const auto stepAt = damped.noteOffSample + static_cast<std::size_t>(secondsToTarget * kRate);
+
+    const auto spanBegin = damped.noteOffSample - static_cast<std::size_t>(kPreSeconds * kRate);
+    const auto spanEnd = std::min(damped.tap.size(), stepAt + static_cast<std::size_t>(0.050 * kRate));
+    REQUIRE(spanEnd > stepAt + 16);
+
+    std::vector<float> stepped = damped.tap;
+    for (std::size_t i = stepAt; i < stepped.size(); ++i)
+        stepped[i] *= 0.5f;
+
+    const cnpg::test::ClickMeasurement referenceMeasurement =
+        cnpg::test::measureClick(reference.tap, kRate, spanBegin, spanEnd);
+    const cnpg::test::ClickMeasurement dampedMeasurement =
+        cnpg::test::measureClick(damped.tap, kRate, spanBegin, spanEnd);
+    const cnpg::test::ClickMeasurement steppedMeasurement =
+        cnpg::test::measureClick(stepped, kRate, spanBegin, spanEnd);
+    REQUIRE(referenceMeasurement.metric(referenceMeasurement) > 0.0);
+
+    // The level-normalised reading is taken over the POST-CHANGE window only, as ClickMetric.h
+    // requires -- a span carrying the loud pre-change signal takes its maximum from a window where
+    // both renders are identical.
+    const cnpg::test::ClickMeasurement referenceAfter =
+        cnpg::test::measureClick(reference.tap, kRate, damped.noteOffSample, spanEnd);
+    const cnpg::test::ClickMeasurement dampedAfter =
+        cnpg::test::measureClick(damped.tap, kRate, damped.noteOffSample, spanEnd);
+    const cnpg::test::ClickMeasurement steppedAfter =
+        cnpg::test::measureClick(stepped, kRate, damped.noteOffSample, spanEnd);
+
+    const double dampedExcessDb = cnpg::test::clickExcessDb(dampedMeasurement, referenceMeasurement);
+    const double steppedExcessDb = cnpg::test::clickExcessDb(steppedMeasurement, referenceMeasurement);
+    const double dampedLevelDb = cnpg::test::clickExcessAgainstLevelDb(dampedAfter, referenceAfter);
+    const double steppedLevelDb = cnpg::test::clickExcessAgainstLevelDb(steppedAfter, referenceAfter);
+
+    std::cout << "[contract] blind-spot demonstration (maxLoss " << kMaxLoss << ", 6 dB step at " << secondsToTarget
+              << " s after the note-off, where the damper has taken " << kBlindSpotDropDb
+              << " dB out): reading (b) damped " << dampedExcessDb << " dB -> stepped " << steppedExcessDb
+              << " dB (MISSED, limit " << cnpg::test::kClickMetricToleranceDb << "); level-normalised damped "
+              << dampedLevelDb << " dB -> stepped " << steppedLevelDb << " dB (CAUGHT)\n";
+
+    INFO("(b): " << dampedExcessDb << " -> " << steppedExcessDb << " dB; level: " << dampedLevelDb << " -> "
+                 << steppedLevelDb << " dB");
+
+    // The span is fair: the un-stepped damper passes BOTH readings over exactly this span, so a
+    // failure below is the step and not the window.
+    REQUIRE(dampedExcessDb <= cnpg::test::kClickMetricToleranceDb);
+    REQUIRE(dampedLevelDb <= cnpg::test::kClickMetricToleranceDb);
+
+    // THE BLIND SPOT, measured: reading (b) does not merely pass the step, it barely notices it.
+    REQUIRE(steppedExcessDb <= cnpg::test::kClickMetricToleranceDb);
+
+    // THE COMPANION EARNING ITS PLACE: the same step, on the same render, over the same span.
+    REQUIRE(steppedLevelDb > cnpg::test::kClickMetricToleranceDb);
+    REQUIRE(steppedLevelDb > dampedLevelDb + 10.0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -691,6 +740,137 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a retrigger snaps the damper open over cl
     for (std::size_t i = 0; i < revived.size(); ++i) {
         INFO("sample " << i);
         REQUIRE(revived[i] == expected[i]);
+    }
+}
+
+TEST_CASE("CONTRACT: DamperFeltTime -- every path that clears a string also opens its damper", "[contract]") {
+    // setEngagementImmediate() has FOUR call sites, not two, and all four are reachable with the
+    // felt ramp genuinely mid-flight: the pitch-changing retrigger and the silence watchdog (both
+    // covered above), plus these two -- the enable ramp landing on silence, and reset(). Both are
+    // reached by ordinary play: disable a string, or turn the string count down, while a note-off
+    // tail is still being damped.
+    //
+    // Each is asserted the same way: the ramp is confirmed mid-flight FIRST (otherwise the case
+    // passes against a damper that was never engaged), then the clear is confirmed to have opened
+    // it, then a fresh note on that string is confirmed bit-identical to the same note on a string
+    // with no history -- which is what says the snap happened over cleared state and not over a
+    // live waveform.
+    auto ringThenReleaseHalfway = [](StringNetwork<float>& network) {
+        BlockEventQueue events;
+        events.push(noteOn(0, 45));
+        for (int b = 0; b < 200; ++b)
+            network.process(events, kBlock);
+        REQUIRE(network.damperEngagement(0) == 0.0f);
+
+        BlockEventQueue release;
+        release.push(noteOff(0, 45));
+        for (int b = 0; b < 20; ++b) // ~53 ms into a 100 ms ramp
+            network.process(release, kBlock);
+
+        const float midRamp = network.damperEngagement(0);
+        INFO("engagement mid-ramp " << midRamp);
+        REQUIRE(midRamp > 0.05f);
+        REQUIRE(midRamp < 0.95f);
+        REQUIRE(network.energyEstimate() > 0.0); // ...with the string still ringing under it
+    };
+
+    SECTION("the enable ramp landing on silence") {
+        StringNetworkParams params = paramsWith(100.0f);
+        StringNetwork<float> network;
+        configure(network, params);
+        ringThenReleaseHalfway(network);
+
+        // Disable the string mid-ramp. Its enable ramp is 10 ms, so a few blocks take it to
+        // exactly 0, and the loop's clear fires there.
+        params.perString[0].enabled = false;
+        network.setParams(params);
+        BlockEventQueue idle;
+        for (int b = 0; b < 10; ++b)
+            network.process(idle, kBlock);
+
+        REQUIRE(network.energyEstimate() == 0.0);                     // the clear really happened...
+        REQUIRE(network.damperEngagement(0) == 0.0f);                 // ...and it opened the damper
+        REQUIRE(network.damperLossDepth(0) == params.damper.maxLoss); // ...and snapped the depth
+
+        // Re-enable and pluck: bit-identical to a string that never rang, so nothing of the damped
+        // tail and no residual engagement survived the clear.
+        params.perString[0].enabled = true;
+        network.setParams(params);
+        BlockEventQueue replucked;
+        replucked.push(noteOn(0, 52));
+        const std::vector<float> revived = [&] {
+            std::vector<float> out;
+            for (int b = 0; b < 40; ++b) {
+                network.process(replucked, kBlock);
+                const float* channel = network.tapBuffers().channel(0, 0);
+                out.insert(out.end(), channel, channel + kBlock);
+            }
+            return out;
+        }();
+
+        StringNetwork<float> fresh;
+        configure(fresh, paramsWith(100.0f));
+        BlockEventQueue freshEvents;
+        freshEvents.push(noteOn(0, 52));
+        std::vector<float> expected;
+        for (int b = 0; b < 40; ++b) {
+            fresh.process(freshEvents, kBlock);
+            const float* channel = fresh.tapBuffers().channel(0, 0);
+            expected.insert(expected.end(), channel, channel + kBlock);
+        }
+
+        float peak = 0.0f;
+        for (float value : revived)
+            peak = std::max(peak, std::fabs(value));
+        REQUIRE(peak > 0.001f);
+        for (std::size_t i = 0; i < revived.size(); ++i) {
+            INFO("sample " << i);
+            REQUIRE(revived[i] == expected[i]);
+        }
+    }
+
+    SECTION("a setNumStrings reduction taking the string out") {
+        // The same clear, reached the other way the enable ramp can be driven. Two strings so the
+        // count can come down to 1 while string 1 is still being damped.
+        StringNetworkParams params = paramsWith(100.0f);
+        StringNetwork<float> network;
+        network.prepare(kRate, kBlock, FractionalDelayKind::Lagrange3);
+        network.setNumStrings(2);
+        network.setParams(params);
+        network.reset();
+
+        BlockEventQueue events;
+        events.push(noteOn(0, 45, 1));
+        for (int b = 0; b < 200; ++b)
+            network.process(events, kBlock);
+        BlockEventQueue release;
+        release.push(noteOff(0, 45, 1));
+        for (int b = 0; b < 20; ++b)
+            network.process(release, kBlock);
+
+        const float midRamp = network.damperEngagement(1);
+        INFO("engagement mid-ramp " << midRamp);
+        REQUIRE(midRamp > 0.05f);
+        REQUIRE(midRamp < 0.95f);
+
+        network.setNumStrings(1);
+        BlockEventQueue idle;
+        for (int b = 0; b < 10; ++b)
+            network.process(idle, kBlock);
+        REQUIRE(network.tapBuffers().numStrings() == 1); // the removed string really has left
+        REQUIRE(network.energyEstimate() == 0.0);
+        REQUIRE(network.damperEngagement(1) == 0.0f);
+    }
+
+    SECTION("reset() while the felt is coming down") {
+        StringNetwork<float> network;
+        configure(network, paramsWith(100.0f));
+        ringThenReleaseHalfway(network);
+
+        network.reset();
+        REQUIRE(network.damperEngagement(0) == 0.0f);
+        REQUIRE(network.damperLossDepth(0) == paramsWith(100.0f).damper.maxLoss);
+        REQUIRE(network.energyEstimate() == 0.0);
     }
 }
 
