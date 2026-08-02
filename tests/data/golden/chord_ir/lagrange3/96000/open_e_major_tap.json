@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
-  "dspSourceSha256": "b93a564153fdd00f948ab615eaa72e4bb4233c5763fa49083e354f9914059dc5",
-  "generatedUtc": "2026-08-01T11:51:46Z",
+  "dspSourceSha256": "57f7b7253b17cce13ab565473fb03a147ad1cdbe07340db0c827ebbd76adda52",
+  "generatedUtc": "2026-08-02T01:28:53Z",
   "dspStateVersion": 1,
   "sampleRate": 96000,
   "variant": "lagrange3",
@@ -15,8 +15,8 @@
   "lengthSamples": 288000,
   "atol": 1.0e-07,
   "partialHz": [0, 0, 0, 0, 0, 0, 0, 0],
-  "bandT60Seconds": [2.3651159, 1.7209148, 1.8280207, 1.9473266, 2.0213912, 2.3365619, 2.0447639, 1.4175785],
-  "attackRmsDbfs": -25.919922,
+  "bandT60Seconds": [2.3542813, 1.6814384, 1.5530075, 1.7673215, 1.8720552, 2.2741502, 2.0194833, 1.4431171],
+  "attackRmsDbfs": -25.968979,
   "bridgeBandT60Seconds": [],
   "bridgeAttackRmsDbfs": -300,
   "bridgeChecksum": ""

@@ -1007,9 +1007,14 @@ TEST_CASE("TUNING: the coupled residual is a function of three LIVE parameters",
     // against numbers.
     //
     // This case does NOT try to solve that. It measures, prints and pins the shape.
-    constexpr int kProbeNote = 45; // where the shipping default's residual is worst
+    constexpr int kProbeNote = 45; // where the shipping default's residual was worst before P2.7
     constexpr double kProbeRate = 48000.0;
     constexpr double kRenderSeconds = 5.0;
+    // What survives P2.7's analytic compensation at every point of the three sweeps below. Set from
+    // the measured worst (0.24 cents at full coupling) with ~2x headroom, and DELIBERATELY not the
+    // +/-2 cent gate: this bound is what says the compensation is working here, and a bound at the
+    // gate would be satisfied by a compensation that had quietly stopped doing most of its job.
+    constexpr double kCompensatedResidualCents = 0.5;
 
     auto residualCents = [&](float coupling, float resonanceHz, float damping) {
         StringNetworkParams params;
@@ -1086,16 +1091,56 @@ TEST_CASE("TUNING: the coupled residual is a function of three LIVE parameters",
     }
     std::cout << "\n";
 
-    // THE SHAPE, pinned. A note-indexed table can absorb a residual that depends on the note; these
-    // three assertions are the statement that this one does not depend only on the note.
-    REQUIRE(std::fabs(atZeroCoupling) < 0.5); // decoupled: the analytic solve is exact
-    REQUIRE(std::fabs(atFullCoupling) > 2.0 * std::fabs(atZeroCoupling) + 5.0); // and it grows with coupling
-    // ...and the SIGN REVERSES across resonance, which is the part no single correction curve
-    // indexed by note can represent.
-    REQUIRE(lowestResonance * highestResonance < 0.0);
-    std::cout << "  SHAPE: the residual is 0 when decoupled, grows with coupling, and REVERSES SIGN across the "
-                 "resonance sweep ("
-              << lowestResonance << " cents at 80 Hz vs " << highestResonance
-              << " cents at 2000 Hz) -- so it is not a function of the MIDI note alone, which is what a "
-                 "note-indexed calibration table can represent. Task P2.7 scope question, surfaced not solved.\n";
+    // *** THE SHAPE MOVED FROM THE RESIDUAL TO THE COMPENSATION AT TASK P2.7, AND THAT MOVE IS THE
+    // WHOLE OF WHAT THE TASK DID. ***
+    //
+    // Through P2.6 the assertions here were made on the measured RESIDUAL: 0 when decoupled, growing
+    // with coupling, reversing sign across the resonance sweep. That is the evidence ADR 0007 was
+    // written on, and the proof that a MIDI-note-indexed calibration table could not represent it.
+    // P2.7 replaced that table with analytic bridge phase-delay compensation, so the residual is now
+    // a hundredth of what it was and there is no shape left in it to pin.
+    //
+    // The shape did not go away; it moved into the COMPENSATION, which is precisely what "the
+    // correction is a function of the load rather than of the note" means. So the claims are
+    // re-pointed at the quantity that now carries them -- the phase delay the junction reports --
+    // and they are the same three claims, in the same order, about the same physics. Leaving them on
+    // the residual would have meant deleting ADR 0007's evidence the moment the ADR was implemented.
+    REQUIRE(std::fabs(atZeroCoupling) < kCompensatedResidualCents); // decoupled: nothing to correct
+    REQUIRE(std::fabs(atFullCoupling) < kCompensatedResidualCents); // ...and coupled, now, either
+    REQUIRE(std::fabs(lowestResonance) < kCompensatedResidualCents);
+    REQUIRE(std::fabs(highestResonance) < kCompensatedResidualCents);
+
+    const auto compensationSamples = [&](float coupling, float resonance, float damping) {
+        StringNetworkParams params;
+        params.bridge.couplingStrength = coupling;
+        params.bridge.resonanceHz = resonance;
+        params.bridge.damping = damping;
+        StringNetwork<float> probe;
+        probe.prepare(kProbeRate, 256, FractionalDelayKind::Lagrange3);
+        probe.setNumStrings(1);
+        probe.setParams(params);
+        probe.reset();
+        BlockEventQueue events;
+        events.push(noteOn(0, kProbeNote, 0));
+        probe.process(events, 256);
+        return probe.bridgeCompensationSamples(0);
+    };
+
+    const double compZero = compensationSamples(0.0f, defaults.resonanceHz, defaults.damping);
+    const double compFull = compensationSamples(1.0f, defaults.resonanceHz, defaults.damping);
+    const double compLowRes = compensationSamples(defaults.couplingStrength, 80.0f, defaults.damping);
+    const double compHighRes = compensationSamples(defaults.couplingStrength, 2000.0f, defaults.damping);
+
+    REQUIRE(compZero == 0.0);                                       // a rigid bridge has no phase to correct
+    REQUIRE(std::fabs(compFull) > 2.0 * std::fabs(compZero) + 1.0); // and it grows with coupling
+    REQUIRE(compLowRes * compHighRes < 0.0);                        // and it REVERSES SIGN across resonance
+    std::cout << "  SHAPE, now carried by the COMPENSATION rather than by the residual: bridge phase delay is exactly "
+              << compZero << " samples when decoupled, " << compFull
+              << " samples at full coupling, and REVERSES SIGN across the resonance sweep (" << compLowRes
+              << " samples at 80 Hz vs " << compHighRes
+              << " samples at 2000 Hz). The residual it leaves behind is "
+                 "under "
+              << kCompensatedResidualCents
+              << " cents at every point of the three sweeps above -- which is ADR 0007's evidence and Task P2.7's "
+                 "claim in one measurement.\n";
 }

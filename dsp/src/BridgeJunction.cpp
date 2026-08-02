@@ -298,6 +298,61 @@ template <typename SampleT> Sample64 BridgeJunction<SampleT>::storageEnergy() co
     return (massState_ * massState_ + springState_ * springState_) / scale;
 }
 
+template <typename SampleT>
+double BridgeJunction<SampleT>::reflectionPhaseDelaySamples(int portIndex, double frequencyHz,
+                                                            int numPorts) const noexcept {
+    // The rigid TARGET, not the rigid value in force: this reports where the load is going, for the
+    // same reason the element quantities below are read off the targets. See the header.
+    if (rigidTarget_)
+        return 0.0;
+    if (!(frequencyHz > 0.0) || !(sampleRate_ > 0.0))
+        return 0.0;
+
+    const int ports = std::clamp(numPorts, 1, kMaxStrings);
+    if (portIndex < 0 || portIndex >= ports)
+        return 0.0;
+
+    const double zm = rootZMTarget_ * rootZMTarget_;
+    const double zk = rootZKTarget_ * rootZKTarget_;
+    double sigma = stringImpedanceSum(ports) + zm + zk;
+    if (!lossBypassed_)
+        sigma += resistanceTarget_;
+    if (!(sigma > 0.0))
+        return 0.0;
+
+    const double zi = impedance_[static_cast<std::size_t>(portIndex)];
+    const double half = 0.5 * sigma;
+
+    // u = z^-1 = e^{-j w} and u^2 = e^{-j 2w}, written out rather than through std::complex so the
+    // whole evaluation is four trig calls and some multiplies.
+    const double w = 2.0 * kPi * frequencyHz / sampleRate_;
+    const double cu = std::cos(w);
+    const double su = -std::sin(w);
+    const double c2 = cu * cu - su * su;
+    const double s2 = 2.0 * cu * su;
+
+    const double d1 = zk - zm;
+    const double d2 = zm + zk - half;
+    const double denRe = half + d1 * cu + d2 * c2;
+    const double denIm = d1 * su + d2 * s2;
+
+    const double n0 = zi - half;
+    const double n1 = zm - zk;
+    const double n2 = -(zi + zm + zk - half);
+    const double numRe = n0 + n1 * cu + n2 * c2;
+    const double numIm = n1 * su + n2 * s2;
+
+    // arg(H) for H = -num/den, taken as one atan2 of the complex quotient's numerator against a
+    // POSITIVE common denominator |den|^2 -- so this is the principal value and there is no branch
+    // to wrap. (|tau * w| is far under pi everywhere in the shipping range; the largest possible
+    // magnitude is bounded by the peak mobility ratio, kBridgeMaxMobilityRatio.)
+    const double hRe = -numRe * denRe - numIm * denIm;
+    const double hIm = numRe * denIm - numIm * denRe;
+    if (hRe == 0.0 && hIm == 0.0)
+        return 0.0; // a reflectance zero: no phase to speak of, and the solver's clamp covers it
+    return -std::atan2(hIm, hRe) / w;
+}
+
 template <typename SampleT> double BridgeJunction<SampleT>::instantaneousMobility() const noexcept {
     if (rigid_)
         return 0.0;

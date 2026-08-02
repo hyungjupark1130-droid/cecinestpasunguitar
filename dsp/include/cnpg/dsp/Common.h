@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
+
 // cnpg::dsp -- unified module contract, Sample aliases, and design-envelope constants.
 // See docs/plan.md section 2.1 (this file is that draft, transcribed verbatim). Every
-// public header under dsp/include/cnpg/dsp/ is 100% JUCE-free; this file has zero
-// includes because it needs none.
+// public header under dsp/include/cnpg/dsp/ is 100% JUCE-free.
 
 namespace cnpg::dsp {
 
@@ -31,6 +33,26 @@ inline constexpr int kMaxOversampling = 8;          // Oversampler factor upper 
 // just a different number here. cnpg::dsp::pitchWheelToSemitones maps the MIDI pitch wheel onto
 // it and StringNetworkParams::pitchBendSemitones carries it.
 inline constexpr float kPitchBendRangeSemitones = 2.0f;
+
+// Default open-string tuning. Slots 0..5 are EADGBE (docs/plan.md's {40, 45, 50, 55, 59, 64});
+// slots 6 and 7 carry the low B and F# an extended-range 7- and 8-string instrument adds, so the
+// full default set IS the standard 8-string tuning F#1 B1 E2 A2 D3 G3 B3 E4 -- written with the
+// six-string spelling first, because slots 0..5 have to stay EADGBE for the shipped 6-string
+// default.
+//
+// IT LIVES HERE, IN THE SHARED HEADER, BECAUSE TWO MODULES NEED THE SAME ANSWER (Task P2.7).
+// NoteAllocator has always known the open tuning -- it is what fingering distance is measured from.
+// StringNetwork now needs it too, for a different reason: a string nobody has played has to be
+// tuned to SOMETHING, and through P2.6 that something was kMinMidiNote for every string. Six
+// untouched strings all at A0 (27.5 Hz) is not an instrument, and it is worse than arbitrary:
+// A0's harmonic series contains 55, 82.5, 110, 137.5, 165, 192.5 and 220 Hz, i.e. very nearly
+// everything the other strings play, so an UNPLAYED string was a BETTER sympathetic resonator
+// than a real open string. Measured consequence: the P2.6 sympathetic-truncation figure read
+// 6.63 dB above P2.4's for exactly this reason (tests/dsp/RetriggerModeTests.cpp).
+//
+// A duplicated literal in the two headers would let the two answers drift apart silently, and
+// "which tuning is the instrument at rest" is not a question that may have two answers.
+inline constexpr std::array<std::uint8_t, kMaxStrings> kDefaultOpenStringMidiNote{40, 45, 50, 55, 59, 64, 35, 30};
 
 // Module lifecycle convention (informal concept; every module in dsp/ conforms):
 //   void prepare(double sampleRate, int maxBlockSize);   // message thread, may allocate

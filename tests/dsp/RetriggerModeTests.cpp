@@ -858,11 +858,17 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     //      fails when a known defect is repaired is an assertion that encodes the defect.
     //
     // What IS asserted instead is the precondition the measurement actually depends on and which is
-    // invariant under both of those moves: string 1 has never been played, so it rests at
-    // kMinMidiNote. That is a fact about prepare() and about midiNote_ being written only by note
-    // events -- no coupling value enters it -- and it is the fact that makes the number surprising.
-    // When P2.7 gives strings a rest pitch, this assertion is the one that must be updated, and it
-    // will be updated by the task that changed the thing it names.
+    // invariant under both of those moves: string 1 has never been played, so it rests at its OWN
+    // REST PITCH. That is a fact about prepare() and about midiNote_ being written only by note
+    // events and by clearStringState() -- no coupling value enters it -- and it is the fact that
+    // makes the number what it is.
+    //
+    // *** UPDATED AT P2.7, BY THE TASK THAT CHANGED THE THING IT NAMES, exactly as the previous
+    // revision of this comment said it would be. *** The pitch it asserts was kMinMidiNote (A0,
+    // 27.5 Hz) and is now the string's open tuning (StringNetworkParams::PerString::restMidiNote;
+    // string 1's default is A2, 110 Hz). The assertion is the SAME assertion -- "an untouched string
+    // is where prepare() left it, in cents" -- re-pointed at the value that is now correct, and it
+    // is what stops the discarded level below being attributed to the wrong cause.
     constexpr double kP24SympatheticPeakDbfs = -53.5;
 
     StringNetworkParams params = paramsFor(RetriggerMode::Physical, StringNetworkParams{}.bridge.couplingStrength);
@@ -887,10 +893,16 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     // note being played than a real open string would be, and therefore why the discarded level
     // below reads high. Checked in cents so it is a statement about pitch rather than about float
     // formatting.
-    const double restPitchHz = cnpg::test::midiNoteToHz(cnpg::dsp::kMinMidiNote);
+    const int restNote = static_cast<int>(params.perString[1].restMidiNote);
+    const double restPitchHz = cnpg::test::midiNoteToHz(restNote);
     const double restCentsOff = 1200.0 * std::log2(static_cast<double>(network.stringF0Hz(1)) / restPitchHz);
-    INFO("string 1 rest pitch " << network.stringF0Hz(1) << " Hz vs kMinMidiNote " << restPitchHz << " Hz");
+    INFO("string 1 rest pitch " << network.stringF0Hz(1) << " Hz vs restMidiNote " << restNote << " (" << restPitchHz
+                                << " Hz)");
     REQUIRE(std::fabs(restCentsOff) < 1.0);
+    // ...and it is NOT kMinMidiNote any more, asserted rather than assumed: an untouched string
+    // resting at A0 is the defect P2.7 fixed, and a regression that reinstated it would otherwise
+    // satisfy the line above only if restMidiNote regressed with it.
+    REQUIRE(restNote != cnpg::dsp::kMinMidiNote);
     const std::size_t preWindow = static_cast<std::size_t>(10 * kBlock);
     const float truncatedPeak = peakOf(sympathetic, sympathetic.size() - preWindow, sympathetic.size());
     REQUIRE(truncatedPeak > 0.0f);
@@ -917,25 +929,33 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
               << " dB HIGHER -- a property of the DRIVEN string's rest tuning, not of the truncation, and both "
                  "numbers scale with a couplingStrength ADR 0007 D4 leaves provisional\n";
 
-    // IT EXCEEDS P2.4'S FIGURE, AND THAT IS REPORTED RATHER THAN ABSORBED. P2.4 measured a unison
-    // PAIR -- two strings dialled to nearly the same pitch -- which couples through one shared
-    // partial. Here string 1 has never been played, so it still carries the pitch prepare() left it
-    // at, kMinMidiNote (A0, 27.5 Hz), and A0's harmonic series contains 110 Hz exactly, as its
-    // fourth partial. An untouched string is therefore a BETTER sympathetic resonator for the note
-    // being played than a real open string would be, and it is the same for every string and every
-    // note, because they are all at A0 until somebody plays them. The rest-pitch assertion above is
-    // what pins that explanation; the dB figure is the consequence, and consequences of provisional
-    // defaults are printed, not gated.
+    // *** THE P2.6 FINDING, AND ITS P2.7 RESOLUTION, KEPT TOGETHER SO THE NUMBER STAYS READABLE. ***
     //
-    // *** FINDING FOR P2.7, not fixed here: an untouched string should rest at its OPEN TUNING, not
-    // at A0. *** NoteAllocatorParams now knows what that tuning is (openStringMidiNote), but
-    // StringNetworkParams has nowhere to put it -- midiNote_ is only ever written by a note event --
-    // so giving strings a rest pitch is a StringNetworkParams change that moves the coupled chord
-    // goldens. It belongs at P2.7, the task already regenerating for tuning, and it must land BEFORE
-    // the P2.8 listening pass rather than at it: P2.8 judges how much sympathetic resonance the
-    // instrument should have, and it cannot judge that on an instrument whose idle strings are all
-    // tuned to A0. (This comment read "P2.7 / P2.8" until fixes wave 2 tightened it for exactly that
-    // reason.) Recorded here with the measurement rather than left to be rediscovered.
+    // At P2.6 this line read 6.63 dB ABOVE P2.4's figure and the excess was explained, not absorbed:
+    // string 1 had never been played, so it carried the pitch prepare() left it at -- kMinMidiNote,
+    // A0, 27.5 Hz -- and A0's harmonic series contains 110 Hz exactly, as its fourth partial. An
+    // untouched string was therefore a BETTER sympathetic resonator for the note being played than a
+    // real open string would be, and identically so for every string and every note, because they
+    // were all at A0 until somebody played them.
+    //
+    // P2.7 gave strings a rest pitch (StringNetworkParams::PerString::restMidiNote), so string 1 now
+    // sits at its open A2 -- and the excess BARELY MOVED, from 6.63 dB to 6.39 dB. That is not the
+    // fix failing; it is the fix changing what the number means, and the distinction is worth the
+    // four lines it takes to write down.
+    //
+    // kOldNote is MIDI 45, and MIDI 45 IS string 1's open pitch (A2, the second entry of
+    // kDefaultOpenStringMidiNote). So the configuration that used to be "a plucked A2 next to an
+    // accidental A0 comb" is now "a plucked A2 next to an open A string" -- a TRUE UNISON PAIR, the
+    // strongest sympathetic configuration an instrument has, and a completely ordinary thing for a
+    // guitarist to do. The level is high for a real reason now instead of an artificial one.
+    //
+    // What is left of the difference from ADR 0006's -53.5 dBFS is a difference of NOTE and of
+    // measurement window, not of tuning: ADR 0006 measured MIDI 53, sitting on the 180 Hz bridge
+    // resonance, peak within 1 s; this measures MIDI 45 in a 27 ms window ~0.8 s in. Still PRINTED
+    // rather than gated, for the reason that has not changed: both numbers scale with a
+    // couplingStrength that ADR 0007 D4 leaves provisional until the P2.8 listening pass, and an
+    // assertion on it would break when the default moves, in a task with nothing to do with
+    // retrigger semantics.
 
     // THE CLAIM THIS CASE GATES: the truncation does not register as a click. It has a genuine A/B
     // control pair -- the SAME attack, on the SAME string, of the SAME instrument, differing only in

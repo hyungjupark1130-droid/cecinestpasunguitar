@@ -2,21 +2,22 @@
 #
 # cnpg_tests (Catch2 v3 + CTest, catch_discover_tests) lands here starting Task P0.3
 # alongside the first [contract] test. Links cnpg_dsp + Catch2::Catch2WithMain only --
-# no JUCE, per the naming registry. cnpg_bench (P1.10) and cnpg_render (P1.11) have landed;
-# cnpg_calibrate lands in P2.
+# no JUCE, per the naming registry. cnpg_bench (P1.10), cnpg_render (P1.11) and
+# cnpg_calibrate (P2.7) have all landed.
 #
-# cnpg_bench (Task P1.10) and cnpg_render (Task P1.11) live in their own subdirectories with their
-# own CMakeLists.txt (the naming registry's file tree, docs/plan.md section 2 line 177-178) since,
-# unlike cnpg_tests, they link cnpg_dsp only -- no Catch2 -- and each needs its own
-# target_compile_definitions for a configure-time git commit.
+# cnpg_bench, cnpg_render and cnpg_calibrate live in their own subdirectories with their own
+# CMakeLists.txt (the naming registry's file tree, docs/plan.md section 2 line 177-178) since, unlike
+# cnpg_tests, they link cnpg_dsp only -- no Catch2 -- and each has its own target-level configuration.
 
-add_subdirectory(bench)  # cnpg_bench -- Task P1.10
-add_subdirectory(render) # cnpg_render -- Task P1.11
+add_subdirectory(bench)     # cnpg_bench    -- Task P1.10
+add_subdirectory(render)    # cnpg_render   -- Task P1.11
+add_subdirectory(calibrate) # cnpg_calibrate -- Task P2.7
 
 add_executable(cnpg_tests
     dsp/AliasingGateTests.cpp
     dsp/BridgeEnergyTierOneTests.cpp
     dsp/BridgePortContractTests.cpp
+    dsp/BridgeTuningClickTests.cpp
     dsp/CoupledStringsTests.cpp
     dsp/DamperEnergyTests.cpp
     dsp/DamperFeltTimeTests.cpp
@@ -46,6 +47,7 @@ add_executable(cnpg_tests
     dsp/StringNetworkTests.cpp
     dsp/StringNetworkScaleTests.cpp
     dsp/TriodeStageTests.cpp
+    dsp/TuningAccuracyTests.cpp
     dsp/WaveguideStringTests.cpp
     dsp/WaveguideStringRegressionTests.cpp
     dsp/WaveguideStringTuningTests.cpp

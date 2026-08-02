@@ -87,13 +87,10 @@ inline constexpr int kFingeringFretSpan = 24;
 inline constexpr std::uint8_t kSustainPedalController = 64;
 inline constexpr std::uint8_t kSustainPedalDownThreshold = 64;
 
-// Default open-string tuning. Slots 0..5 are EADGBE (the plan's {40, 45, 50, 55, 59, 64}); slots 6
-// and 7 carry the low B and F# an extended-range 7- and 8-string instrument adds, so the full
-// default set IS the standard 8-string tuning F#1 B1 E2 A2 D3 G3 B3 E4 -- just written with the
-// six-string spelling first, because slots 0..5 have to stay EADGBE for the shipped 6-string
-// default. Nothing in this class reads the array in pitch order: only fret distance and
-// least-recently-used decide, and neither cares which slot a note came from.
-inline constexpr std::array<std::uint8_t, kMaxStrings> kDefaultOpenStringMidiNote{40, 45, 50, 55, 59, 64, 35, 30};
+// The default open-string tuning MOVED TO Common.h at Task P2.7, because StringNetwork needs the
+// same answer for a string's REST pitch and two copies of a tuning is two tunings. Nothing in this
+// class reads the array in pitch order: only fret distance and least-recently-used decide, and
+// neither cares which slot a note came from. (cnpg::dsp::kDefaultOpenStringMidiNote.)
 
 namespace detail {
 

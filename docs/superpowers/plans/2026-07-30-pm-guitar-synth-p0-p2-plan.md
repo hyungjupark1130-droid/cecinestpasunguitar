@@ -1446,6 +1446,36 @@ Manual: in Ableton Live at 48 kHz and again at 96 kHz, play against a reference 
 - [ ] `cnpg_calibrate` retained and re-scoped to the **verification harness** over the note × bridge-parameter grid (plus the optional residual trim). Its determinism, CSV/header agreement, and no-audio-thread-allocation criteria above apply to whatever it emits.
 - [ ] **`couplingStrength` is not confirmed here.** It remains provisional per ADR 0007 D4; this task must not record it as the shipping default.
 
+**Task P2.7 outcome (2026-08-01) -- what landed against each criterion.** Full detail in ADR 0007 D7-D9
+and in `.superpowers/.../task-P2.7-report.md`.
+
+- [x] **`[tuning]` grid gate.** MIDI 21-96 x {44.1, 48, 96} kHz at six grid points over the provisional
+  Normal range (four coupled box corners, the decoupled control, the shipping default). Worst 0.770
+  cents; 0.060 at the shipping default, against 4.90 before the compensation. MIDI 97-108 is
+  report-only under a widened +/-4 cent bound, with the attribution measured and asserted (the
+  DECOUPLED control is worse there than the coupled one -- it is the P1 short-loop fractional-delay
+  solve, not the bridge).
+- [x] **Normal range derived** (ADR 0007 D7): `couplingStrength` 0.00-0.35, `bridgeResonanceHz`
+  20-330 Hz, `bridgeDamping` 0.15-1.00. Provisional; P2.8 confirms or revises.
+- [x] **Extended (Effect) range declared** in ADR 0007 D7 and in `BridgeTuning.h`: everything outside
+  the box stays available with no tuning guarantee.
+- [x] **Solver contract declared and tested.** Tolerance 0.25 cents (8x tighter than the gate), probe
+  +/-2 cents, 8 iterations per direction, clamp 0.25 of the loop period. The fallback COMMITS the
+  one-shot compensation rather than discarding it (a discarding fallback would be discontinuous in
+  the parameters). Driven into non-convergence with two shipped sliders at their stops -- coupling
+  1.0, damping 0.01 -- and the fallback asserted, including continuity across its own boundary.
+- [x] **Live-parameter `[contract]` gate**: each of the three parameters moved under a ringing string,
+  level-placed, with closure on the phase axis and a level-placed hard-cut control. Click excess
+  -0.057 / -0.033 / +0.115 dB against a 3 dB criterion, controls at 29.8-30.4 dB. Pitch: overshoot 0,
+  settled spread 0, and the solved target does not move across 1271 re-solves.
+- [x] **Steep phase-slope region measured EARLY** and mapped before the grid gate was finalised; it is
+  what cut the Normal range's resonance and damping bounds.
+- [x] **`cnpg_calibrate` retained and re-scoped** to the verification harness: 5850 grid points over
+  (note x rate x admittance), CSV per rate, deterministic. NO generated header, because there is no
+  table -- see the tool's own file comment. The residual trim is NOT implemented, and that is a
+  measurement: 0.06 cents at the shipping admittance leaves no systematic error to trim.
+- [x] **`couplingStrength` NOT confirmed here.** It remains provisional per ADR 0007 D4.
+
 ---
 
 ### P2.8 — Corpus expansion with mandated abuse cases + full P2 listening pass
@@ -1677,6 +1707,45 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 > answer, the range over which the bridge is a bridge rather than an effect. ADR 0007 records two further open
 > questions (the bound for extreme settings, and whether the analytic correction holds near the load resonance where
 > the phase slope is steepest — the risk item, to be measured early rather than discovered at the gate).
+
+> **Amendment (Task P2.7, 2026-08-01) -- the mechanism landed, and it is a CLOSED FORM. The Normal
+> and Extended ranges are now DECLARED (ADR 0007 D7-D9).**
+>
+> `IBridgePort` gained `reflectionPhaseDelaySamples(portIndex, frequencyHz, numPorts)`: the PHASE
+> delay the port's own self-reflectance adds to a string's round-trip loop, in closed form from the
+> same wave-digital adaptor `scatter()` runs. `StringNetwork` solves it per string on parameter
+> change and on note change -- never per sample -- through `cnpg::dsp::solveBridgeTuning`
+> (`dsp/include/cnpg/dsp/BridgeTuning.h`), and pushes it into `WaveguideString` as a smoother TARGET,
+> so it glides on the same 8 ms one-pole the pitch wheel uses.
+>
+> **Measured.** The residual over MIDI 33-96 at all three rates in the shipping coupled topology goes
+> from **4.90 cents to 0.060**. Against the same instrument with that one method returning 0 -- a
+> `PhaseBlindBridgePort` forwarding every other call to a real `BridgeJunction` -- ADR 0007's whole
+> seven-point table is reproduced to **0.003 cents**, which is what makes the gate's teeth
+> demonstrable rather than asserted.
+>
+> **The gated note band moves in BOTH directions, on measurement.** MIDI 21-32 was report-only in P1
+> and is now GATED (worst 0.001 cents). MIDI 97-108 stays report-only under a widened +/-4 cent sanity
+> bound, because the DECOUPLED control on the identical render is *worse* there than the coupled one
+> (MIDI 108 / 48 kHz: -0.262 coupled vs -1.552 decoupled) and the whole band reads 0.000 at 96 kHz --
+> the limit is the P1 short-loop fractional-delay solve, not the bridge. The gate asserts that
+> attribution rather than stating it.
+>
+> **The provisional Normal range**, derived from measurement per ADR 0007 D5 and recorded in D7:
+> `couplingStrength` 0.00-0.35, `bridgeResonanceHz` 20-330 Hz, `bridgeDamping` 0.15-1.00. Worst
+> |error| inside it: **0.770 cents** over MIDI 21-96 x 3 rates x 6 grid points. Everything outside is
+> the **Extended (Effect) range** and carries no tuning guarantee. **P2.8 confirms or revises both,
+> together with the `couplingStrength` default, which this task does NOT settle.**
+>
+> **The solve is a closed form and the fixed point is about UNIQUENESS** (ADR 0007 D9). Evaluating the
+> port's phase delay at the target makes the target exactly a root of the loop equation, so the value
+> needs no iteration -- measured, one iteration at every note. What the iteration establishes is that
+> the root is isolated: near a sharp bridge resonance `|dPhi/df|` approaches 1, the loop acquires
+> three phase-zero crossings instead of one, and the pitch that comes out is not the one solved for.
+> The declared fallback COMMITS the one-shot compensation anyway rather than discarding it, because a
+> fallback that reverted to 0 would make the correction discontinuous in the parameters and install a
+> ~14-cent step at a boundary the user cannot see. Reached with two shipped sliders at their stops
+> (coupling 1.0, damping 0.01), and gated continuous across it (worst step 0.0095 samples).
 
 ## 4.6 Denormal robustness — `[denormal]`
 

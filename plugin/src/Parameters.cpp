@@ -89,6 +89,29 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     // exposed over exactly the window BridgeJunction validates, so the knob cannot ask for a
     // setting the module refuses -- and the resonance range is expressed against the shipping
     // design envelope rather than against the Nyquist ceiling, which moves with the sample rate.
+    //
+    // ---- THE NORMAL RANGE, AND WHERE THESE SLIDERS LEAVE IT (Task P2.7; ADR 0007 D7) ------------
+    //
+    // The +/-2 cent tuning guarantee binds over the PROVISIONAL NORMAL RANGE, which is narrower than
+    // every one of the three ranges below:
+    //
+    //     Bridge Coupling    guaranteed 0.00 .. kBridgeNormalCouplingMax    (slider 0 .. 1)
+    //     Bridge Resonance   guaranteed  kBridgeNormalResonanceMinHz .. kBridgeNormalResonanceMaxHz
+    //                                                                       (slider 20 .. 2000 Hz)
+    //     Bridge Damping     guaranteed  kBridgeNormalDampingMin .. kBridgeNormalDampingMax
+    //                                                                       (slider 0.01 .. 4.0)
+    //
+    // Outside it is the **Extended (Effect) range**: every setting stays reachable and stays passive,
+    // and the instrument simply stops promising to be in tune there -- a radically compliant or
+    // radically sharp bridge SHOULD pull pitch (ADR 0007 D3). The ranges below are DELIBERATELY NOT
+    // narrowed to the guarantee: narrowing them would delete the effect range rather than declare it,
+    // and ADR 0004 ships the chamber as a continuum. What D5 requires is that the boundary be
+    // declared rather than discovered, so it is named here, on the parameter surface, in the
+    // constants dsp/include/cnpg/dsp/BridgeJunction.h derives and carries -- and a UI that draws a
+    // guaranteed-range marker on these three sliders has exactly one place to read it from.
+    //
+    // Both the range and the coupling DEFAULT are provisional until the P2.8 listening pass, which
+    // settles them together (ADR 0007 D4/D5).
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::bridgeCoupling), "Bridge Coupling",
                                                            unitRange,
                                                            cnpg::dsp::BridgeAdmittanceParams{}.couplingStrength));

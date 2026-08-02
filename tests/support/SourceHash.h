@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 // SourceHash -- the content hash that gives the golden sidecars honest, verifiable provenance
 // (docs/plan.md section 4.3 "generator git commit"; tests/data/golden/README.md documents the
@@ -32,6 +33,34 @@ namespace cnpg::test {
 // characters. Empty if the directories cannot be read. Message-thread/test use: it walks the
 // source tree and reads every file.
 std::string dspSourceHash();
+
+// The same recipe over an explicit list of repository-relative roots (directories or single files),
+// so a caller that depends on more than dsp/ can name what it depends on. Added at Task P2.7 for
+// cnpg_render; see renderSourceHash(). Empty if any named root cannot be read.
+std::string sourceHashOf(const std::vector<std::string>& repoRelativeRoots);
+
+// *** THE DIGEST cnpg_render STAMPS INTO ITS FILENAMES (Task P2.7, carry-forward C2). ***
+//
+// It replaces a configure-time `git rev-parse --short HEAD`, and the replacement is not cosmetic.
+// docs/plan.md section 4.8 requires "render filenames embed corpus version + git hash so listening
+// notes are attributable", and the configure-time value could not do that: it is resolved when CMake
+// last ran, not when the binary was built or run. Observed on this repository -- a build/ tree
+// configured at 77b0430 produced renders from the code at 1ccfcb1 and filed them as
+// `..._cv1_g77b0430.wav`, three commits stale, so TWO DIFFERENT CODE STATES PRODUCED IDENTICAL
+// FILENAMES. That is exactly the confusion the field exists to prevent, and P2.8 is the listening
+// pass whose notes depend on it. tests/render/CMakeLists.txt claimed the configure-time hash
+// "necessarily names the PARENT of the commit that lands the binary"; it names neither reliably.
+//
+// A content hash computed at RENDER time has none of that problem, for the same reason it fixed the
+// golden sidecars: the bytes it covers are the bytes that produced the audio, so the claim is
+// self-consistent and checkable from any checkout, with no repository history and no git at all.
+//
+// The roots are what a render is actually a function of: the physics (dsp/include, dsp/src), the
+// chain assembly the renderer shares with cnpg_bench and cnpg_tests (tests/support/P1Chain.h), and
+// the renderer itself (tests/render). It deliberately does NOT cover the corpus -- the corpus has its
+// own version field in the same filename, and conflating the two would change every render's name
+// whenever a phrase was added.
+std::string renderSourceHash();
 
 // SHA-256 of an arbitrary byte string, as 64 lowercase hex characters. Exposed so the provenance
 // case can test the primitive against published vectors rather than trusting the digests it

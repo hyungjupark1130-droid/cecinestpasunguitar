@@ -157,9 +157,98 @@ item, and discovering it at the gate is the failure mode to avoid. A **residual 
 *only if* the analytic solution leaves a small systematic error there; it is a fallback, not part
 of the design.
 
+### D7 — the provisional Normal range, DERIVED (Task P2.7, 2026-08-01)
+
+*Added by Task P2.7, which executed D5's definition against measurement. Everything here is
+**provisional** and is confirmed or revised by the P2.8 listening pass, per D5.*
+
+| parameter | Normal range | shipped slider |
+|---|---|---|
+| `couplingStrength` | **0.00 – 0.35** | 0 – 1 |
+| `bridgeResonanceHz` | **20 – 330 Hz** | 20 – 2000 Hz |
+| `bridgeDamping` | **0.15 – 1.00** | 0.01 – 4.0 |
+
+**Everything outside that box is the Extended (Effect) range and carries NO TUNING GUARANTEE.** It
+remains fully available; what it loses is the ±2-cent promise, and that is exactly D3's bounded
+physical detuning — a radically compliant or radically sharp bridge *should* pull pitch.
+
+**Measured worst |error| inside the box: 0.770 cents**, over MIDI 21–96 at 44.1/48/96 kHz at each of
+six grid points (the four coupled corners of the box, the decoupled control, and the shipping
+default) — 2.6× inside the criterion. At the shipping default it is 0.060 cents.
+
+**What binds each face of the box, and it is not the same thing on each:**
+
+- The **coupling ceiling** and the **resonance ceiling** trade against each other; the boundary is a
+  curved surface and the box is the largest one inside it. Measured worst over the three notes
+  nearest each resonance (48 kHz, worst over damping 0.15–1.0):
+
+  | | 20 Hz | 60 | 110 | 180 | 250 | 330 | 400 | 500 |
+  |---|---|---|---|---|---|---|---|---|
+  | coupling 0.20 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.13 |
+  | coupling 0.35 | 0.18 | 0.20 | 0.20 | 0.21 | 0.33 | 0.63 | 0.63 | 7.11 |
+  | coupling 0.50 | 0.38 | 0.41 | 0.58 | 1.31 | 12.06 | 9.96 | 15.79 | 79.9 |
+  | coupling 0.60 | 0.56 | 0.80 | 3.57 | 4.86 | 17.26 | 11.24 | 79.12 | 79.3 |
+
+  Readings at 79–80 are the estimator's ±80-cent search boundary: the fundamental is no longer
+  anywhere near where it was solved for.
+- The **damping ceiling of 1.00** is a separate mechanism and was found at the grid gate rather than
+  in the map above. At damping ≥ 2 the load is dashpot-dominated over a wide band and the worst note
+  moves to the TOP of the range: measured 2.92 / 4.93 / 7.38 cents at damping 2 / 3 / 4 (coupling
+  0.35, resonance 180 Hz, 44.1 kHz, worst over MIDI 21–96, worst note 85–95). At damping 1.0 the same
+  sweep reads 0.03.
+- The **damping floor of 0.15** is where the margin becomes comfortable rather than where the gate
+  breaks (0.05 still reads 1.39 cents at resonance 330, i.e. inside the criterion with 1.4× headroom).
+- The **coupling ceiling of 0.35 is a measured boundary that coincides with the provisional default,
+  not the default wearing a different hat.** It is written as a literal in the gate, never as
+  `BridgeAdmittanceParams{}.couplingStrength`, and the gate additionally asserts that the shipping
+  default lies inside the range — so if P2.8 raises the default past the boundary the gate fails and
+  the range must be re-derived, which is what D5 already schedules that session to do. D4's
+  expectation is that P2.8 compares *lower* values, all of which are inside.
+
+**Criterion (2) — solver convergence — never fires inside the box.** The contraction ratio is
+μ/(2πζ) with μ = `couplingStrength × kBridgeMaxMobilityRatio`; at coupling 0.35 it stays under 0.28
+at every admissible damping and the solver converges in one iteration at every one of the 1368
+gated points. The convergence boundary was measured at damping **0.0197** at coupling 1.0 — i.e. it
+is reachable, but only in the Extended range, with two shipped sliders at their stops.
+
+### D8 — the gated note band moves in both directions (Task P2.7)
+
+§4.5 assigned "the full 88-note (21–108) × 3-rate ±2-cent assertion" to this task. P2.7 **widens** it
+downward and **narrows** it upward, both on measurement:
+
+- **MIDI 21–32 is now GATED** (it was report-only through P1). Worst |error| at the shipping
+  admittance across all three rates: **0.001 cents**.
+- **MIDI 97–108 stays report-only**, under a widened ±4-cent sanity bound, because what limits it is
+  not the bridge. At 48 kHz the DECOUPLED control on the identical render is *worse* than the coupled
+  one — MIDI 108 reads −0.262 cents coupled against −1.552 decoupled — and at 96 kHz every note in
+  the band reads 0.000 in both arms. The cause is the loop being ~13 samples long at MIDI 105 /
+  48 kHz, where the integer rail read and the interpolator's admissible range stop tiling the reals
+  finely enough: a P1 fractional-delay property (ADR 0002), not one a bridge compensation can reach.
+  The gate asserts that attribution rather than merely stating it.
+
+### D9 — the solve is a closed form; the fixed point is about UNIQUENESS, not about the value
+
+*A correction to this ADR's own D1/D6 framing, recorded because the difference is load-bearing.*
+
+D6 says "P2.7 must iterate (or Newton-solve) to convergence". The derivation says otherwise for the
+value: a waveguide loop resonates where its round-trip phase delay equals `fs/f`, the loop-length
+solve chooses the rail span so that this holds **at the target**, and adding `tau_port(f_target)` to
+that sum makes `f_target` exactly a root. **One closed-form evaluation, no iteration.** Measured: the
+solver reports one iteration at every note at the shipping admittance, and the residual it leaves is
+0.060 cents against 4.90 uncompensated.
+
+The self-reference D6 anticipated is real but it is about **uniqueness**. Given a committed
+compensation, the frequency the string sings at is the fixed point of
+`Phi(f) = fs / (fs/f_target − tau_c + tau_port(f))`, whose derivative is `(f²/fs)·|dtau_port/df|`.
+Where that approaches 1 the root stops being isolated — the string's fundamental and the bridge mode
+enter an avoided crossing, the loop acquires three phase-zero crossings instead of one, and the pitch
+that comes out is not the pitch that was solved for. **That** is what the iteration tests, and it is
+the same thing as D6's "steep phase-slope region". The solver therefore produces the value in closed
+form and spends its iterations establishing that the value is one the instrument can hold.
+
 ## Open questions this ADR does not settle
 
 None outstanding. The three original open questions were answered by the author on the same day and
-are recorded above as D5 and D6. What remains is not a question but a scheduled confirmation: the
-**provisional** Normal range and the **provisional** `couplingStrength` default are both settled by
-ear at P2.8.
+are recorded above as D5 and D6; D7–D9 record what Task P2.7 measured against them. What remains is
+not a question but a scheduled confirmation: the **provisional** Normal range (D7) and the
+**provisional** `couplingStrength` default are both settled by ear at P2.8.

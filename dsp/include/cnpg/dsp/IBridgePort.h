@@ -97,6 +97,36 @@ template <typename SampleT> class IBridgePort {
     // the functional makes the functional fluctuate by however much energy is sloshing in and out
     // of it, which is orders of magnitude above the 1e-9 bound.
     virtual Sample64 storageEnergy() const noexcept = 0;
+
+    // ---- THE TUNING SURFACE (Task P2.7, docs/decisions/0007) -----------------------------------
+    //
+    // The PHASE delay, in samples, that this port's own self-reflectance adds to the round-trip
+    // loop of the string on `portIndex`, evaluated at `frequencyHz`, when `numPorts` string ports
+    // are loading the junction. Sign convention: POSITIVE lengthens the loop, i.e. the string sings
+    // FLAT by that many samples of loop period.
+    //
+    // PHASE delay, never group delay -- the P1.4 ruling (dsp/include/cnpg/dsp/WaveguideString.h's
+    // "TUNING" header), applied one element further down the loop. A resonance of the loop is where
+    // the round-trip PHASE is a multiple of 2*pi, so the quantity that decides pitch is
+    // -arg(H(e^jw))/w and nothing else; group delay is a different number and using it misses the
+    // gate. This is what replaces P2.7's originally planned per-MIDI-note calibration table, which
+    // ADR 0007 withdrew: the residual is a function of three LIVE parameters and reverses sign
+    // across the resonance, and a one-dimensional note-indexed table structurally cannot carry that.
+    //
+    // WHY IT IS ON THE INTERFACE AND NOT ON BridgeJunction. StringNetwork holds exactly one
+    // IBridgePort& and "cannot tell implementations apart" -- the same argument that put
+    // setAdmittance here. A network that had to know which implementation it was holding in order
+    // to tune its strings would be the fail-open wiring this seam exists to remove, and the
+    // fallback bus of Q17 would silently ship a detuned instrument.
+    //
+    // NOT realtime-path work. StringNetwork calls this on parameter change and on note change --
+    // O(1) per string per event -- never per sample, per ADR 0007 D6 ("the fixed point runs outside
+    // the audio path"). It must be noexcept, must not allocate, and must return a value that is
+    // finite or the solver's fallback takes over (see BridgeTuning.h).
+    //
+    // Returning 0 is the honest answer for any port whose reflectance is a real constant (a rigid
+    // -1, or any frequency-independent scaling of it): a real reflectance has zero phase.
+    virtual double reflectionPhaseDelaySamples(int portIndex, double frequencyHz, int numPorts) const noexcept = 0;
 };
 
 // The trivial passive reflective termination P1 runs against: a rigid, lossless, inverting
@@ -142,6 +172,17 @@ template <typename SampleT> class RigidBridgeTermination final : public IBridgeP
     // Memoryless: it stores nothing, ever.
     bool isQuiescent() const noexcept override { return true; }
     Sample64 storageEnergy() const noexcept override { return 0.0; }
+
+    // r = -1 is a REAL reflectance, so its phase is 0 at every frequency and it costs the loop no
+    // tuning at all. That is not an approximation and not a stub: it is the exact closed form for
+    // this termination, and it is why P1's analytic compensation was exact (0.00028 cents) before a
+    // load existed. Every argument is unused for exactly that reason.
+    double reflectionPhaseDelaySamples(int portIndex, double frequencyHz, int numPorts) const noexcept override {
+        (void)portIndex;
+        (void)frequencyHz;
+        (void)numPorts;
+        return 0.0;
+    }
 };
 
 } // namespace cnpg::dsp

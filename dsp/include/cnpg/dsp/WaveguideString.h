@@ -324,6 +324,39 @@ template <typename SampleT> class WaveguideString {
     // rather than re-deriving it, and so P2.7 has the figure in code rather than in prose.
     static constexpr double kBridgeSeamDelaySamples = 1.0;
 
+    // ---- bridge phase-delay compensation (Task P2.7, ADR 0007 D1) ------------------------------
+    //
+    // The PHASE delay, in samples, that the attached bridge port's own self-reflectance adds to this
+    // string's round-trip loop at its fundamental. Subtracted from the loop-length solve exactly
+    // alongside kBridgeSeamDelaySamples and the filters' own phase delays, because it is exactly the
+    // same kind of quantity: loop delay that is not rail.
+    //
+    // TWO THINGS THIS IS NOT. It is not the seam's one sample -- that is a pure z^-1 from
+    // StringNetwork's gather/scatter/accept ordering and setBridgePortDriven already pays it. And it
+    // is not a per-note calibration table: it is a function of the LOAD, recomputed whenever the
+    // load or the note moves, which is why ADR 0007 withdrew the table (the residual reverses sign
+    // across the bridge resonance and depends on three live parameters, and a note-indexed table
+    // structurally cannot carry that).
+    //
+    // WHO CALLS IT, AND WHY IT IS SMOOTHED. StringNetwork computes it through
+    // cnpg::dsp::solveBridgeTuning (BridgeTuning.h) on parameter change and on note change -- never
+    // per sample. But a bridge parameter can move while the string RINGS, and changing this value is
+    // changing the string's loop length, which is a pitch change on a sounding note. It therefore
+    // runs through the SAME per-sample 8 ms one-pole f0 itself uses, so it inherits the click-freedom
+    // the pitch-bend path already has rather than needing a mechanism of its own: the integer part of
+    // the rail read may step while the realized span -- and therefore every tap and injection
+    // position derived from it, all of which are read through P2.3's dual-anchor crossfade -- moves
+    // continuously. That is the whole of what makes a live bridge tweak click-free, and it is why
+    // this is a smoothed quantity and not a plain field.
+    //
+    // 0 restores the pre-P2.7 behaviour exactly (an isolated string, or a decoupled bridge).
+    void setBridgePhaseDelaySamples(float samples) noexcept;
+
+    // The value in force right now, i.e. the smoother's current output -- the same role
+    // currentF0Hz() plays for pitch, and for the same reason: a smoother nobody can observe is a
+    // smoother nobody can gate.
+    double currentBridgePhaseDelaySamples() const noexcept { return bridgeDelaySmoothed_; }
+
     // JUNCTION LIVENESS (Task P2.4, carry-forward B4). Ticks since reset() that consumed a
     // reflection supplied by railAcceptFromBridge, and ticks that fell back to the internal rigid
     // -1. The fallback is a SILENT WRONG ANSWER -- a mis-wired or non-ticking bridge port still
@@ -511,7 +544,28 @@ template <typename SampleT> class WaveguideString {
     double retuneRatio_ = 1.0;
 
     double analyticCorrectionSamples_ = 0.0;
-    std::vector<float> calibrationCents_; // stored by loadCalibrationTable; P2.7 adds the selector
+
+    // ---- the bridge port's phase-delay contribution (Task P2.7) --------------------------------
+    //
+    // A LINEAR RAMP THAT LANDS, not the one-pole the other smoothers use, and the reason is measured
+    // rather than stylistic. updateCoefficients() -- the whole loop-length solve, ~15 transcendentals
+    // -- runs every sample for as long as ANY smoother is still moving. A one-pole never arrives: it
+    // reaches this class's 1e-12 relative settle threshold only after ~10 600 samples (0.22 s at
+    // 48 kHz), so a compensation retargeted on every note change would hold the string in per-sample
+    // re-solve essentially for ever under ordinary playing. cnpg_bench measured exactly that: the
+    // shipped 6-string configuration went from 49.2 to 125.4 us/block, a 2.55x regression, and
+    // isolating it showed the entire cost was here and none of it in the solve.
+    //
+    // The ramp lands at a sample somebody can name -- the same argument the retune ramp and the
+    // enable ramp already make in this project ("a one-pole never arrives, and 'settled' has to
+    // become true at a sample somebody can name"). 8 ms, matching the smoothing time the other
+    // quantities glide over, so nothing about the audible transition changes.
+    double bridgeDelayTarget_ = 0.0;
+    double bridgeDelaySmoothed_ = 0.0;
+    double bridgeDelayStep_ = 0.0;
+    int bridgeDelayStepsRemaining_ = 0;
+    int bridgeDelayRampSamples_ = 1;
+    std::vector<float> calibrationCents_; // stored by loadCalibrationTable; superseded at P2.7
     int calibrationFirstMidiNote_ = 0;
 
     // ---- rail reads and termination chain ------------------------------------------------------

@@ -239,6 +239,9 @@ void WaveguideString<SampleT>::prepare(double sampleRate, int /*maxBlockSize*/, 
     f0Max_ = sampleRate_ / kMinLoopPeriodSamples;
 
     smoothingCoeff_ = 1.0 - std::exp(-1.0 / (kSmoothingTimeSeconds * sampleRate_));
+    // The bridge compensation ramp is the same DURATION the other quantities glide over, realized as
+    // a whole number of samples so it lands at a nameable one (Task P2.7). 384 samples at 48 kHz.
+    bridgeDelayRampSamples_ = std::max(1, static_cast<int>(std::lround(kSmoothingTimeSeconds * sampleRate_)));
 
     // The position crossfade is specified as a DURATION and realized as a whole number of samples,
     // so the same gesture takes the same time at every rate: 128 samples at 48 kHz, 118 at 44.1,
@@ -293,6 +296,12 @@ template <typename SampleT> void WaveguideString<SampleT>::reset() noexcept {
     lossLowSmoothed_ = lossLowTarget_;
     lossHighSmoothed_ = lossHighTarget_;
     dispersionSmoothed_ = dispersionTarget_;
+    // The bridge compensation snaps with the rest (Task P2.7). Its TARGET survives -- it is a
+    // property of the attached load and of the note, not transient state -- exactly as the loss and
+    // dispersion targets do; what is discarded is the ramp.
+    bridgeDelaySmoothed_ = bridgeDelayTarget_;
+    bridgeDelayStepsRemaining_ = 0;
+    bridgeDelayStep_ = 0.0;
     smoothersSettled_ = true;
 
     updateCoefficients();
@@ -359,6 +368,25 @@ void WaveguideString<SampleT>::setAnalyticTuningCompensation(float delaySamplesC
     updateCoefficients();
 }
 
+template <typename SampleT> void WaveguideString<SampleT>::setBridgePhaseDelaySamples(float samples) noexcept {
+    // A caller-supplied number reaches the loop solve, so it is validated HERE and nothing
+    // downstream re-checks -- the same discipline BridgeJunction::setAdmittance uses. Written as a
+    // rejection of "is it a real number", so NaN resolves to 0 (the uncompensated loop, which is
+    // exactly the instrument that shipped before this existed) rather than propagating into the
+    // rail span. The magnitude bound is the solver's, applied there; this is the last-line NaN gate.
+    const double value = static_cast<double>(samples);
+    const double resolved = (value == value) ? value : 0.0;
+    if (resolved == bridgeDelayTarget_)
+        return;
+    bridgeDelayTarget_ = resolved;
+    // A LINEAR RAMP THAT LANDS -- see the member's declaration for the measurement that chose it over
+    // the one-pole. Recomputed from where the value IS, so a retarget mid-ramp re-aims the remaining
+    // steps rather than stranding the glide short of the new value.
+    bridgeDelayStepsRemaining_ = bridgeDelayRampSamples_;
+    bridgeDelayStep_ = (bridgeDelayTarget_ - bridgeDelaySmoothed_) / static_cast<double>(bridgeDelayRampSamples_);
+    smoothersSettled_ = false; // the loop must re-solve as the ramp runs
+}
+
 template <typename SampleT>
 void WaveguideString<SampleT>::loadCalibrationTable(const float* centsByMidiNote, int firstMidiNote, int count) {
     if (centsByMidiNote == nullptr || count <= 0) {
@@ -418,6 +446,17 @@ template <typename SampleT> void WaveguideString<SampleT>::advanceSmoothers() no
     moving |= approach(lossLowSmoothed_, lossLowTarget_);
     moving |= approach(lossHighSmoothed_, lossHighTarget_);
     moving |= approach(dispersionSmoothed_, dispersionTarget_);
+    // The bridge compensation (Task P2.7): a LINEAR ramp that lands on its target at a known sample,
+    // rather than a one-pole that only asymptotes. Everything downstream is unchanged -- it still
+    // reaches the rails through the same loop-length solve a pitch bend does, so it inherits the same
+    // click-freedom; what it does not do is hold the string in per-sample re-solve for 0.22 s after
+    // every note. See the member declaration for the measurement.
+    if (bridgeDelayStepsRemaining_ > 0) {
+        --bridgeDelayStepsRemaining_;
+        bridgeDelaySmoothed_ =
+            (bridgeDelayStepsRemaining_ == 0) ? bridgeDelayTarget_ : bridgeDelaySmoothed_ + bridgeDelayStep_;
+        moving = true;
+    }
     smoothersSettled_ = !moving;
 }
 
@@ -480,8 +519,13 @@ template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() 
     // not rail. See setBridgePortDriven() -- StringNetwork's gather/scatter/accept ordering makes
     // the external reflection arrive one sample late, at every rate and every note.
     const double seamDelay = bridgePortDriven_ ? kBridgeSeamDelaySamples : 0.0;
-    const double railSpan = clampd(0.5 * (period - tauDispersion - tauLoss - analyticCorrectionSamples_ - seamDelay),
-                                   kMinRailSpan, maxRailSpan);
+    // ...and the LOAD's own phase delay is subtracted beside it (Task P2.7). Same kind of quantity,
+    // same place in the sum: the bridge's reflectance is a filter in the loop like the dispersion
+    // chain and the loss filter, and what decides pitch is its PHASE delay at f0. The seam's z^-1
+    // above is the ordering; this is the physics. See setBridgePhaseDelaySamples().
+    const double railSpan =
+        clampd(0.5 * (period - tauDispersion - tauLoss - analyticCorrectionSamples_ - seamDelay - bridgeDelaySmoothed_),
+               kMinRailSpan, maxRailSpan);
 
     const bool lagrange = (kind_ == FractionalDelayKind::Lagrange3);
     const double delayMin = lagrange ? kLagrangeDelayMin : kThiranDelayMin;
@@ -533,9 +577,11 @@ template <typename SampleT> void WaveguideString<SampleT>::updateCoefficients() 
     // would be written or read after it has already left the loop.
     positionSpan_ = lagrange ? realizedRailSpan_ : std::max(0.0, static_cast<double>(railBase_ - 1));
 
-    // The REALIZED total, seam included, so realizedLoopDelaySamples() still equals fs / f0 to
-    // solver precision whether or not a bridge port is driving the string.
-    realizedLoopDelay_ = 2.0 * realizedRailSpan_ + tauDispersion + tauLoss + seamDelay;
+    // The REALIZED total, seam and bridge load included, so realizedLoopDelaySamples() still equals
+    // fs / f0 to solver precision whether or not a bridge port is driving the string and whatever
+    // its admittance is. That identity is the whole claim P2.7 makes, expressed in the one place
+    // the solve can be checked against itself.
+    realizedLoopDelay_ = 2.0 * realizedRailSpan_ + tauDispersion + tauLoss + seamDelay + bridgeDelaySmoothed_;
     energyCacheValid_ = false;
 }
 

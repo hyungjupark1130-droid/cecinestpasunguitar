@@ -173,6 +173,41 @@ inline constexpr float kBridgeMaxDamping = 10.0f;
 // docs/decisions/0006-p2-bridge-passivity-fallback.md for the measurements behind the number.
 inline constexpr float kBridgeMaxMobilityRatio = 0.05f;
 
+// ---- THE PROVISIONAL NORMAL RANGE (Task P2.7; docs/decisions/0007 D7) --------------------------
+//
+// The region of the three-parameter space over which the +/-2 cent [tuning] criterion BINDS.
+// Everything outside it is the **Extended (Effect) range**: fully available, and carrying NO TUNING
+// GUARANTEE. That is not a defect -- a radically compliant or radically sharp bridge SHOULD pull
+// pitch, which is ADR 0007 D3's bounded physical detuning -- but D5 requires the boundary to be
+// DECLARED rather than discovered by a user, which is why it lives here, on the module, and not only
+// in a test file. plugin/src/Parameters.cpp cites these constants beside the three sliders they
+// bound, and tests/dsp/TuningAccuracyTests.cpp gates against them.
+//
+// DERIVED FROM MEASUREMENT, NOT DECLARED. The boundary is a curved surface -- more coupling buys less
+// resonance -- and a declared range has to be a box, so this is the largest box inside it. Worst
+// |error| measured inside: 0.770 cents over MIDI 21-96 x 44.1/48/96 kHz x six grid points, against
+// the +/-2 cent criterion; 0.060 cents at the shipping default. What binds each face:
+//
+//   - the COUPLING and RESONANCE ceilings trade against each other (at coupling 0.50 the residual at
+//     a resonance/note coincidence is already 12.06 cents at resonance 250 Hz);
+//   - the DAMPING CEILING is a separate mechanism: above ~1.0 the load is dashpot-dominated over a
+//     wide band and the worst note moves to the TOP of the range (2.92 / 4.93 / 7.38 cents at damping
+//     2 / 3 / 4, against 0.03 at damping 1.0);
+//   - the DAMPING FLOOR is where the margin becomes comfortable rather than where the gate breaks.
+//
+// *** THE COUPLING CEILING IS A MEASURED BOUNDARY THAT COINCIDES WITH THE PROVISIONAL DEFAULT, NOT
+// THE DEFAULT WEARING A DIFFERENT HAT. *** ADR 0007 D4 leaves the default provisional and expects the
+// P2.8 pass to compare LOWER values, all of which are inside this range. If a later session raises it
+// instead, the grid gate fails by design and the range must be RE-DERIVED rather than widened to fit.
+//
+// PROVISIONAL: P2.8 confirms or revises all five numbers, in the same session that settles the
+// couplingStrength default, because D5's criterion (4) -- near-unison mode-locking -- ties them.
+inline constexpr float kBridgeNormalCouplingMax = 0.35f;
+inline constexpr float kBridgeNormalResonanceMinHz = kBridgeMinResonanceHz;
+inline constexpr float kBridgeNormalResonanceMaxHz = 330.0f;
+inline constexpr float kBridgeNormalDampingMin = 0.15f;
+inline constexpr float kBridgeNormalDampingMax = 1.0f;
+
 // Below this mobility ratio the load is treated as exactly rigid (v == 0, b_i == -a_i,
 // bridgeOutput() == 0). Two reasons: couplingStrength == 0 has a CONTRACT to be exactly rigid
 // (docs/plan.md section 2.6), and the element impedances scale as 1/mu, so an unbounded mu -> 0
@@ -263,6 +298,40 @@ template <typename SampleT> class BridgeJunction final : public IBridgePort<Samp
     // The Lyapunov storage of the two reactive element states, in the same units as
     // WaveguideString::energyEstimate(). Summed into StringNetwork::energyEstimate().
     Sample64 storageEnergy() const noexcept override;
+
+    // ---- the tuning surface (Task P2.7) --------------------------------------------------------
+    //
+    // Closed form, derived from the very same wave-digital adaptor scatter() runs -- not a fit, not
+    // a table, and not a measurement. Writing the recurrences of scatter() in z (u = z^-1):
+    //
+    //     sM: sM[n+1] =  sqrt(ZM) v[n] - sM[n]   =>  sM = sqrt(ZM) V u / (1 + u)
+    //     sK: sK[n+1] = -sqrt(ZK) v[n] + sK[n]   =>  sK = -sqrt(ZK) V u / (1 - u)
+    //     v  = 2 (Z_i A_i + sqrt(ZM) sM + sqrt(ZK) sK) / sigma
+    //
+    // and eliminating the two element states gives the string port's SELF-reflectance exactly:
+    //
+    //     B_i / A_i = R(u) = num(u) / den(u)
+    //     den(u) = sigma/2 + (ZK - ZM) u + (ZM + ZK - sigma/2) u^2
+    //     num(u) = (Z_i - sigma/2) + (ZM - ZK) u - (Z_i + ZM + ZK - sigma/2) u^2
+    //
+    // In the rigid limit every element impedance runs to infinity, num -> -den and R -> -1: the
+    // inverting termination, whose -1 pairs with the nut's to give the non-inverting loop. So the
+    // quantity whose phase is the TUNING term is H = -R, which is exactly 1 when the bridge is
+    // rigid, and the loop delay this port contributes is -arg(H(e^jw))/w.
+    //
+    // sigma uses the SUM over the loading string ports, so the answer depends on how many strings
+    // are in the loop -- more ports make the shared load relatively stiffer. It is a small
+    // dependence at the shipping impedances (one unit port out of a sigma in the hundreds to
+    // thousands) and it is included because it is free and because leaving it out would be a
+    // silently note-dependent error the moment a per-string impedance model exists.
+    //
+    // EVALUATED ON THE SMOOTHER TARGETS, not the values in force. The string's own compensation
+    // smoother and this junction's element smoothers are both the same 8 ms one-pole and both are
+    // retargeted by the same setAdmittance()/setParams() call, so they glide together and land
+    // together. Reading the in-force values here instead would make the answer depend on when
+    // during the glide the query happened to be made, which is neither more correct nor
+    // reproducible.
+    double reflectionPhaseDelaySamples(int portIndex, double frequencyHz, int numPorts) const noexcept override;
 
     // Tier-1 [energy] hook (docs/plan.md section 4.2). Writes the POWER-NORMALIZED N x N scattering
     // matrix over the string ports, row-major with row stride `maxPorts`:

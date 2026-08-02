@@ -103,17 +103,24 @@ std::string sha256Hex(const std::string& bytes) {
     return hex;
 }
 
-std::string dspSourceHash() {
+std::string sourceHashOf(const std::vector<std::string>& repoRelativeRoots) {
     namespace fs = std::filesystem;
     const fs::path root(CNPG_SOURCE_DIR);
 
     std::vector<std::string> relativePaths;
-    for (const char* subdirectory : {"dsp/include", "dsp/src"}) {
-        const fs::path directory = root / subdirectory;
+    for (const std::string& subdirectory : repoRelativeRoots) {
+        const fs::path entry = root / subdirectory;
         std::error_code ec;
-        if (!fs::is_directory(directory, ec))
+        // A root may be a single FILE as well as a directory (Task P2.7: cnpg_render's digest names
+        // tests/support/P1Chain.h explicitly, because the chain assembly is part of what a render is
+        // a function of and the rest of tests/support is not).
+        if (fs::is_regular_file(entry, ec)) {
+            relativePaths.push_back(fs::relative(entry, root, ec).generic_string());
+            continue;
+        }
+        if (!fs::is_directory(entry, ec))
             return {};
-        for (fs::recursive_directory_iterator it(directory, ec), end; it != end && !ec; it.increment(ec)) {
+        for (fs::recursive_directory_iterator it(entry, ec), end; it != end && !ec; it.increment(ec)) {
             if (!it->is_regular_file(ec))
                 continue;
             relativePaths.push_back(fs::relative(it->path(), root, ec).generic_string());
@@ -143,6 +150,14 @@ std::string dspSourceHash() {
         stream += contents;
     }
     return sha256Hex(stream);
+}
+
+std::string dspSourceHash() { return sourceHashOf({"dsp/include", "dsp/src"}); }
+
+std::string renderSourceHash() {
+    // See SourceHash.h for why these four and not others. Order is irrelevant to the digest (the
+    // paths are sorted below), and is written physics-first so the list reads as what it is.
+    return sourceHashOf({"dsp/include", "dsp/src", "tests/support/P1Chain.h", "tests/render"});
 }
 
 } // namespace cnpg::test

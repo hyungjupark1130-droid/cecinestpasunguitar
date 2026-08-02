@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cnpg/dsp/BridgeJunction.h"
+#include "cnpg/dsp/BridgeTuning.h"
 #include "cnpg/dsp/Common.h"
 #include "cnpg/dsp/DamperJunction.h"
 #include "cnpg/dsp/EventQueue.h"
@@ -187,9 +188,41 @@ struct StringNetworkParams {
         // written costs the Envelope module.
         float envelopeScale = 1.0f;
 
+        // THE PITCH THIS STRING CARRIES WHEN NOBODY IS PLAYING IT (Task P2.7).
+        //
+        // Through P2.6 there was no such field and prepare() left every string at kMinMidiNote, so
+        // an untouched instrument was six strings all tuned to A0 (27.5 Hz). That is not a guitar,
+        // and it is not merely arbitrary: A0's harmonic series contains 55, 82.5, 110, 137.5, 165,
+        // 192.5 and 220 Hz -- very nearly everything the other strings play -- so an UNPLAYED string
+        // was a BETTER sympathetic resonator than a real open string would be. It is the direct
+        // cause of the P2.6 sympathetic-truncation figure reading 6.63 dB above P2.4's
+        // (tests/dsp/RetriggerModeTests.cpp records the measurement and named this task).
+        //
+        // It has to land before the P2.8 listening pass rather than at it: P2.8 judges how much
+        // sympathetic resonance the instrument should have, and it cannot judge that on an
+        // instrument whose idle strings are all at A0.
+        //
+        // The string returns here whenever its state is thrown away -- prepare(), reset(), and the
+        // silence watchdog -- which is the physically honest model: a fretted note is temporary and
+        // the string underneath it is not. The retune is free at every one of those sites because
+        // all three happen with the rails already at zero.
+        std::uint8_t restMidiNote = kDefaultOpenStringMidiNote[0];
+
         bool enabled = true; // mute/enable; a runtime change routes through the enable ramp
     };
-    std::array<PerString, kMaxStrings> perString{};
+
+    // The per-string defaults cannot be written as member initializers, because restMidiNote
+    // differs per slot. Same construction, and the same reason, as NoteAllocator's
+    // detail::defaultStringZones(): a value-initialized array would be a default that mistunes the
+    // instrument, and a default that does that is not a default.
+    static constexpr std::array<PerString, kMaxStrings> defaultPerString() noexcept {
+        std::array<PerString, kMaxStrings> slots{};
+        for (std::size_t s = 0; s < static_cast<std::size_t>(kMaxStrings); ++s)
+            slots[s].restMidiNote = kDefaultOpenStringMidiNote[s];
+        return slots;
+    }
+
+    std::array<PerString, kMaxStrings> perString = defaultPerString();
 };
 
 static_assert(std::is_trivially_copyable_v<StringNetworkParams>,
@@ -432,6 +465,27 @@ template <typename SampleT> class StringNetwork {
     unsigned long long bridgeDrivenTicks() const noexcept;
     unsigned long long unbridgedTicks() const noexcept;
 
+    // ---- bridge tuning diagnostics (Task P2.7, ADR 0007 D6) ------------------------------------
+    //
+    // The whole of what the bridge tuning solve produced for `stringIndex`, observable directly.
+    // ADR 0007 D6 requires the solver's convergence to be DECLARED AND TESTED, and D5's criterion
+    // (2) makes "the solver converges reliably" part of the definition of the Normal range -- so
+    // these are not decoration, they are the only way either statement can be measured rather than
+    // asserted. All four return their neutral value for an out-of-range index.
+    //
+    // `bridgeCompensationSamples` is the value IN FORCE (the string's smoother output), not the
+    // target the solve produced: the difference between them is exactly the glide, and the glide is
+    // what the live-parameter click gate is about.
+    double bridgeCompensationSamples(int stringIndex) const noexcept;
+    bool bridgeTuningConverged(int stringIndex) const noexcept;
+    int bridgeTuningIterations(int stringIndex) const noexcept;
+    double bridgeTuningResidualCents(int stringIndex) const noexcept;
+
+    // Number of solves since reset() that landed on the fallback. A running count rather than a
+    // flag, because "the instrument spent part of this render outside its tuning guarantee" is a
+    // thing a test has to be able to assert about a whole render and not only about a final state.
+    unsigned long long bridgeTuningFallbacks() const noexcept { return bridgeTuningFallbacks_; }
+
     // The network's own default BridgeJunction, for tests and for the plugin's parameter surface.
     // Returns nullptr semantics are avoided deliberately: the network always owns one, whether or
     // not setBridgePort() has substituted something else for the audio path.
@@ -453,11 +507,19 @@ template <typename SampleT> class StringNetwork {
     bool stringHasState(int stringIndex) const noexcept;
 
     // The one place a string's physical state is thrown away. Clears the rails, snaps the damper
-    // back to released, and re-arms the silence watchdog -- always together, because the damper's
-    // engagement is the only DISCONTINUOUS thing about it and it is safe exactly when the rails it
-    // scatters are zeros. Keeping the three in one function is what makes that invariant checkable
-    // rather than a rule three call sites have to remember.
+    // back to released, re-arms the silence watchdog, AND settles the string's pitch (Task P2.7) --
+    // always together, because the damper's engagement and the loop length are the only
+    // DISCONTINUOUS things about it and both are safe exactly when the rails they act on are zeros.
+    // Keeping them in one function is what makes that invariant checkable rather than a rule four
+    // call sites have to remember -- and the P2.7 version of the rule was learned the hard way: with
+    // the retune written at the call sites instead, the clear silently overwrote the note a fresh
+    // note-on had just set and every first pluck came out at the open string's pitch.
+    //
+    // The one-argument form leaves the string at its REST pitch (perString[i].restMidiNote), which
+    // is what reset(), the enable-ramp landing and the silence watchdog all want. A note-on names
+    // the note it is about to pluck instead.
     void clearStringState(int stringIndex) noexcept;
+    void clearStringState(int stringIndex, int leaveTunedToMidiNote) noexcept;
 
     static constexpr int tapSlot(int stringIndex, int tapIndex) noexcept {
         return stringIndex * kMaxTapsPerString + tapIndex;
@@ -562,6 +624,37 @@ template <typename SampleT> class StringNetwork {
     std::array<float, kMaxStrings> portImpedance_{};
     std::array<SampleT, kMaxStrings> portIncident_{};
     std::array<SampleT, kMaxStrings> portOutgoing_{};
+
+    // The last bridge tuning solve per string (Task P2.7). Stored rather than recomputed on demand
+    // because the accessors must report what the string is ACTUALLY tuned with, and a fresh solve
+    // from a const accessor could disagree with it the moment a parameter had moved since.
+    std::array<bool, kMaxStrings> bridgeTuningConverged_{};
+    std::array<int, kMaxStrings> bridgeTuningIterations_{};
+    std::array<double, kMaxStrings> bridgeTuningResidual_{};
+    unsigned long long bridgeTuningFallbacks_ = 0;
+
+    // ---- what the last solve was FOR, so an unchanged one is not repeated (Task P2.7) -----------
+    //
+    // *** THIS CACHE IS NOT AN OPTIMISATION, IT IS THE ADR'S OWN CLAIM MADE TRUE. *** ADR 0007 D6
+    // says the solve is "O(1) per string per PARAMETER CHANGE" and runs "offline at parameter-change
+    // time". Without this it ran on every setParams() call -- and tests/support/P1Chain.h documents
+    // that the host cascade calls setParams() on all six modules BEFORE EVERY process(), every block,
+    // whether or not anything moved. "Per parameter change" and "per block" are not the same claim,
+    // and the difference is not academic: cnpg_bench measured the shipped default 6-string
+    // configuration at 49.2 us/block before this task and 125.4 us after, a 2.55x regression, of
+    // which every microsecond was this solve running 8 times a block to produce the answer it had
+    // already produced. With the cache it is 48.9 us.
+    //
+    // The key is the whole of what the answer depends on: the string's own bent target frequency,
+    // the port's admittance (through a generation counter bumped only when the value actually
+    // differs), and the loading port count. A change to any of them re-solves; nothing else can.
+    std::array<double, kMaxStrings> lastSolvedTargetHz_{};
+    std::array<unsigned long long, kMaxStrings> lastSolvedAdmittanceGen_{};
+    std::array<int, kMaxStrings> lastSolvedPortCount_{};
+    std::array<bool, kMaxStrings> lastSolveValid_{};
+    // Bumped by setParams() only when params_.bridge really changes, by setBridgePort() (a different
+    // load entirely) and by prepare() (a different sample rate makes every phase delay different).
+    unsigned long long admittanceGeneration_ = 1;
 
     // The Synth retrigger's fade (Task P2.6), one per string. `fadeGain_` multiplies the tap AND
     // the bridge incident wave; `fadeSteps_` counts down to the sample the state is cleared and

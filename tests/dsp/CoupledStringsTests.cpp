@@ -360,6 +360,25 @@ struct RenderSpec {
     float resonanceHz = 180.0f;
     float damping = 0.5f;
     double sampleRate = kRate;
+
+    // EVERY STRING IN THESE RENDERS IS TUNED TO `midiNote`, INCLUDING THE ONES NOBODY PLUCKS.
+    //
+    // *** THIS FIELD EXISTS BECAUSE ITS ABSENCE MADE THE UNISON-PAIR CASE MEASURE SOMETHING ELSE
+    // ENTIRELY, AND THE SUBSTITUTION WAS INVISIBLE UNTIL P2.7 FIXED THE THING IT LEANED ON. ***
+    //
+    // Weinreich's two-stage decay is a property of a UNISON PAIR: two strings at the SAME pitch
+    // whose symmetric and antisymmetric normal modes decay at different rates. Through P2.6 an
+    // unplucked string was left at kMinMidiNote -- A0, 27.5 Hz -- because StringNetwork::prepare()
+    // had nowhere else to put it, so the case's "second string of the unison pair" was in fact an
+    // A0 string, and A0 at 27.5 Hz has a mode every 27.5 Hz. That dense comb is a strong absorber
+    // near anything, so a two-stage decay appeared and the case passed at 10.14 dB -- for the wrong
+    // reason. Giving strings a real rest pitch (P2.7) put string 1 at its open A2 instead, whose
+    // nearest mode to F3 is 35% away, and the measured improvement collapsed to 0.06 dB.
+    //
+    // The effect had never been measured. Setting the rest pitch to the played note is what makes
+    // these renders the unison pair the plan's criterion names, so the number below is about
+    // coupling and not about an accidental mode comb.
+    int restMidiNote = -1; // < 0 means "the same note the render plays"
 };
 
 CoupledRender renderCoupled(const RenderSpec& spec) {
@@ -372,6 +391,13 @@ CoupledRender renderCoupled(const RenderSpec& spec) {
     params.bridge.resonanceHz = spec.resonanceHz;
     params.bridge.damping = spec.damping;
     params.perString[1].tuningOffsetCents = spec.detuneCentsOnString1;
+    // See RenderSpec::restMidiNote. A string nobody plucks still has a pitch, and in a unison-pair
+    // measurement it has to be the pair's pitch.
+    {
+        const int rest = (spec.restMidiNote >= 0) ? spec.restMidiNote : spec.midiNote;
+        for (auto& perString : params.perString)
+            perString.restMidiNote = static_cast<std::uint8_t>(rest);
+    }
 
     StringNetwork<float> network;
     network.prepare(spec.sampleRate, kBlock, FractionalDelayKind::Lagrange3);
@@ -713,7 +739,40 @@ TEST_CASE("CoupledStrings: a coupled unison pair decays in two stages", "[contra
     constexpr double kRateSeparation = 2.0;
     constexpr double kPartialBandwidthHz = 25.0;
 
-    auto analyse = [](const RenderSpec& spec, double spanDb = -30.0) {
+    // *** THE CHANNEL, AND WHY IT IS NO LONGER THE BRIDGE OUTPUT (Task P2.7, with a derivation) ***
+    //
+    // docs/plan.md's P2.4 criterion names "the Schroeder-integrated BRIDGE-OUTPUT decay envelope".
+    // For an EXACT unison pair that recipe is structurally incapable of showing the effect, and the
+    // reason is the same sentence that defines the effect: the SLOW stage is the ANTISYMMETRIC
+    // normal mode, whose defining property is a NODE AT THE BRIDGE. A mode that does not move the
+    // bridge does not appear in bridgeOutput(), which is the bridge's velocity. So the bridge output
+    // of a perfect unison contains the symmetric mode alone -- one exponential, by construction.
+    //
+    // Measured, on this instrument, fundamental envelope in dB at t = 0.05 / 0.2 / 0.8 / 3.2 / 6.4 s
+    // (2 strings, MIDI 53, couplingStrength 0.5, sustain material):
+    //
+    //   string-0 tap    -31.7  -35.3  -35.7  -35.7  -35.8    <- fast stage, then the slow mode, flat
+    //   bridge output   -58.4  -80.8 -167.9 -218.2 -220.3    <- one exponential, all the way down
+    //   bridge, +2 cent -58.4  -78.7  -83.7  -84.2  -84.8    <- the slow mode reappears once the
+    //                                                           pair is imperfect and its node
+    //                                                           stops sitting exactly on the bridge
+    //
+    // The third row is the real-instrument case and is why the effect is audible at all: no two
+    // strings are ever exactly in unison, so the slow mode always radiates a little. But the gate
+    // must not depend on how imperfect the pair happens to be, so it measures the PLUCKED STRING'S
+    // OWN TAP, where both modes are present at full amplitude for any tuning whatsoever.
+    //
+    // *** THIS CASE PASSED THROUGH P2.6 WITHOUT MEASURING A UNISON PAIR AT ALL. *** Until P2.7 gave
+    // strings a rest pitch, the unplucked "second string of the pair" sat at kMinMidiNote -- A0,
+    // 27.5 Hz, a mode every 27.5 Hz -- and that dense comb absorbed and re-emitted energy near F3,
+    // producing a bend in the bridge-output curve that a two-exponential fit duly beat by 10.14 dB.
+    // With a real unison pair the same measurement reads 0.11 dB. Recorded here rather than quietly
+    // repaired, because "the gate measured the wrong device" is this project's recurring failure and
+    // the only defence is writing down each occurrence.
+    // `useBridgeChannel` selects the WITHDRAWN recipe (the bridge output) instead of the plucked
+    // string's tap. It exists so the repair can be shown to fail on the defect it exists to catch --
+    // see "THE CONSTRUCTED FAILURES" below -- rather than only asserted to pass.
+    auto analyse = [](const RenderSpec& spec, double spanDb = -30.0, bool useBridgeChannel = false) {
         const CoupledRender render = renderCoupled(spec);
         REQUIRE(render.unbridgedTicks == 0);
         const double f0 = cnpg::test::midiNoteToHz(spec.midiNote);
@@ -721,7 +780,8 @@ TEST_CASE("CoupledStrings: a coupled unison pair decays in two stages", "[contra
         // SQUARED envelope (rather than the raw signal) is what makes the normal-mode beat -- which
         // a coupled unison pair has by construction, since coupling SPLITS the two modes in
         // frequency -- integrate out instead of rippling the fit.
-        const std::vector<double> envelope = cnpg::test::partialEnvelope(render.bridge, kRate, f0, kPartialBandwidthHz);
+        const std::vector<double> envelope = cnpg::test::partialEnvelope(
+            useBridgeChannel ? render.bridge : render.taps[0], kRate, f0, kPartialBandwidthHz);
         // Skip the attack and the heterodyne filter's own settling, so the curve being fitted is a
         // decay and not a transient.
         const auto skip = static_cast<std::size_t>(0.15 * kRate);
@@ -760,6 +820,33 @@ TEST_CASE("CoupledStrings: a coupled unison pair decays in two stages", "[contra
         (soloPair.second.rateA > 0.0)
             ? std::max(soloPair.second.rateB / soloPair.second.rateA, soloPair.second.rateA / soloPair.second.rateB)
             : 0.0;
+
+    // ---------------------------------------------------------------------------------------
+    // *** THE CONSTRUCTED FAILURES. *** The repair above is a claim about WHY this case used to
+    // pass; a claim like that is worth exactly as much as the measurement that reproduces the old
+    // reading. Both defects are rebuilt here, run, and their numbers printed.
+    // ---------------------------------------------------------------------------------------
+    //
+    // DEFECT 1 -- THE WITHDRAWN CHANNEL. Measure the SAME genuine unison pair on the bridge output,
+    // which is the recipe docs/plan.md's P2.4 criterion names. It must NOT show the effect, because
+    // the slow stage is the antisymmetric mode and that mode has a node at the bridge: this is the
+    // derivation above, asserted rather than narrated. If a future change ever made the bridge
+    // output show two stages for an exact unison, the derivation would be wrong and the channel
+    // choice would have to be re-argued.
+    const auto bridgeChannelPair = analyse(spec, -30.0, /*useBridgeChannel=*/true);
+    const double bridgeChannelPeakDb = bridgeChannelPair.first.peakDb;
+
+    // DEFECT 2 -- THE A0 REST PITCH. Put the unplucked string back where P2.6 left it (kMinMidiNote,
+    // A0, a mode every 27.5 Hz) and measure the bridge output, i.e. reproduce the configuration this
+    // case actually ran under through P2.6. It DOES show two stages -- which is what says the old
+    // 10.14 dB came from an accidental mode comb and not from Weinreich's normal modes.
+    RenderSpec restedAtA0 = spec;
+    restedAtA0.restMidiNote = cnpg::dsp::kMinMidiNote;
+    const auto a0Pair = analyse(restedAtA0, -30.0, /*useBridgeChannel=*/true);
+    const double a0PeakDb = a0Pair.first.peakDb;
+    const double a0Separation = (a0Pair.second.rateA > 0.0) ? std::max(a0Pair.second.rateB / a0Pair.second.rateA,
+                                                                       a0Pair.second.rateA / a0Pair.second.rateB)
+                                                            : 0.0;
 
     // THE SPAN SWEEP behind the refusal recorded below: the single-exponential residual SATURATES.
     // Widening the fitted span does not make a one-exponential fit worse in RMS-dB terms, because
@@ -809,13 +896,32 @@ TEST_CASE("CoupledStrings: a coupled unison pair decays in two stages", "[contra
     // the P2.4 review derived the ceiling independently.)
     //
     // SUBSTITUTED, and strictly stronger than what the difference reading would have gated:
-    //   (1) the residual RATIO, which is the scale-free form of "beats by N dB" and the one that
-    //       does not silently encode an assumption about the absolute misfit: 20*log10(single/twin)
-    //       >= 6 dB, i.e. the two-exponential fit is at least twice as accurate. Measured 25 dB.
+    //   (1) [WITHDRAWN AT P2.7 -- see below] the residual RATIO, 20*log10(single/twin) >= 6 dB.
     //   (2) the single-exponential fit must be wrong by >= 6 dB SOMEWHERE (peak error), which is the
     //       plain-language claim "a single exponential does not describe this decay" as an ABSOLUTE
-    //       statement rather than a relative one. Measured 10.14 dB.
-    //   (3) the rate separation the criterion also names, unchanged at >= 2x. Measured 6.30x.
+    //       statement rather than a relative one. Measured 10.92 dB, against 0.03 dB for the control.
+    //   (3) the rate separation the criterion also names, unchanged at >= 2x. Measured 2.23x,
+    //       against 1.08x for the control.
+    //
+    // *** CONJUNCT (1) IS WITHDRAWN AS A GATE AT TASK P2.7, BECAUSE ON A GENUINE UNISON PAIR IT
+    // POINTS THE WRONG WAY. *** Measured on the real pair: coupled -0.06 dB, single-string control
+    // +21.94 dB. A gate written on it would PASS the control and FAIL the effect.
+    //
+    // The reason is the physics, not the arithmetic. The slow stage of a unison pair is the
+    // antisymmetric mode, which has a node at the bridge and therefore loses energy only to the
+    // strings' own loop loss -- at the sustain material this case uses, that is very nearly nothing,
+    // so over the analysis window the slow stage is not a decaying exponential at all. Its Schroeder
+    // curve is 10*log10(1 - t/T), the shape a CONSTANT envelope integrates to, and neither a one-
+    // nor a two-exponential fit represents it: both misfit it equally (4.81 vs 4.84 dB RMS) and
+    // their ratio is a comparison of two equally wrong numbers.
+    //
+    // This was invisible while the case was measuring the A0 artifact, where both stages really were
+    // exponentials, and P2.4's own commentary had already recorded that the ratio is uninformative
+    // for a well-fitted curve (the control clears it at 21.8 dB "because a scale-free ratio does not
+    // care that BOTH of its residuals are 0.01 dB"). The measurement above is that observation
+    // becoming decisive. What replaces it is the SEPARATION between the effect and its control on
+    // the conjunct that does discriminate -- a factor of 330 on peak error -- which is the claim the
+    // ratio was reaching for, made against the control instead of against the fit.
     //
     // CONJUNCT (2) IS SPAN-SENSITIVE, and the span is therefore a load-bearing constant rather than
     // a formatting choice: at -1 .. -20 dB the same coupled pair reads a peak error of 0.97 dB and
@@ -830,13 +936,48 @@ TEST_CASE("CoupledStrings: a coupled unison pair decays in two stages", "[contra
     // ratio. It is (2) and (3) that discriminate, and they do so by three orders of magnitude. A
     // gate written on the ratio alone would have been a gate on nothing, which is precisely the
     // failure mode this project keeps finding, so it is recorded here rather than quietly patched.
-    REQUIRE(ratioDb >= kResidualImprovementDb);
     REQUIRE(single.peakDb >= kResidualImprovementDb);
     REQUIRE(separation >= kRateSeparation);
     // The control must NOT show the effect, asserted on the two ABSOLUTE quantities (see above).
     REQUIRE(soloPair.first.peakDb < kResidualImprovementDb);
     REQUIRE(soloSeparation < kRateSeparation);
-    REQUIRE(soloImprovement < difference);
+    // ...and the two must be SEPARATED, not merely on opposite sides of a threshold. This is what
+    // replaces the withdrawn ratio conjunct: it is the same "beats it by a wide margin" claim, made
+    // between the effect and its control rather than between two fits of the same curve. Measured
+    // 10.92 dB against 0.033 dB, a factor of 330, so the 10x bound has two decades of headroom and
+    // still fails immediately if the coupled render ever stops showing two stages.
+    REQUIRE(single.peakDb > 10.0 * soloPair.first.peakDb);
+
+    // ---- and the two constructed failures, asserted -------------------------------------------
+    std::cout << "  CONSTRUCTED FAILURES (the two defects this case was repaired from, rebuilt and measured):\n"
+              << "    (1) the WITHDRAWN CHANNEL -- the same genuine unison pair on the BRIDGE OUTPUT, which is the "
+                 "recipe P2.4's criterion names: peak error "
+              << bridgeChannelPeakDb << " dB against the " << kResidualImprovementDb
+              << " dB criterion. The bridge cannot see the slow mode, because the slow mode's node is ON it.\n"
+              << "    (2) the A0 REST PITCH -- the unplucked string put back at kMinMidiNote and measured on the "
+                 "bridge output, i.e. the configuration this case ran under through P2.6: peak error "
+              << a0PeakDb << " dB, rate separation " << a0Separation
+              << ". THAT is where the old 10.14 dB came from -- a mode every 27.5 Hz absorbing near F3, not "
+                 "Weinreich's normal modes.\n";
+
+    // (1) must FAIL the criterion: an exact unison's slow mode is invisible at the bridge.
+    INFO("withdrawn channel (bridge output, genuine unison pair): peak error " << bridgeChannelPeakDb << " dB");
+    REQUIRE(bridgeChannelPeakDb < kResidualImprovementDb);
+    // ...and it must fail by a wide margin, not merely land under the line -- otherwise the channel
+    // choice is a coin toss rather than a derivation.
+    REQUIRE(bridgeChannelPeakDb < 0.25 * single.peakDb);
+
+    // (2) must PASS the criterion it should never have been passing: the A0 comb reproduces the old
+    // reading. This is the assertion that makes "the gate was measuring the wrong device" a
+    // measurement. If a future change stopped it passing, the explanation for the P2.6 number would
+    // be wrong and this case's repair would need re-deriving.
+    INFO("A0 rest pitch (the P2.6 configuration): peak error " << a0PeakDb << " dB, separation " << a0Separation);
+    REQUIRE(a0PeakDb >= kResidualImprovementDb);
+
+    (void)ratioDb;
+    (void)difference;
+    (void)soloRatioDb;
+    (void)soloImprovement;
 }
 
 // ---------------------------------------------------------------------------------------------

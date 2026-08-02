@@ -313,11 +313,20 @@ TEST_CASE("RENDER: every corpus phrase renders NaN-free, denormal-free and below
         const std::string prefix = std::string(phrase) + "__cv";
         const auto match = std::find_if(produced.begin(), produced.end(), [&](const fs::path& render) {
             const std::string name = render.filename().string();
-            // "<stem>__cv<corpusVersion>_g<git hash>.wav" -- docs/plan.md section 4.8 requires the
-            // corpus version and git hash in the filename so a listening note is attributable. The
-            // version itself is deliberately not asserted here: it increments every time the corpus
-            // grows, and pinning it would make this test a maintenance tax on adding a phrase.
-            return name.rfind(prefix, 0) == 0 && name.find("_g") != std::string::npos;
+            // "<stem>__cv<corpusVersion>_s<source hash>.wav" -- docs/plan.md section 4.8 requires the
+            // corpus version and a provenance field in the filename so a listening note is
+            // attributable. The version itself is deliberately not asserted here: it increments every
+            // time the corpus grows, and pinning it would make this test a maintenance tax on adding
+            // a phrase.
+            //
+            // `_s`, not `_g`, from Task P2.7 (carry-forward C2): the field was a CONFIGURE-TIME git
+            // commit, which is resolved when CMake last ran rather than when the binary was built --
+            // a build/ tree configured at 77b0430 filed renders of the code at 1ccfcb1 as
+            // `..._cv1_g77b0430.wav`, so two different code states produced identical filenames. It
+            // is now a RENDER-TIME content hash over the bytes a render is a function of
+            // (tests/support/SourceHash.h::renderSourceHash), and the prefix changed with it so
+            // nobody reads it as a commit.
+            return name.rfind(prefix, 0) == 0 && name.find("_s") != std::string::npos;
         });
         CHECK(match != produced.end());
     }

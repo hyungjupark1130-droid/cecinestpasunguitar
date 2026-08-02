@@ -21,31 +21,22 @@ target_include_directories(cnpg_render PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 
 cnpg_set_warnings(cnpg_render)
 
-# Best-effort short git commit, baked in at configure time. Unlike cnpg_bench's (where it is purely
-# a provenance field in a JSON report), this one is load-bearing: docs/plan.md section 4.8 requires
-# "Render filenames embed corpus version + git hash so listening notes are attributable", and this
-# is where the hash half of that comes from. It carries the same limitation cnpg_bench's does -- a
-# configure-time `git rev-parse HEAD` necessarily names the PARENT of the commit that lands the
-# binary, never the commit itself (tests/support/SourceHash.h's file comment explains why that
-# limitation is fatal for the golden sidecars and merely approximate here) -- which is fine for
-# attributing a listening note to a build. "unknown" is an acceptable fallback (a source tarball
-# with no .git directory, or git missing from PATH) and never fails the configure step.
-find_package(Git QUIET)
-set(CNPG_RENDER_GIT_COMMIT "unknown")
-if(GIT_FOUND)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE CNPG_RENDER_GIT_COMMIT_RESOLVED
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE CNPG_RENDER_GIT_RESULT
-        ERROR_QUIET
-    )
-    if(CNPG_RENDER_GIT_RESULT EQUAL 0 AND NOT CNPG_RENDER_GIT_COMMIT_RESOLVED STREQUAL "")
-        set(CNPG_RENDER_GIT_COMMIT "${CNPG_RENDER_GIT_COMMIT_RESOLVED}")
-    endif()
-endif()
+# THE PROVENANCE FIELD IS A RENDER-TIME CONTENT HASH, NOT A CONFIGURE-TIME GIT COMMIT (Task P2.7).
+#
+# This block used to resolve `git rev-parse --short HEAD` here and bake it in, with a comment
+# claiming it "necessarily names the PARENT of the commit that lands the binary". That claim was
+# false in the direction that matters: a configure-time value is resolved when CMake LAST RAN, so a
+# build/ tree configured at 77b0430 produced renders from the code at 1ccfcb1 and filed them as
+# `..._cv1_g77b0430.wav` -- three commits stale, and two different code states writing identical
+# filenames. docs/plan.md section 4.8 requires those filenames to make listening notes attributable,
+# and P2.8 is the listening pass, so it is fixed here rather than lived with.
+#
+# cnpg_render now links tests/support/SourceHash.cpp and computes the digest at RENDER time over the
+# bytes a render is actually a function of (see tests/support/SourceHash.h::renderSourceHash). That
+# file has no Catch2 dependency, so this stays a cnpg_dsp-only executable and still builds under the
+# linux-dsp-only preset.
+target_sources(cnpg_render PRIVATE ${CMAKE_SOURCE_DIR}/tests/support/SourceHash.cpp)
 
 target_compile_definitions(cnpg_render PRIVATE
-    CNPG_RENDER_GIT_COMMIT="${CNPG_RENDER_GIT_COMMIT}"
+    CNPG_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )

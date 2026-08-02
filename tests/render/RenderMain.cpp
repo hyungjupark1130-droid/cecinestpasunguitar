@@ -97,9 +97,7 @@
 #include <utility>
 #include <vector>
 
-#ifndef CNPG_RENDER_GIT_COMMIT
-#define CNPG_RENDER_GIT_COMMIT "unknown" // safety net if a non-CMake build forgets to define this
-#endif
+#include "support/SourceHash.h"
 
 namespace {
 
@@ -1253,18 +1251,37 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
     return true;
 }
 
-// Render filenames in --corpus mode: "<phrase stem>__cv<corpusVersion>_g<git hash>.wav"
+// The digest stamped into filenames and printed in the banner, resolved ONCE per process because it
+// walks the source tree (Task P2.7, carry-forward C2). "unknown" if the tree cannot be read -- a
+// source tarball with no checkout around it -- which is the same fallback the configure-time hash it
+// replaces had, and it never fails a render.
+const std::string& renderSourceDigest() {
+    static const std::string digest = [] {
+        const std::string full = cnpg::test::renderSourceHash();
+        return full.empty() ? std::string("unknown") : full.substr(0, 12);
+    }();
+    return digest;
+}
+
+// Render filenames in --corpus mode: "<phrase stem>__cv<corpusVersion>_s<source hash>.wav"
 // (docs/plan.md section 4.8: "Render filenames embed corpus version + git hash so listening notes
-// are attributable"). The git hash is baked in at configure time (tests/render/CMakeLists.txt) and
-// carries the same caveat cnpg_bench's does: it necessarily names the PARENT of the commit that
-// lands the binary, which is fine for attributing a listening note and is not the self-consistent
-// content hash the golden sidecars need (tests/support/SourceHash.h explains that distinction).
+// are attributable").
+//
+// *** THE FIELD IS A CONTENT HASH, NOT A COMMIT, AND THE PREFIX IS `s` RATHER THAN `g` SO NOBODY
+// READS IT AS ONE (Task P2.7, carry-forward C2). *** It used to be a configure-time
+// `git rev-parse --short HEAD`, which is resolved when CMake last ran and not when the binary was
+// built or run: a build/ tree configured at 77b0430 produced renders from the code at 1ccfcb1 and
+// filed them as `..._cv1_g77b0430.wav`, so TWO DIFFERENT CODE STATES PRODUCED IDENTICAL FILENAMES --
+// exactly the confusion this field exists to prevent, discovered in the task before the listening
+// pass that depends on it. The digest is computed at RENDER time over dsp/include, dsp/src,
+// tests/support/P1Chain.h and tests/render, so it names the bytes that produced the audio and is
+// verifiable from any checkout with no repository history at all. See tests/support/SourceHash.h.
 std::string renderFileName(const std::string& midiFileName, long long corpusVersion) {
     std::string stem = midiFileName;
     const auto dot = stem.find_last_of('.');
     if (dot != std::string::npos)
         stem.erase(dot);
-    return stem + "__cv" + std::to_string(corpusVersion) + "_g" + CNPG_RENDER_GIT_COMMIT + ".wav";
+    return stem + "__cv" + std::to_string(corpusVersion) + "_s" + renderSourceDigest() + ".wav";
 }
 
 } // namespace
@@ -1300,8 +1317,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("cnpg_render -- P1 chain, %.0f Hz, %d-sample blocks, git %s\n", args.sampleRate, args.blockSize,
-                CNPG_RENDER_GIT_COMMIT);
+    std::printf("cnpg_render -- P1 chain, %.0f Hz, %d-sample blocks, source %s\n", args.sampleRate, args.blockSize,
+                renderSourceDigest().c_str());
     // stdout is block-buffered when it is a pipe or a file -- which is exactly how the [contract]
     // test and any CI step capture it -- while stderr is not, so without these flushes a diagnostic
     // would land in the captured log ABOVE the progress lines that led to it. Flushing at each

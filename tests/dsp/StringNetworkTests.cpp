@@ -151,6 +151,18 @@ class RecordingPort final : public cnpg::dsp::IBridgePort<float> {
     bool isQuiescent() const noexcept override { return true; } // memoryless
     cnpg::dsp::Sample64 storageEnergy() const noexcept override { return 0.0; }
 
+    // -0.5 is a REAL reflectance, so its phase is 0 at every frequency and this spy costs the loop
+    // no tuning (Task P2.7). Counted, so a test can assert the network really did ask the
+    // SUBSTITUTED port what to tune with rather than the junction it replaced.
+    double reflectionPhaseDelaySamples(int portIndex, double frequencyHz, int numPorts) const noexcept override {
+        (void)portIndex;
+        (void)frequencyHz;
+        (void)numPorts;
+        ++phaseDelayQueries;
+        return 0.0;
+    }
+
+    mutable int phaseDelayQueries = 0;
     int prepareCalls = 0;
     int resetCalls = 0;
     int scatterCalls = 0;

@@ -41,26 +41,34 @@ constexpr int kGateHighMidi = 96;
 // -- and Task P2.4 is where that distinction stopped being academic. See kAnalyticSanityCents.
 constexpr double kGateCents = 2.0;
 
-// WHAT THE P1 ANALYTIC CASES ASSERT INSTEAD, AND WHY IT IS NOT 2 CENTS (Task P2.4).
+// *** THE +/-2 CENT LINE IS BACK ON THE SHIPPING TOPOLOGY (Task P2.7). ***
 //
-// The analytic compensation is a closed-form solve over the loop's own filters: rails, fractional
-// interpolator, dispersion chain, loop loss. It was derived for a string terminated by a rigid -1
-// and it is EXACT for one -- 0.00028 cents worst over the gated band, which is the number this file
-// reported through P2.3.
+// The history, because the number below moved twice and each move has to be readable.
 //
-// P2.4 gives the shipping topology a loaded bridge, and a bridge with a resonance PULLS the partials
-// near it. That is physics, not error: it is the same mechanism that puts dead spots on a real
-// instrument, and the pull is a function of three LIVE parameters (coupling, resonance, damping),
-// so no compensation derived without them can absorb it. The honest choices were to keep measuring
-// a topology that ships nowhere, or to measure the instrument and move the +/-2 cent assertion to
-// the case section 4.5 already assigns it to. This file does the second.
+// P1: the analytic compensation is a closed-form solve over the loop's own filters -- rails,
+// fractional interpolator, dispersion chain, loop loss -- derived for a string terminated by a rigid
+// -1, and EXACT for one (0.00028 cents worst over the gated band).
 //
-// The bound below is therefore a SANITY bound, not a tuning criterion: it exists so that a residual
-// which suddenly became enormous still fails something, and it is set from the measured worst case
-// (see the printed sweep) with roughly 2x headroom rather than chosen for roundness. The +/-2 cent
-// obligation is recorded as a binding entry condition on Task P2.7, which measures the real filters
-// under the real admittance and can therefore represent what a note-indexed formula cannot.
-constexpr double kAnalyticSanityCents = 12.0;
+// P2.4 gave the shipping topology a loaded bridge, and a bridge with a resonance pulls the partials
+// near it. The compensation could not absorb a load it was derived without, the measured worst went
+// to 4.90 cents, and this file's gated bound became a documented +/-12 cent SANITY bound with the
+// +/-2 cent obligation recorded as a binding entry condition on Task P2.7.
+//
+// P2.7 DISCHARGES IT. The bridge port's own self-reflectance now contributes its PHASE delay to the
+// loop-length solve (dsp/include/cnpg/dsp/BridgeTuning.h, ADR 0007 D1), so the compensation is
+// derived WITH the load rather than without it. Measured on the sweep below: worst 0.0598 cents over
+// MIDI 33-96 at all three rates, against the 4.90 cents P2.4 recorded for the identical render.
+//
+// So the bound here is the CRITERION again, not a sanity bound, and it is kGateCents. What is kept
+// from P2.4 is the attribution structure -- the decoupled control below -- because that is what says
+// a future failure is the bridge term and not the P1 solve underneath it.
+constexpr double kAnalyticSanityCents = kGateCents;
+
+// The measured worst on this sweep is 0.0598 cents. This is what the sweep must stay UNDER for the
+// gate to be measuring a working compensation rather than merely a passing one: the +/-2 cent line
+// would be cleared by a compensation that had silently lost 97% of its effect. Set with ~4x headroom
+// over the measurement, at all three rates and both bands.
+constexpr double kCompensatedWorstCents = 0.25;
 
 // SUSTAIN SETTING FOR THE SWEEP -- deliberate, documented, and NOT a loosening of the gate.
 // The mandated estimator analyses 2^18 samples (2^19 at 96 kHz) starting 0.5 s after the pluck.
@@ -273,21 +281,54 @@ TEST_CASE("TUNING: P1 analytic compensation sweep", "[tuning]") {
         std::cout << row << "\n";
     std::cout << "[tuning] band MIDI " << kGateLowMidi << "-" << kGateHighMidi
               << " IN THE SHIPPING COUPLED TOPOLOGY: worst |error| " << worstGated << " cents at MIDI "
-              << worstGatedNote << " / " << worstGatedRate << " Hz (sanity bound " << kAnalyticSanityCents
-              << "; the +/-" << kGateCents
-              << " cent assertion binds Task P2.7's calibration-table case, docs/plan.md section 4.5)\n";
+              << worstGatedNote << " / " << worstGatedRate << " Hz (gate +/-" << kGateCents
+              << "; P2.4 measured 4.90 cents on this identical render before the bridge phase-delay compensation)\n";
 
-    // NON-VACUITY IN BOTH DIRECTIONS. The residual must be REAL -- if this ever reads ~0 again, the
-    // render has stopped going through the loaded bridge and the deviation Task P2.4 corrected has
-    // come back -- and it must not have silently grown into the sanity bound.
-    REQUIRE(worstGated > 0.5);
-    REQUIRE(worstGated < kAnalyticSanityCents);
+    // NOT MERELY UNDER THE GATE -- under the number a WORKING compensation produces. The +/-2 cent
+    // criterion would be cleared by a compensation that had lost 97% of its effect, so the bound
+    // that actually guards this is kCompensatedWorstCents. See its declaration.
+    REQUIRE(worstGated < kCompensatedWorstCents);
 
-    // THE ATTRIBUTION, and what still holds the +/-2 cent line in this file. The residual above is
-    // the LOAD's phase response, not a broken solve -- and the way to say that rather than assert it
-    // is to run the identical render with the bridge DECOUPLED, where the analytic compensation is
-    // the exact closed form it was derived as. If a future change breaks the solve itself, this
-    // fails at 2 cents while the sanity bound above would happily absorb it.
+    // THE RENDER REALLY WENT THROUGH A LOADED BRIDGE, asserted on the state rather than inferred
+    // from the residual. Through P2.4 this was the job of `worstGated > 0.5` -- "if the error is
+    // small the bridge must have fallen out of the render" -- and that reasoning is exactly what
+    // P2.7 invalidates: the error is small now BECAUSE the bridge is in the render and compensated.
+    // Replacing an inference with the direct observation is the P2.1 ruling applied to this file.
+    {
+        cnpg::dsp::StringNetworkParams params;
+        params.stringMaterial.lossGainLow = kSweepLossKnob;
+        params.stringMaterial.lossGainHigh = kSweepLossKnob;
+        cnpg::dsp::StringNetwork<float> probe;
+        probe.prepare(48000.0, 512, kShippingKind);
+        probe.setNumStrings(1);
+        probe.setParams(params);
+        probe.reset();
+        cnpg::dsp::NoteEvent on{};
+        on.type = cnpg::dsp::NoteEventType::NoteOn;
+        on.stringIndex = 0;
+        on.midiNote = 45;
+        on.velocity = kVelocity;
+        on.pluckPosition = kPluckPosition;
+        on.hardness = kHardness;
+        cnpg::dsp::BlockEventQueue events;
+        events.push(on);
+        probe.process(events, 512);
+        // The shipping default admittance contributes a real, nonzero phase delay, and the string is
+        // tuned with it. Both halves matter: a zero here means either the coupling default went back
+        // to 0 or the compensation stopped being pushed, and either way the sweep above would still
+        // pass while measuring something else.
+        INFO("bridge compensation in force at MIDI 45 / 48 kHz: " << probe.bridgeCompensationSamples(0) << " samples");
+        REQUIRE(std::fabs(probe.bridgeCompensationSamples(0)) > 1.0);
+        REQUIRE(probe.bridgeTuningConverged(0));
+        REQUIRE(probe.unbridgedTicks() == 0);
+    }
+
+    // THE ATTRIBUTION CONTROL, kept from P2.4 and still doing its job. Rendering the identical sweep
+    // with the bridge DECOUPLED isolates the P1 solve from the P2.7 bridge term: decoupled, the
+    // analytic compensation is the exact closed form it was derived as, and the bridge contributes
+    // nothing. If a future change breaks the P1 solve, BOTH arms fail; if it breaks only the bridge
+    // term, only the coupled arm does. That is the whole reason to keep measuring a topology that
+    // ships nowhere.
     double worstDecoupled = 0.0;
     int worstDecoupledNote = 0;
     for (double sampleRate : kRates) {
@@ -303,9 +344,13 @@ TEST_CASE("TUNING: P1 analytic compensation sweep", "[tuning]") {
     }
     std::cout << "[tuning] DECOUPLED control (couplingStrength 0, same render otherwise): worst |error| "
               << worstDecoupled << " cents at MIDI " << worstDecoupledNote << " (limit " << kGateCents
-              << ") -- so the residual above is the LOAD's phase response, not the analytic solve\n";
-    // ...and the two really are different measurements, by orders of magnitude.
+              << ") -- the P1 solve alone, with no load to correct for\n";
+    // The decoupled arm is the exact closed form, so it must remain an order of magnitude tighter
+    // than the compensated coupled arm even now that the coupled arm is itself under a tenth of a
+    // cent. `< 0.1 * worstGated` was the P2.4 form of this and it still holds; stated against the
+    // absolute figure too, so it cannot be satisfied by the coupled arm degrading.
     REQUIRE(worstDecoupled < 0.1 * worstGated);
+    REQUIRE(worstDecoupled < 0.01);
 }
 
 // ---------------------------------------------------------------------------------------------

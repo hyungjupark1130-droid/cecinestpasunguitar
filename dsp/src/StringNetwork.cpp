@@ -81,9 +81,22 @@ void StringNetwork<SampleT>::prepare(double sampleRate, int maxBlockSize, Fracti
         // including ones outside the active count, so a later setNumStrings() cannot readmit a
         // string that is silently a semitone-and-a-bit sharp.
         strings_[static_cast<std::size_t>(s)].setBridgePortDriven(true);
-        midiNote_[static_cast<std::size_t>(s)] = static_cast<std::uint8_t>(kMinMidiNote);
+        // THE STRING'S REST PITCH (Task P2.7), not kMinMidiNote. Six untouched strings all at A0 is
+        // not an instrument, and A0's harmonic series contains very nearly everything the other
+        // strings play -- see StringNetworkParams::PerString::restMidiNote for the measurement that
+        // says how much that cost.
+        midiNote_[static_cast<std::size_t>(s)] = static_cast<std::uint8_t>(std::clamp(
+            static_cast<int>(params_.perString[static_cast<std::size_t>(s)].restMidiNote), kMinMidiNote, kMaxMidiNote));
         portImpedance_[static_cast<std::size_t>(s)] = strings_[static_cast<std::size_t>(s)].portImpedance();
+        lastSolveValid_[static_cast<std::size_t>(s)] = false;
+        bridgeTuningConverged_[static_cast<std::size_t>(s)] = true;
+        bridgeTuningIterations_[static_cast<std::size_t>(s)] = 0;
+        bridgeTuningResidual_[static_cast<std::size_t>(s)] = 0.0;
     }
+    bridgeTuningFallbacks_ = 0;
+    // A different sample rate makes every phase delay a different number, so no solve cached before
+    // this call may be reused.
+    ++admittanceGeneration_;
 
     // (string, tap, sample): kMaxStrings * kMaxTapsPerString runs of maxBlockSize_, all of them
     // preallocated regardless of how many strings or taps are active, for the same reason the rails
@@ -146,6 +159,12 @@ template <typename SampleT> void StringNetwork<SampleT>::reset() noexcept {
         pendingNote_[static_cast<std::size_t>(s)] = NoteEvent{};
     }
     previousRenderedMask_ = 0;
+    // Cleared AFTER the loop above, not before: clearStringState() re-solves each string's bridge
+    // tuning on its way back to the rest pitch, so anything counted during a reset belongs to the
+    // instance being discarded and not to the one that comes out of it. Same contract as
+    // WaveguideString's reflection-tick counters -- a reset instance is indistinguishable from a
+    // freshly prepared one, and a nonzero fallback count is exactly such a difference.
+    bridgeTuningFallbacks_ = 0;
 
     std::fill(tapStorage_.begin(), tapStorage_.end(), SampleT(0));
     std::fill(bridgeBuffer_.begin(), bridgeBuffer_.end(), SampleT(0));
@@ -170,6 +189,13 @@ template <typename SampleT> void StringNetwork<SampleT>::setNumStrings(int count
     const int clamped = std::clamp(count, 1, kMaxStrings);
     const int previous = numStrings_;
     numStrings_ = clamped;
+
+    // The count enters the junction's sigma, so it enters every string's tuning (Task P2.7). A
+    // small term -- one unit port in a sigma of hundreds -- and re-solving is cheap, so it is done
+    // rather than argued about.
+    if (clamped != previous)
+        for (int s = 0; s < kMaxStrings; ++s)
+            applyStringParams(s);
 
     if (clamped > previous) {
         // Immediate: the readmitted strings rejoin the loop on the next block.
@@ -210,6 +236,14 @@ template <typename SampleT> void StringNetwork<SampleT>::setNumTapsPerString(int
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::setParams(const StringNetworkParams& p) noexcept {
+    // The admittance generation is bumped BEFORE params_ is overwritten, and only when the value
+    // really differs -- this is the whole of what makes the per-block setParams cascade cheap again
+    // (see lastSolvedTargetHz_). Field-wise rather than memcmp: BridgeAdmittanceParams is trivially
+    // copyable but padding bytes are not required to be equal, so a memcmp could report a change that
+    // did not happen and re-solve every block anyway.
+    if (p.bridge.couplingStrength != params_.bridge.couplingStrength ||
+        p.bridge.resonanceHz != params_.bridge.resonanceHz || p.bridge.damping != params_.bridge.damping)
+        ++admittanceGeneration_;
     params_ = p;
     // One target per (string, tap). Every slot carries the same global pickupPosition01 today; the
     // array exists so a per-coil offset has somewhere to land without another rewrite of the loop.
@@ -217,14 +251,19 @@ template <typename SampleT> void StringNetwork<SampleT>::setParams(const StringN
     for (double& slot : tapTarget_)
         slot = target;
     refreshEnableTargets();
-    for (int s = 0; s < kMaxStrings; ++s)
-        applyStringParams(s);
     // The bridge admittance travels on StringNetworkParams (docs/plan.md section 2.7) and reaches
     // whatever port is attached through IBridgePort::setAdmittance, which is why that method is on
     // the interface rather than only on BridgeJunction: this call site cannot know which
     // implementation it is holding, and must not have to.
+    //
+    // IT GOES FIRST, and the order is load-bearing from Task P2.7. applyStringParams() below asks
+    // the port what phase delay it contributes, and the answer has to be the one for the admittance
+    // the caller just set -- otherwise every parameter change would tune the strings for the
+    // PREVIOUS load and the compensation would run one setParams() behind the instrument for ever.
     if (port_ != nullptr)
         port_->setAdmittance(params_.bridge);
+    for (int s = 0; s < kMaxStrings; ++s)
+        applyStringParams(s);
 }
 
 template <typename SampleT> void StringNetwork<SampleT>::setBridgePort(IBridgePort<SampleT>& port) noexcept {
@@ -233,6 +272,14 @@ template <typename SampleT> void StringNetwork<SampleT>::setBridgePort(IBridgePo
     port_->setLossBypassed(lossless_);
     port_->setAdmittance(params_.bridge);
     port_->reset();
+    // A substituted port is a different LOAD, so it is a different tuning (Task P2.7), and no solve
+    // cached against the port it replaced may be reused. Re-solving here is what keeps Q17's
+    // "StringNetwork must not be able to tell the difference" true of pitch as well as of scattering
+    // -- a fallback bus swapped in silently at the same seam would otherwise inherit whatever
+    // compensation the junction it replaced had asked for.
+    ++admittanceGeneration_;
+    for (int s = 0; s < kMaxStrings; ++s)
+        applyStringParams(s);
 }
 
 template <typename SampleT> bool StringNetwork<SampleT>::stringHasState(int stringIndex) const noexcept {
@@ -290,7 +337,35 @@ template <typename SampleT> void StringNetwork<SampleT>::updateLoopStringCount()
 template <typename SampleT> void StringNetwork<SampleT>::clearStringState(int stringIndex) noexcept {
     if (strings_.empty())
         return;
+    // THE STRING GOES BACK TO ITS REST PITCH (Task P2.7) unless the caller names another one. On a
+    // real instrument, releasing a fretted note returns the string to open; a string left tuned to
+    // the last note anyone happened to play it would keep resonating sympathetically at that pitch
+    // for the rest of the session, which is not what a guitar does.
+    clearStringState(stringIndex,
+                     static_cast<int>(params_.perString[static_cast<std::size_t>(stringIndex)].restMidiNote));
+}
+
+template <typename SampleT>
+void StringNetwork<SampleT>::clearStringState(int stringIndex, int leaveTunedToMidiNote) noexcept {
+    if (strings_.empty())
+        return;
     const auto index = static_cast<std::size_t>(stringIndex);
+
+    // THE PITCH IS PART OF WHAT IS BEING CLEARED, and it moves here rather than at the call sites
+    // because it obeys the same invariant they do: retuning a string is free exactly when the waves
+    // it scatters are zeros, which is the property this function establishes. A fresh note-on names
+    // the note it is about to pluck (so the snap below lands on it instead of gliding to it from
+    // the open string); everything else -- reset(), the enable ramp landing, the silence watchdog --
+    // takes the default and gets the rest pitch.
+    //
+    // BEFORE the reset, not after: applyStringParams() retargets the f0 smoother (and the bridge
+    // tuning solve that hangs off it), and WaveguideString::reset() is what SNAPS every smoother
+    // onto its target. In the other order the string would glide over 8 ms from a set of rails that
+    // were just zeroed -- inaudible, and a difference from a freshly prepared instance that nothing
+    // could justify.
+    midiNote_[index] = static_cast<std::uint8_t>(std::clamp(leaveTunedToMidiNote, kMinMidiNote, kMaxMidiNote));
+    applyStringParams(stringIndex);
+
     strings_[index].reset();
     // reset(), not setEngagementImmediate(0). Both open the damper, but the junction has a SECOND
     // smoother -- the loss depth -- and only reset() snaps that one onto its parameter too. Using
@@ -339,6 +414,72 @@ template <typename SampleT> void StringNetwork<SampleT>::applyStringParams(int s
         bend + static_cast<float>(static_cast<double>(params_.perString[index].tuningOffsetCents) / kCentsPerSemitone);
     p.stringMaterial = params_.stringMaterial;
     strings_[index].setParams(p);
+
+    // ---- THE BRIDGE TUNING SOLVE (Task P2.7, ADR 0007 D1/D6) ----------------------------------
+    //
+    // Here, and only here: this function is the single place a string's pitch target or its load can
+    // change, so it is the single place the compensation can go stale. It runs on a parameter change
+    // and on a note event -- O(1) per string, a handful of trig calls -- and NEVER per sample, which
+    // is what ADR 0007 D6's "offline at parameter-change time, never on the audio path" asks for.
+    // The result is handed to the string as a smoother TARGET, so the change itself is a glide.
+    //
+    // Evaluated at the string's own BENT target, not at the note's nominal: a bend is a pitch and
+    // the port's phase delay is a function of pitch. The plugin calls setParams() every block, so a
+    // wheel ride re-solves at block rate and the compensation tracks the bend.
+    //
+    // numStrings_ rather than loopStrings_ is what sigma is formed over. The two differ only while a
+    // count REDUCTION's removed strings are still ramping out, and the difference is one unit port
+    // in a sigma of hundreds to thousands -- under 0.01 cents at the shipping impedances. What
+    // numStrings_ buys is that the answer is a function of the configuration the caller asked for
+    // rather than of how far a 10 ms ramp has got, which is what makes it reproducible.
+    if (port_ != nullptr) {
+        const double targetHz = static_cast<double>(p.f0Hz) * std::exp2(static_cast<double>(p.bendSemitones) / 12.0);
+        // SKIPPED WHEN NOTHING IT DEPENDS ON HAS MOVED -- see lastSolvedTargetHz_ for why this is the
+        // ADR's claim rather than a shortcut. The comparison is exact equality on purpose: these are
+        // the very doubles the previous solve consumed, so "unchanged" means bitwise unchanged and a
+        // tolerance would only introduce a threshold nobody could justify.
+        const bool unchanged = lastSolveValid_[index] && lastSolvedTargetHz_[index] == targetHz &&
+                               lastSolvedAdmittanceGen_[index] == admittanceGeneration_ &&
+                               lastSolvedPortCount_[index] == numStrings_;
+        if (!unchanged) {
+            const BridgeTuningSolution solved =
+                solveBridgeTuning(*port_, stringIndex, targetHz, sampleRate_, numStrings_);
+            strings_[index].setBridgePhaseDelaySamples(static_cast<float>(solved.phaseDelaySamples));
+            bridgeTuningConverged_[index] = solved.converged;
+            bridgeTuningIterations_[index] = solved.iterations;
+            bridgeTuningResidual_[index] = solved.residualCents;
+            if (!solved.converged)
+                ++bridgeTuningFallbacks_;
+            lastSolvedTargetHz_[index] = targetHz;
+            lastSolvedAdmittanceGen_[index] = admittanceGeneration_;
+            lastSolvedPortCount_[index] = numStrings_;
+            lastSolveValid_[index] = true;
+        }
+    }
+}
+
+template <typename SampleT> double StringNetwork<SampleT>::bridgeCompensationSamples(int stringIndex) const noexcept {
+    if (strings_.empty() || stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0.0;
+    return strings_[static_cast<std::size_t>(stringIndex)].currentBridgePhaseDelaySamples();
+}
+
+template <typename SampleT> bool StringNetwork<SampleT>::bridgeTuningConverged(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return true;
+    return bridgeTuningConverged_[static_cast<std::size_t>(stringIndex)];
+}
+
+template <typename SampleT> int StringNetwork<SampleT>::bridgeTuningIterations(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0;
+    return bridgeTuningIterations_[static_cast<std::size_t>(stringIndex)];
+}
+
+template <typename SampleT> double StringNetwork<SampleT>::bridgeTuningResidualCents(int stringIndex) const noexcept {
+    if (stringIndex < 0 || stringIndex >= kMaxStrings)
+        return 0.0;
+    return bridgeTuningResidual_[static_cast<std::size_t>(stringIndex)];
 }
 
 template <typename SampleT> float StringNetwork<SampleT>::tapPosition01(int stringIndex, int tapIndex) const noexcept {
@@ -515,9 +656,12 @@ template <typename SampleT> void StringNetwork<SampleT>::handleEvent(const NoteE
     const bool ownsNote = sounding_[index];
 
     if (!ownsNote) {
-        midiNote_[index] = static_cast<std::uint8_t>(note);
-        applyStringParams(stringIndex); // retarget f0 first...
-        clearStringState(stringIndex);  // ...so reset() snaps the smoothers onto the NEW pitch
+        // The state goes and the string comes back tuned to the note about to be plucked -- one
+        // call, because the retune and the clear are the same operation and doing them separately
+        // is what let the pitch and the rails disagree (Task P2.7). The NOTE is named here rather
+        // than defaulted, so the snap inside lands on the new pitch instead of gliding to it from
+        // the open string.
+        clearStringState(stringIndex, note);
         excite(stringIndex, event);
         return;
     }
@@ -616,10 +760,9 @@ template <typename SampleT> void StringNetwork<SampleT>::landSynthFade(int strin
     fadeSteps_[index] = 0;
     fadeGain_[index] = 1.0f;
 
-    midiNote_[index] =
-        static_cast<std::uint8_t>(std::clamp(static_cast<int>(pending.midiNote), kMinMidiNote, kMaxMidiNote));
-    applyStringParams(stringIndex);
-    clearStringState(stringIndex);
+    // Same one call as the fresh-note path above, and for the same reason: the clear and the retune
+    // onto the pending note are one operation (Task P2.7).
+    clearStringState(stringIndex, static_cast<int>(pending.midiNote));
     excite(stringIndex, pending);
 
     if (pendingNoteOff_[index]) {
