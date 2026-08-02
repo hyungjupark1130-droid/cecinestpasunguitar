@@ -42,9 +42,12 @@ std::string sourceHashOf(const std::vector<std::string>& repoRelativeRoots);
 // *** THE DIGEST cnpg_render STAMPS INTO ITS FILENAMES (Task P2.7, carry-forward C2). ***
 //
 // It replaces a configure-time `git rev-parse --short HEAD`, and the replacement is not cosmetic.
-// docs/plan.md section 4.8 requires "render filenames embed corpus version + git hash so listening
+// docs/plan.md section 4.8 required "render filenames embed corpus version + git hash so listening
 // notes are attributable", and the configure-time value could not do that: it is resolved when CMake
-// last ran, not when the binary was built or run. Observed on this repository -- a build/ tree
+// last ran, not when the binary was built or run. (Section 4.8 now says "corpus version + a
+// render-time content hash" in both plan copies, amended by this task -- a plan that still mandated a
+// git hash would mandate something the tree no longer produces, and P2.8 is the pass that reads it.)
+// Observed on this repository -- a build/ tree
 // configured at 77b0430 produced renders from the code at 1ccfcb1 and filed them as
 // `..._cv1_g77b0430.wav`, three commits stale, so TWO DIFFERENT CODE STATES PRODUCED IDENTICAL
 // FILENAMES. That is exactly the confusion the field exists to prevent, and P2.8 is the listening

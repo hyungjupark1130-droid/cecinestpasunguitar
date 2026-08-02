@@ -110,8 +110,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     // constants dsp/include/cnpg/dsp/BridgeJunction.h derives and carries -- and a UI that draws a
     // guaranteed-range marker on these three sliders has exactly one place to read it from.
     //
+    // *** WHAT THE GUARANTEE IS AND IS NOT. *** It is the +/-2 cent TUNING bound -- ADR 0007 D5's
+    // criterion (1) -- and nothing else. D5 defines the Normal range as the region where all FIVE of
+    // its criteria hold at once, and the box above is not that region: criterion (4), "near-unison
+    // strings ~25 cents apart do not involuntarily mode-lock", is measured to FAIL at
+    // kBridgeNormalCouplingMax, which is also this slider's default. Two strings 25 cents apart
+    // collapse to a 0.003-cent separation there. See ADR 0007 D7.0. A UI marker drawn from these
+    // constants would therefore be marking the in-tune sub-range, not a "safe" one.
+    //
     // Both the range and the coupling DEFAULT are provisional until the P2.8 listening pass, which
-    // settles them together (ADR 0007 D4/D5).
+    // settles them together (ADR 0007 D4/D5) -- and criterion (4) is precisely why they are one
+    // decision rather than two.
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::bridgeCoupling), "Bridge Coupling",
                                                            unitRange,
                                                            cnpg::dsp::BridgeAdmittanceParams{}.couplingStrength));

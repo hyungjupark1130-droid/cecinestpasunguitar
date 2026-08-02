@@ -127,6 +127,11 @@ so it can proceed; **P2.8 confirms or revises it** in the same session that sett
 `couplingStrength` default. Criterion 4 is the one that ties the range to D4: mode-locking is a
 coupling phenomenon, so the coupling default and the range ceiling are the same measurement.
 
+**Read D7.0 before D7's table.** The region D7 declares is derived from criterion (1) alone, and
+**criterion (4) is measured to FAIL at its coupling ceiling** — so D7's box is not, today, the
+five-criteria region this section defines. That gap is the reason the range is provisional, and
+closing it is P2.8's.
+
 Settings **outside** the Normal range remain available as an **Extended (Effect) range**. They
 carry **no tuning guarantee** — this is where D3's bounded physical detuning lives, and it is a
 legitimate place for the instrument to be an effect, provided the boundary is declared rather than
@@ -172,6 +177,60 @@ of the design.
 remains fully available; what it loses is the ±2-cent promise, and that is exactly D3's bounded
 physical detuning — a radically compliant or radically sharp bridge *should* pull pitch.
 
+#### D7.0 — this box is derived from criterion (1) ALONE, and criterion (4) FAILS at its coupling ceiling
+
+*Stated first because it qualifies everything below it. Added by the P2.7 review, on measurement.*
+
+D5 defines the Normal range as the largest contiguous region in which **all five** criteria hold
+**simultaneously**. **This box does not meet that definition.** It is the largest box inside
+criterion (1) — the ±2-cent tuning bound — with criterion (2) checked and found never to fire and
+criterion (3) measured by the live-parameter click gate. **Criterion (4) — "near-unison strings ≈25
+cents apart do not involuntarily mode-lock" — is NOT satisfied at the coupling ceiling of 0.35.** It
+was not merely left unmeasured; it was measured, and it fails.
+
+**The measurement.** Two strings at MIDI 45, string 1 offset +25 cents via `tuningOffsetCents`, the
+shipping bridge otherwise, both plucked, 48 kHz, 7 s, sustain material, peak of each string's own tap
+inside ±80 cents of its own nominal:
+
+| `couplingStrength` | string 0 | string 1 | separation | pull on string 0 |
+|---|---|---|---|---|
+| 0.20 | 109.9956 Hz | 111.5984 Hz | **25.045 cents** | −0.07 |
+| 0.25 | 109.9922 Hz | 111.5985 Hz | **25.099 cents** | −0.12 |
+| 0.30 | 111.5991 Hz | 111.5993 Hz | **0.003 cents** | **+24.99** |
+| 0.35 | 111.6013 Hz | 111.6015 Hz | **0.003 cents** | **+25.02** |
+
+The whole 25-cent separation collapses and lands on the string nobody detuned. Three further facts,
+because each of them closes an escape route:
+
+- **It is not an artifact of the sustain material.** At the **default** string material the boundary
+  sits between 0.32 and 0.35 — separation 25.14 cents at coupling 0.30 and 25.18 at 0.32, then
+  **0.33 cents at 0.35**, a +24.67-cent pull. The ceiling is inside the locked region at both
+  materials.
+- **It is not an artifact of plucking both strings.** Plucking only string 0 — the purely
+  sympathetic case, which is the ordinary one — locks at the same ceiling: 25.19 cents separation at
+  coupling 0.30, **−0.01 cents at 0.35** with a +25.04-cent pull.
+- **It is worse, not better, where the load resonates.** At MIDI 53 (on the 180 Hz bridge resonance)
+  coupling 0.35 compresses the pair from 25 cents to **15.10 cents** with a **+5.05-cent** pull on
+  string 0 — audible detuning without a full lock, which is the harder case to dismiss.
+
+**Consistency with ADR 0006, which is what says this is the same phenomenon and not a new one.**
+ADR 0006 recorded the locked frequency as 111.297 Hz. The same configuration on P2.7's tree locks at
+**111.6013 Hz — +4.73 cents**, which is P2.7's own compensation at MIDI 45 (+4.83 cents, the
+`string_ir` golden drift). **The lock is unchanged in character; P2.7 moved it onto the correct
+pitch.** `tests/dsp/StringNetworkScaleTests.cpp` already gates it — separation < 12.5 cents and a
+pull larger than the whole decoupled error budget — so this is a standing measurement in the suite,
+not a one-off.
+
+**Why the ceiling is NOT lowered here.** Criterion (4) is a musical judgement, and D5 already ties it
+to D4: mode-locking is a coupling phenomenon, so **the coupling default and the range ceiling are the
+same measurement**, and D4 reserves that measurement for the P2.8 listening pass. Lowering the
+ceiling now would pre-empt a decision that session exists to make. What P2.7 owes instead is the
+statement of fact, which is this section.
+
+**The consequence, stated so P2.8 does not have to discover it: the provisional `couplingStrength`
+default sits OUTSIDE a criterion-complete Normal range.** It is inside the criterion-(1) box declared
+above, and outside the region where all five of D5's criteria hold. P2.8 settles both, together.
+
 **Measured worst |error| inside the box: 0.770 cents**, over MIDI 21–96 at 44.1/48/96 kHz at each of
 six grid points (the four coupled corners of the box, the decoupled control, and the shipping
 default) — 2.6× inside the criterion. At the shipping default it is 0.060 cents.
@@ -198,12 +257,20 @@ default) — 2.6× inside the criterion. At the shipping default it is 0.060 cen
   sweep reads 0.03.
 - The **damping floor of 0.15** is where the margin becomes comfortable rather than where the gate
   breaks (0.05 still reads 1.39 cents at resonance 330, i.e. inside the criterion with 1.4× headroom).
-- The **coupling ceiling of 0.35 is a measured boundary that coincides with the provisional default,
-  not the default wearing a different hat.** It is written as a literal in the gate, never as
-  `BridgeAdmittanceParams{}.couplingStrength`, and the gate additionally asserts that the shipping
-  default lies inside the range — so if P2.8 raises the default past the boundary the gate fails and
-  the range must be re-derived, which is what D5 already schedules that session to do. D4's
-  expectation is that P2.8 compares *lower* values, all of which are inside.
+- The **coupling ceiling of 0.35 is a measured criterion-(1) boundary that coincides with the
+  provisional default, not the default wearing a different hat.** It is written as a literal in the
+  gate, never as `BridgeAdmittanceParams{}.couplingStrength`, and the gate additionally asserts that
+  the shipping default lies inside the range — so if P2.8 raises the default past the boundary the
+  gate fails and the range must be re-derived, which is what D5 already schedules that session to do.
+  D4's expectation is that P2.8 compares *lower* values, all of which are inside. **Criterion (4) is
+  a different boundary and it is BELOW this one — see D7.0.**
+- **The coupling face's evidence above is coarser than the boundary it reports, and the headroom is
+  therefore smaller than "0.35 vs 0.50" reads.** The map samples 0.35 and 0.50, but the criterion-(1)
+  failure at the worst corner (resonance 330 Hz, ζ 0.15, 44.1 kHz, worst over MIDI 21–96) is at
+  coupling **≈0.405**, not 0.50: measured **0.7697 / 1.6281 / 1.8575 / 2.5556 / 3.4742** cents at
+  coupling 0.35 / 0.38 / 0.40 / **0.41** / 0.45. The ceiling has roughly **16 %** of criterion-(1)
+  headroom on this face, not the ~43 % the coarse table suggests. That does not move the ceiling —
+  0.35 is inside — but a reader sizing the margin from the table alone would over-estimate it.
 
 **Criterion (2) — solver convergence — never fires inside the box.** The contraction ratio is
 μ/(2πζ) with μ = `couplingStrength × kBridgeMaxMobilityRatio`; at coupling 0.35 it stays under 0.28
@@ -234,8 +301,16 @@ D6 says "P2.7 must iterate (or Newton-solve) to convergence". The derivation say
 value: a waveguide loop resonates where its round-trip phase delay equals `fs/f`, the loop-length
 solve chooses the rail span so that this holds **at the target**, and adding `tau_port(f_target)` to
 that sum makes `f_target` exactly a root. **One closed-form evaluation, no iteration.** Measured: the
-solver reports one iteration at every note at the shipping admittance, and the residual it leaves is
-0.060 cents against 4.90 uncompensated.
+solver reports one iteration at every note at the shipping admittance, and at that admittance the
+**rendered pitch error** is 0.060 cents against 4.90 uncompensated.
+
+**Two different residuals live in this task and they must not be conflated.** The **probe residual**
+is what the solver itself reports (`BridgeTuningSolution::residualCents`) — the worst |cents| the
+fixed-point iterate still carried at its last step, against a 0.25-cent tolerance; its worst over the
+240 084-point dense sweep is **0.063 cents**. The **rendered pitch error** is what the §4.5 estimator
+measures off 7 seconds of audio; at the shipping admittance it is **0.060 cents** and over the whole
+Normal range **0.770**. The two are close at the shipping point by coincidence of magnitude, not by
+construction: one is a property of an arithmetic iterate, the other of the instrument.
 
 The self-reference D6 anticipated is real but it is about **uniqueness**. Given a committed
 compensation, the frequency the string sings at is the fixed point of
@@ -246,9 +321,41 @@ that comes out is not the pitch that was solved for. **That** is what the iterat
 the same thing as D6's "steep phase-slope region". The solver therefore produces the value in closed
 form and spends its iterations establishing that the value is one the instrument can hold.
 
+#### D9.1 — the exact root is a PHASE ZERO; the sounding pitch is a POLE, and the gap is the whole residual
+
+*Recorded in the ADR rather than only in the task report, because it is what the Normal range's
+resonance and damping ceilings are actually cut from.*
+
+The closed form above places the loop's **round-trip phase zero** exactly on the target — exactly, at
+every admittance, which is why the ±2-cent gate's residual is hundredths of a cent and not tenths.
+But **what a listener and an FFT both measure is the loop's POLE**, and a pole sitting on a
+frequency-dependent loop gain is displaced from the unit-circle phase zero by roughly
+
+    Δω  ≈  a₀ · (d ln|L|/dω) / (dφ/dω)²
+
+where `L` is the round-trip loop gain, `a₀` its magnitude deficit from 1, and `dφ/dω` is the loop
+delay in samples, `D`. **The displacement therefore scales as 1/D², i.e. as f₀².** Two consequences,
+both of which the Normal range is shaped by:
+
+1. **This displacement IS the residual.** The 0.060 cents at the shipping admittance and the 0.770 at
+   the box's worst corner are not solver error and not estimator noise — they are the pole–zero gap.
+   No tighter solve reduces them, which is why D6's licensed "residual trim" was measured to be
+   unnecessary rather than merely skipped.
+2. **It is why the ceilings are on the RESONANCE and on the DAMPING rather than on the note.** A
+   resonance sitting on a high note pulls far harder than the same resonance on a low one, because
+   `D` is smaller there. It is also what the high-damping corner failure turned out to be: at ζ ≥ 2
+   the load is dashpot-dominated over a wide band, nothing is localised at the resonance any more,
+   and the worst note migrates to the **top** of the range (2.92 / 4.93 / 7.38 cents at ζ = 2 / 3 / 4,
+   against 0.03 at ζ = 1). The two mechanisms are told apart by *which note fails*, and the gate
+   asserts that migration rather than narrating it.
+
 ## Open questions this ADR does not settle
 
-None outstanding. The three original open questions were answered by the author on the same day and
-are recorded above as D5 and D6; D7–D9 record what Task P2.7 measured against them. What remains is
-not a question but a scheduled confirmation: the **provisional** Normal range (D7) and the
-**provisional** `couplingStrength` default are both settled by ear at P2.8.
+None outstanding as a *question*. The three original open questions were answered by the author on the
+same day and are recorded above as D5 and D6; D7–D9 record what Task P2.7 measured against them.
+
+What remains is a scheduled confirmation with a **known defect in it**: the **provisional** Normal
+range (D7) and the **provisional** `couplingStrength` default are both settled by ear at P2.8, and
+**D7's box is criterion-(1)-complete but not D5-complete** — criterion (4) fails at its coupling
+ceiling, measured, per D7.0. P2.8 therefore does not merely confirm the range; it has an established
+failure to resolve, and D5 makes resolving it the same act as choosing the default.

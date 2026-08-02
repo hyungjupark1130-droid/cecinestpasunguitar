@@ -31,10 +31,18 @@
 // note, so it has two independent failure modes and the click metric only sees one of them:
 //
 //   - a DISCONTINUITY, which the P2.1 click metric measures. Prevented structurally: the
-//     compensation reaches the loop through WaveguideString's own 8 ms one-pole, the same smoother
-//     f0 and the pitch wheel use, so the rail read moves continuously and every position derived
-//     from it moves through P2.3's dual-anchor crossfade. A parameter tweak is therefore the same
-//     motion through the rails as a pitch bend, and inherits the same click-freedom.
+//     compensation reaches the loop through the same loop-length solve f0 and the pitch wheel reach
+//     it through, so the rail read moves continuously and every position derived from it moves
+//     through P2.3's dual-anchor crossfade. A parameter tweak is therefore the same motion through
+//     the rails as a pitch bend, and inherits the same click-freedom.
+//
+//     What it does NOT share with the pitch wheel is the smoother itself. The compensation glides on
+//     an 8 ms LINEAR RAMP THAT LANDS (WaveguideString::setBridgePhaseDelaySamples), not on the 8 ms
+//     one-pole f0 uses, and the difference is a measured CPU fact rather than a stylistic one -- a
+//     one-pole never arrives, so it held every string in per-sample loop re-solve for 0.22 s after
+//     every note change, at 2.55x the CPU. The same duration, a different shape. This gate is what
+//     says the swap cost the audible transition nothing: -0.055 / -0.033 / +0.123 dB after it,
+//     against -0.057 / -0.033 / +0.115 dB before, overshoot 0 and settled spread 0 in both.
 //
 //   - HUNTING, which it cannot. A pitch that glides smoothly to the wrong place and then smoothly
 //     back is perfectly continuous and perfectly audible. So the second measurement is the

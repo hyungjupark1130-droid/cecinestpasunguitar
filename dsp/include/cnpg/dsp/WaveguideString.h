@@ -342,12 +342,20 @@ template <typename SampleT> class WaveguideString {
     // cnpg::dsp::solveBridgeTuning (BridgeTuning.h) on parameter change and on note change -- never
     // per sample. But a bridge parameter can move while the string RINGS, and changing this value is
     // changing the string's loop length, which is a pitch change on a sounding note. It therefore
-    // runs through the SAME per-sample 8 ms one-pole f0 itself uses, so it inherits the click-freedom
-    // the pitch-bend path already has rather than needing a mechanism of its own: the integer part of
-    // the rail read may step while the realized span -- and therefore every tap and injection
-    // position derived from it, all of which are read through P2.3's dual-anchor crossfade -- moves
-    // continuously. That is the whole of what makes a live bridge tweak click-free, and it is why
-    // this is a smoothed quantity and not a plain field.
+    // runs through a per-sample smoother over the SAME 8 ms duration f0 itself glides over -- but
+    // NOT the same smoother: this one is a LINEAR RAMP THAT LANDS, not the one-pole f0 and the loss
+    // and dispersion coefficients use. See the bridgeDelayTarget_ / bridgeDelayStep_ block below for
+    // the paired benchmark that forced it; the short version is that a one-pole never arrives, and a
+    // quantity retargeted on every note change held every string in per-sample loop re-solve for
+    // 0.22 s afterwards, at 2.55x the CPU.
+    //
+    // What it inherits from the pitch-bend path is the PATH, not the smoother: the value reaches the
+    // rails through the same loop-length solve a bend does, so the integer part of the rail read may
+    // step while the realized span -- and therefore every tap and injection position derived from it,
+    // all of which are read through P2.3's dual-anchor crossfade -- moves continuously. That is the
+    // whole of what makes a live bridge tweak click-free, and it is why this is a smoothed quantity
+    // and not a plain field. Measured unchanged across the one-pole -> ramp switch by the
+    // `[contract]` gate: -0.055 / -0.033 / +0.123 dB against -0.057 / -0.033 / +0.115 dB before it.
     //
     // 0 restores the pre-P2.7 behaviour exactly (an isolated string, or a decoupled bridge).
     void setBridgePhaseDelaySamples(float samples) noexcept;

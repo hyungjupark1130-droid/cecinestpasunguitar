@@ -189,7 +189,11 @@ inline constexpr float kBridgeMaxMobilityRatio = 0.05f;
 // the +/-2 cent criterion; 0.060 cents at the shipping default. What binds each face:
 //
 //   - the COUPLING and RESONANCE ceilings trade against each other (at coupling 0.50 the residual at
-//     a resonance/note coincidence is already 12.06 cents at resonance 250 Hz);
+//     a resonance/note coincidence is already 12.06 cents at resonance 250 Hz). That map is COARSER
+//     than the boundary it reports: at the worst corner (resonance 330, zeta 0.15, 44.1 kHz) the
+//     +/-2 cent line is crossed at coupling ~0.405, measured 0.7697 / 1.6281 / 1.8575 / 2.5556 cents
+//     at 0.35 / 0.38 / 0.40 / 0.41 -- about 16% of headroom on this face, not the ~43% that reading
+//     "0.35 vs 0.50" suggests;
 //   - the DAMPING CEILING is a separate mechanism: above ~1.0 the load is dashpot-dominated over a
 //     wide band and the worst note moves to the TOP of the range (2.92 / 4.93 / 7.38 cents at damping
 //     2 / 3 / 4, against 0.03 at damping 1.0);
@@ -199,6 +203,21 @@ inline constexpr float kBridgeMaxMobilityRatio = 0.05f;
 // THE DEFAULT WEARING A DIFFERENT HAT. *** ADR 0007 D4 leaves the default provisional and expects the
 // P2.8 pass to compare LOWER values, all of which are inside this range. If a later session raises it
 // instead, the grid gate fails by design and the range must be RE-DERIVED rather than widened to fit.
+//
+// *** AND IT IS DERIVED FROM D5'S CRITERION (1) ALONE. CRITERION (4) FAILS AT IT. *** ADR 0007 D5
+// defines the Normal range as the region where all FIVE of its criteria hold simultaneously, and this
+// box is not that region: criterion (4) -- "near-unison strings ~25 cents apart do not involuntarily
+// mode-lock" -- is measured to FAIL at couplingStrength 0.35. Two strings at MIDI 45 tuned 25 cents
+// apart collapse to a separation of 0.003 cents with a +25.02 cent pull on the string nobody
+// detuned; the boundary sits between 0.25 and 0.30 at the sustain material and between 0.32 and 0.35
+// at the default one; plucking only one of them locks at 0.35 too. It is not left unmeasured -- it is
+// measured, and it fails. See ADR 0007 D7.0 for the table and
+// tests/dsp/StringNetworkScaleTests.cpp for the standing gate on it.
+//
+// The ceiling is NOT lowered here because D5's criterion (4) makes the ceiling and the
+// couplingStrength default THE SAME MEASUREMENT, and ADR 0007 D4 reserves that measurement for the
+// P2.8 listening pass. The consequence, stated rather than left to be discovered: THE PROVISIONAL
+// couplingStrength DEFAULT SITS OUTSIDE A CRITERION-COMPLETE NORMAL RANGE.
 //
 // PROVISIONAL: P2.8 confirms or revises all five numbers, in the same session that settles the
 // couplingStrength default, because D5's criterion (4) -- near-unison mode-locking -- ties them.
@@ -325,12 +344,20 @@ template <typename SampleT> class BridgeJunction final : public IBridgePort<Samp
     // thousands) and it is included because it is free and because leaving it out would be a
     // silently note-dependent error the moment a per-string impedance model exists.
     //
-    // EVALUATED ON THE SMOOTHER TARGETS, not the values in force. The string's own compensation
-    // smoother and this junction's element smoothers are both the same 8 ms one-pole and both are
-    // retargeted by the same setAdmittance()/setParams() call, so they glide together and land
-    // together. Reading the in-force values here instead would make the answer depend on when
-    // during the glide the query happened to be made, which is neither more correct nor
-    // reproducible.
+    // EVALUATED ON THE SMOOTHER TARGETS, not the values in force -- and THE TWO GLIDES ARE NOT THE
+    // SAME SHAPE, which is the actual reason rather than a caveat on it. This junction's element
+    // smoothers are 8 ms ONE-POLES (kBridgeSmoothingSeconds), which asymptote and never arrive; the
+    // string's compensation smoother is an 8 ms LINEAR RAMP THAT LANDS on a nameable sample
+    // (WaveguideString::setBridgePhaseDelaySamples -- P2.7 changed it, and the measurement that
+    // forced the change is on that declaration). Both are retargeted by the same
+    // setAdmittance()/setParams() call, so they START together; they do NOT land together, and
+    // nothing here should be read as claiming they do.
+    //
+    // Reading the in-force values instead would therefore make the answer depend both on when during
+    // the glide the query was made and on which of two differently-shaped glides had got further --
+    // neither more correct nor reproducible. Reading the targets makes the solve a function of the
+    // configuration the caller asked for, which is what lets the live-parameter gate assert that
+    // 1271 re-solves of an unchanged automation value produce a spread of exactly 0.0 samples.
     double reflectionPhaseDelaySamples(int portIndex, double frequencyHz, int numPorts) const noexcept override;
 
     // Tier-1 [energy] hook (docs/plan.md section 4.2). Writes the POWER-NORMALIZED N x N scattering

@@ -40,10 +40,11 @@
 // --midi/--out is the locked P1 form (Task P1.11 step 1): one MIDI file in, one named WAV out, with
 // --out taken literally so an acceptance command can name its own output path. --corpus renders
 // every phrase in a corpus manifest (tests/corpus/corpus.json) in one run, and there --out names a
-// DIRECTORY: the per-phrase filenames are generated, and they embed the corpus version and the git
-// hash, because docs/plan.md section 4.8 requires exactly that ("Render filenames embed corpus
-// version + git hash so listening notes are attributable") and a caller-supplied literal filename
-// structurally cannot. That is also the shape Task P2.8's own command line already assumes
+// DIRECTORY: the per-phrase filenames are generated, and they embed the corpus version and a
+// provenance digest, because docs/plan.md section 4.8 requires exactly that ("Render filenames embed
+// corpus version + a render-time content hash so listening notes are attributable", as amended by
+// this task's carry-forward C2) and a caller-supplied literal filename structurally cannot. That is
+// also the shape Task P2.8's own command line already assumes
 // (`--corpus tests\corpus ... --out renders\p2`), so --out doing double duty is the locked
 // spelling rather than a local invention. In --corpus mode each phrase's manifest entry supplies
 // its base parameters, its RetriggerMode, and its automation sidecar; in --midi mode the defaults
@@ -1264,8 +1265,8 @@ const std::string& renderSourceDigest() {
 }
 
 // Render filenames in --corpus mode: "<phrase stem>__cv<corpusVersion>_s<source hash>.wav"
-// (docs/plan.md section 4.8: "Render filenames embed corpus version + git hash so listening notes
-// are attributable").
+// (docs/plan.md section 4.8, as amended by this task's carry-forward C2: "Render filenames embed
+// corpus version + a render-time content hash so listening notes are attributable").
 //
 // *** THE FIELD IS A CONTENT HASH, NOT A COMMIT, AND THE PREFIX IS `s` RATHER THAN `g` SO NOBODY
 // READS IT AS ONE (Task P2.7, carry-forward C2). *** It used to be a configure-time

@@ -1716,7 +1716,15 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 > same wave-digital adaptor `scatter()` runs. `StringNetwork` solves it per string on parameter
 > change and on note change -- never per sample -- through `cnpg::dsp::solveBridgeTuning`
 > (`dsp/include/cnpg/dsp/BridgeTuning.h`), and pushes it into `WaveguideString` as a smoother TARGET,
-> so it glides on the same 8 ms one-pole the pitch wheel uses.
+> so it glides over the same 8 ms the pitch wheel glides over. **It is NOT the same smoother**, and
+> the difference is a measured CPU fact rather than a stylistic one: the compensation runs on a
+> **linear ramp that LANDS** (384 samples at 48 kHz), not on the one-pole `f0` and the filter
+> coefficients use. A one-pole never arrives -- it reaches the class's 1e-12 settle threshold only
+> after ~10 600 samples -- so a quantity retargeted on every note change held every string in
+> per-sample loop re-solve for 0.22 s afterwards. `cnpg_bench` caught that as a **2.55x regression**
+> (49.2 -> 125.4 us/block, back to 48.2 with the ramp), and no correctness gate could have. The
+> audible transition is unchanged: the `[contract]` click gate reads -0.055 / -0.033 / +0.123 dB
+> after the swap against -0.057 / -0.033 / +0.115 dB before it.
 >
 > **Measured.** The residual over MIDI 33-96 at all three rates in the shipping coupled topology goes
 > from **4.90 cents to 0.060**. Against the same instrument with that one method returning 0 -- a
@@ -1778,7 +1786,9 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 | `07_param_sweeps_midnote.mid` + `.json` | P1 | **abuse:** extreme `pickupPosition01`, `damperPosition01`, drive, and material sweeps while notes ring |
 | `08_harmonics_nodes.mid` + `.json` | P2 | damper parked at p = 1/2 and 1/3 while strings ring (natural-harmonic emergence) |
 
-**Determinism.** Renders are single-threaded, float32, dither-free 32-bit-float WAV; every stochastic component (exciter noise burst) draws from a PRNG seeded from the manifest. **`RENDER: determinism smoke`** (tagged `[contract]`) renders one phrase twice in-process and once out-of-process and requires byte-identical files (same binary; cross-toolchain identity is not claimed). Render filenames embed corpus version + git hash so listening notes are attributable.
+**Determinism.** Renders are single-threaded, float32, dither-free 32-bit-float WAV; every stochastic component (exciter noise burst) draws from a PRNG seeded from the manifest. **`RENDER: determinism smoke`** (tagged `[contract]`) renders one phrase twice in-process and once out-of-process and requires byte-identical files (same binary; cross-toolchain identity is not claimed). Render filenames embed corpus version + a **render-time content hash** so listening notes are attributable.
+
+> **Amendment (Task P2.7, carry-forward C2) — the hash is a CONTENT hash, not a git hash.** This paragraph said "corpus version + git hash", and the git hash could not do the job: it was a *configure-time* `git rev-parse --short HEAD`, resolved when CMake last ran rather than when the binary was built or run. Observed on this repository — a `build/` tree configured at `77b0430` produced renders from the code at `1ccfcb1` and filed them as `..._cv1_g77b0430.wav`, so **two different code states produced identical filenames**, which is exactly what the field exists to prevent. It is now a SHA-256 computed at *render* time over the bytes a render is a function of (`dsp/include`, `dsp/src`, `tests/support/P1Chain.h`, `tests/render`; `tests/support/SourceHash.h::renderSourceHash`), and the filename prefix changed from `_g` to **`_s`** so nobody reads it as a commit: `01_chromatic_singles__cv1_s59d6b426d3f4.wav`. It is verifiable from any checkout with no repository history at all.
 
 **Physical-plausibility checklist (versioned at `docs/listening/physical-plausibility-checklist.md`; the actual items, one verdict each: pass / concern / fail):**
 
@@ -1795,7 +1805,7 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 11. **Silence hygiene** — gaps between phrases decay to digital silence; no denormal fizz, no stuck resonance.
 12. **Abuse survival** — nothing in phrases 04–07 produces NaN blasts, stuck notes, or level runaways.
 
-**Listening-pass procedure (per milestone, P1 and P2).** (1) Run `cnpg_render` over the full corpus at 48 kHz, default parameters plus the manifest's variant renders. (2) The author listens on documented monitoring (device named in the report) and fills the checklist, citing WAV filename + timestamp for every "concern"/"fail". (3) The report is committed to `docs/listening/P<phase>-<yyyymmdd>.md` together with the corpus version and git hash. (4) Any "fail" blocks milestone closure until fixed and re-rendered, or explicitly re-scoped with rationale in the same report. The CI-enforced objective proxies (pitch ±2 cents, damper-at-node harmonic suppression, click/NaN/denormal-free automated parameter sweeps) run continuously regardless; the listening pass is the human gate layered on top, per the locked hybrid design.
+**Listening-pass procedure (per milestone, P1 and P2).** (1) Run `cnpg_render` over the full corpus at 48 kHz, default parameters plus the manifest's variant renders. (2) The author listens on documented monitoring (device named in the report) and fills the checklist, citing WAV filename + timestamp for every "concern"/"fail". (3) The report is committed to `docs/listening/P<phase>-<yyyymmdd>.md` together with the corpus version and the **render-time content hash** the filenames carry (the `_s…` field — *not* a git hash; see the Determinism amendment above). (4) Any "fail" blocks milestone closure until fixed and re-rendered, or explicitly re-scoped with rationale in the same report. The CI-enforced objective proxies (pitch ±2 cents, damper-at-node harmonic suppression, click/NaN/denormal-free automated parameter sweeps) run continuously regardless; the listening pass is the human gate layered on top, per the locked hybrid design.
 
 ## 4.9 Test-to-CI mapping
 
