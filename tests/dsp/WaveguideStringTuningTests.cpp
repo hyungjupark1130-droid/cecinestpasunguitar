@@ -1,3 +1,4 @@
+#include "cnpg/dsp/BridgeTuning.h"
 #include "cnpg/dsp/Common.h"
 #include "cnpg/dsp/EventQueue.h"
 #include "cnpg/dsp/PluckExciter.h"
@@ -314,12 +315,49 @@ TEST_CASE("TUNING: P1 analytic compensation sweep", "[tuning]") {
         events.push(on);
         probe.process(events, 512);
         // The shipping default admittance contributes a real, nonzero phase delay, and the string is
-        // tuned with it. Both halves matter: a zero here means either the coupling default went back
-        // to 0 or the compensation stopped being pushed, and either way the sweep above would still
-        // pass while measuring something else.
-        INFO("bridge compensation in force at MIDI 45 / 48 kHz: " << probe.bridgeCompensationSamples(0) << " samples");
-        REQUIRE(std::fabs(probe.bridgeCompensationSamples(0)) > 1.0);
+        // tuned with EXACTLY that -- asserted against a freshly solved value, never against a
+        // magnitude.
+        //
+        // *** THIS DELIBERATELY DOES NOT ENCODE THE NUMBER, AND THAT IS THE WHOLE POINT. *** The
+        // first cut of P2.7 asserted `|compensation| > 1.0` here, which is a test of the PROVISIONAL
+        // couplingStrength default rather than of the compensation. The phase delay is exactly linear
+        // in coupling -- measured at MIDI 45 / 48 kHz, res 180 / zeta 0.5: 0.173569 / 0.347140 /
+        // 0.694288 / 1.041452 / 1.215043 samples at c = 0.05 / 0.10 / 0.20 / 0.30 / 0.35, i.e.
+        // 3.4714 samples per unit coupling to five digits -- so |tau| crosses 1.0 sample at
+        // c = 0.288, and that bound would have FAILED for any default below it. ADR 0007 D4 leaves
+        // the default provisional and schedules P2.8 to compare LOWER values, with its own evidence
+        // (beat depth 10.08 dB at 0.1 against 3.59 at 0.35) pointing at 0.1-0.2. A gate that breaks
+        // when a provisional default moves in the direction its own ADR predicts is a gate on the
+        // wrong quantity.
+        //
+        // Both halves of the original claim survive without the magnitude: the compensation IN FORCE
+        // must be what the solve produced (the string is tuned with the answer, not with something
+        // else), and that answer must be NONZERO -- a zero means either the coupling default went
+        // back to 0 or the compensation stopped being pushed, and either way the sweep above would
+        // still pass while measuring something else.
+        const cnpg::dsp::IBridgePort<float>* attached = probe.attachedBridgePort();
+        REQUIRE(attached != nullptr);
+        // The very arguments StringNetwork::applyStringParams() solves with: the string's own bent
+        // target (bend 0 here, and f0Hz is a float, so the round-trip through float is part of the
+        // number), port index 0, one loading port.
+        const double solvedTargetHz = static_cast<double>(static_cast<float>(cnpg::test::midiNoteToHz(45)));
+        const cnpg::dsp::BridgeTuningSolution solved =
+            cnpg::dsp::solveBridgeTuning(*attached, 0, solvedTargetHz, 48000.0, 1);
+        INFO("bridge compensation in force at MIDI 45 / 48 kHz: "
+             << probe.bridgeCompensationSamples(0) << " samples; freshly solved " << solved.phaseDelaySamples);
+        REQUIRE(solved.phaseDelaySamples != 0.0);
+        // Exact equality is available and is therefore what is asserted: the 8 ms bridge ramp is 384
+        // samples at 48 kHz and LANDS (it is not the one-pole the other smoothers use), so 512
+        // samples of render puts the smoother exactly on its target, and the only transformation
+        // between the two sides is setBridgePhaseDelaySamples()'s float parameter.
+        REQUIRE(probe.bridgeCompensationSamples(0) ==
+                static_cast<double>(static_cast<float>(solved.phaseDelaySamples)));
         REQUIRE(probe.bridgeTuningConverged(0));
+        // ...and no solve in this render landed on the fallback, i.e. the instrument spent none of it
+        // outside its own tuning guarantee. A whole-render statement, which is why the diagnostic is
+        // a running count rather than a flag (StringNetwork.h). Driven NON-ZERO in
+        // tests/dsp/TuningAccuracyTests.cpp, so this is not a bound nothing can violate.
+        REQUIRE(probe.bridgeTuningFallbacks() == 0);
         REQUIRE(probe.unbridgedTicks() == 0);
     }
 

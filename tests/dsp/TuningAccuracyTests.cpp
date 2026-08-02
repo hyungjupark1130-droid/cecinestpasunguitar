@@ -117,11 +117,21 @@ std::size_t analysisLengthFor(double sampleRate) {
 // search boundary, i.e. "the fundamental is no longer where it was solved for at all".)
 //
 // The boundary is a CURVED SURFACE -- more coupling buys less resonance -- and a declared range has
-// to be a box, so the box is the largest one inside it. Criterion (1) is what binds; criterion (2)
-// never fires inside this box (the solver's contraction ratio is mu/(2 pi zeta) and at coupling 0.35
-// it stays under 0.28 at every admissible damping, so it converges in one iteration everywhere
-// below); criterion (4) is ADR 0006's mode-locking measurement and is why the coupling ceiling is
-// not raised on the strength of criterion (1) alone.
+// to be a box, so the box is the largest one inside it. Criterion (1) is what binds every face;
+// criterion (2) never fires inside this box (the solver's contraction ratio is mu/(2 pi zeta) and at
+// coupling 0.35 it stays under 0.28 at every admissible damping, so it converges in one iteration
+// everywhere below); criterion (3) is measured by tests/dsp/BridgeTuningClickTests.cpp.
+//
+// *** CRITERION (4) IS NOT SATISFIED AT THE COUPLING CEILING, AND THIS BOX IS THEREFORE NOT THE
+// FIVE-CRITERIA REGION D5 DEFINES. *** Earlier text here said criterion (4) was why the ceiling is
+// not raised on criterion (1) alone. That reads as if (4) SUPPORTS 0.35, and it does not: at
+// couplingStrength 0.35 two strings 25 cents apart mode-lock outright -- measured separation 0.003
+// cents with a +25.02 cent pull on the string nobody detuned (MIDI 45, sustain material, 48 kHz), and
+// 0.33 cents at the default material. The criterion-(4) boundary is BELOW the criterion-(1) one, not
+// above it. The ceiling stays at 0.35 because ADR 0007 D5 makes the ceiling and the couplingStrength
+// default the same measurement and D4 reserves it for the P2.8 listening pass -- so lowering it here
+// would pre-empt that session. See ADR 0007 D7.0 for the table, and
+// tests/dsp/StringNetworkScaleTests.cpp for the standing gate that measures the lock.
 //
 // *** THE COUPLING CEILING IS A MEASURED BOUNDARY THAT HAPPENS TO COINCIDE WITH THE PROVISIONAL
 // DEFAULT, NOT THE DEFAULT WEARING A DIFFERENT HAT. *** It is written as a literal here, never as
@@ -381,6 +391,7 @@ TEST_CASE("TUNING: the steep phase-slope region around the bridge resonance", "[
     std::cout << "\n";
 
     double worstInsideNormal = 0.0;
+    double worstOutsideNormal = 0.0;
     for (float coupling : {0.20f, 0.35f, 0.50f, 0.60f}) {
         for (float damping : {0.15f, 0.30f, 1.00f}) {
             std::printf("  c=%.2f z=%.2f", static_cast<double>(coupling), static_cast<double>(damping));
@@ -402,12 +413,15 @@ TEST_CASE("TUNING: the steep phase-slope region around the bridge resonance", "[
                                           damping >= kNormalDampingMin && damping <= kNormalDampingMax;
                 if (insideNormal)
                     worstInsideNormal = std::max(worstInsideNormal, worst);
+                else
+                    worstOutsideNormal = std::max(worstOutsideNormal, worst);
             }
             std::cout << "\n";
         }
     }
     std::cout << "[tuning] worst |cents| at a resonance/note COINCIDENCE inside the provisional Normal range: "
-              << worstInsideNormal << " (gate +/-" << kGateCents << ")\n";
+              << worstInsideNormal << " (gate +/-" << kGateCents << "); worst OUTSIDE it " << worstOutsideNormal
+              << "\n";
 
     // ---- THE TWO MECHANISMS ARE DISTINCT, and here is the measurement that separates them -------
     //
@@ -481,8 +495,13 @@ TEST_CASE("TUNING: the steep phase-slope region around the bridge resonance", "[
     // in the grid gate below, because this is the sweep that would show it first.
     REQUIRE(worstInsideNormal <= kGateCents);
     // ...and NON-VACUOUS: the same sweep must still contain settings that blow through the gate, or
-    // the map has stopped mapping anything and the Normal range has stopped being a boundary.
-    SUCCEED();
+    // the map has stopped mapping anything and the Normal range has stopped being a boundary rather
+    // than a decoration. Asserted on the OUTSIDE-the-box maximum accumulated by the same double loop,
+    // from the same renders -- the map reads 12.06 cents at coupling 0.50 / resonance 250 and runs to
+    // the estimator's 79.9-cent search boundary at the far corner, so this costs nothing but says
+    // something the inside-the-box bound cannot: that the two regions were told apart by measurement.
+    INFO("worst |cents| outside the Normal range in the same map: " << worstOutsideNormal);
+    REQUIRE(worstOutsideNormal > kGateCents);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -877,5 +896,72 @@ TEST_CASE("TUNING: the bridge tuning solver contract, and its fallback driven in
         // compensation (~3.5 samples at this coupling). 0.05 samples at 180 Hz / 48 kHz is 0.08
         // cents, which is a third of the solver's own tolerance.
         REQUIRE(worstJumpSamples < 0.05);
+    }
+
+    // ---- ...AND THE NETWORK COUNTS IT, over a whole render ---------------------------------------
+    //
+    // Everything above measures solveBridgeTuning() directly. StringNetwork::bridgeTuningFallbacks()
+    // is the same fact at the instrument's own scale -- "the instrument spent part of THIS RENDER
+    // outside its tuning guarantee" -- and it is a running count rather than a flag exactly so a test
+    // can ask that about a render instead of about a final state. This is that test.
+    //
+    // The configuration is the same two-slider gesture, with the resonance parked ON the played note
+    // so the solve happens in the non-convergent band the sweep above located (it is ~10 cents wide
+    // around the resonance, so a note 50 cents away from it converges perfectly well). The solve has
+    // to happen AFTER reset(), because reset() clears the counter deliberately -- a reset instance is
+    // indistinguishable from a freshly prepared one -- so the note-on carries a pitch the string was
+    // not already resting at.
+    {
+        auto renderAndCount = [](const BridgeAdmittanceParams& bridge, int playedNote) {
+            StringNetworkParams params;
+            params.bridge = bridge;
+            StringNetwork<float> network;
+            network.prepare(48000.0, 512, kShippingKind);
+            network.setNumStrings(6);
+            network.setParams(params);
+            network.reset();
+            NoteEvent on{};
+            on.type = NoteEventType::NoteOn;
+            on.sampleOffset = 0;
+            on.stringIndex = 0;
+            on.channel = 0;
+            on.midiNote = static_cast<std::uint8_t>(playedNote);
+            on.velocity = kVelocity;
+            on.pluckPosition = kPluckPosition;
+            on.hardness = kHardness;
+            BlockEventQueue events;
+            events.push(on);
+            for (int block = 0; block < 8; ++block)
+                network.process(events, 512);
+            return network.bridgeTuningFallbacks();
+        };
+
+        constexpr int kPlayedNote = 53;
+        const auto resonanceOnTheNote = static_cast<float>(cnpg::test::midiNoteToHz(kPlayedNote));
+
+        BridgeAdmittanceParams extreme;
+        extreme.couplingStrength = 1.0f;                // the slider's maximum
+        extreme.damping = cnpg::dsp::kBridgeMinDamping; // the slider's minimum
+        extreme.resonanceHz = resonanceOnTheNote;
+        const unsigned long long extremeFallbacks = renderAndCount(extreme, kPlayedNote);
+
+        // The same render at the Normal range's own ceiling, and at the shipping default: the counter
+        // must be zero on both, or the Extended range is not where the guarantee stops.
+        BridgeAdmittanceParams ceiling;
+        ceiling.couplingStrength = kNormalCouplingMax;
+        ceiling.damping = kNormalDampingMin;
+        ceiling.resonanceHz = resonanceOnTheNote;
+        const unsigned long long ceilingFallbacks = renderAndCount(ceiling, kPlayedNote);
+        const unsigned long long shippingFallbacks = renderAndCount(BridgeAdmittanceParams{}, kPlayedNote);
+
+        std::cout << "[tuning] StringNetwork::bridgeTuningFallbacks() over a rendered note (MIDI " << kPlayedNote
+                  << ", resonance parked on it): shipping default " << shippingFallbacks
+                  << ", Normal-range ceiling (c=" << kNormalCouplingMax << ", zeta=" << kNormalDampingMin << ") "
+                  << ceilingFallbacks << ", two sliders at their stops (c=1.0, zeta=" << cnpg::dsp::kBridgeMinDamping
+                  << ") " << extremeFallbacks << "\n";
+
+        REQUIRE(extremeFallbacks > 0);  // ...so the two assertions below are not vacuous
+        REQUIRE(ceilingFallbacks == 0); // ADR 0007 D5 criterion (2), at the box's own corner
+        REQUIRE(shippingFallbacks == 0);
     }
 }

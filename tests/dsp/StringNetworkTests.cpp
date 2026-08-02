@@ -860,7 +860,19 @@ TEST_CASE("CONTRACT: StringNetwork drives the bridge port and routes its reflect
 
     StringNetwork<float> network;
     configure(network, params);
+    // *** THE SUBSTITUTED PORT IS THE ONE THE TUNING WAS SOLVED AGAINST (Task P2.7). ***
+    // setBridgePort() re-solves every string precisely so a swapped-in port cannot inherit the
+    // compensation the junction it replaced had asked for -- Q17's "StringNetwork must not be able to
+    // tell the difference" made true of PITCH as well as of scattering. That re-solve is a fail-open
+    // seam: if it were dropped, every render below would still be bounded, still be deterministic and
+    // still differ from the internal junction's, and nothing would fail. The counter closes it, and
+    // this is the assertion its own declaration promised.
+    //
+    // Measured across the call rather than after it, so the zero side is the demonstration that the
+    // nonzero side is not vacuous: nothing has asked THIS port anything until it is attached.
+    REQUIRE(port.phaseDelayQueries == 0);
     network.setBridgePort(port);
+    REQUIRE(port.phaseDelayQueries > 0);
     REQUIRE(port.prepareCalls == 1);
     REQUIRE(port.preparedPorts == cnpg::dsp::kMaxStrings); // prepared for capacity, not the count
     REQUIRE(port.preparedRate == kRate);
