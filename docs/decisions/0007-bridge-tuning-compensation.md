@@ -241,6 +241,57 @@ statement of fact, which is this section.
 default sits OUTSIDE a criterion-complete Normal range.** It is inside the criterion-(1) box declared
 above, and outside the region where all five of D5's criteria hold. P2.8 settles both, together.
 
+*The rest of this section is D7's own derivation: how the box in the table above was arrived at, face
+by face. D7.1 below adds the second topology, and is placed after the derivation rather than before
+it so that the derivation stays contiguous with the box it derives.*
+
+**Measured worst |error| inside the box: 0.770 cents**, over MIDI 21–96 at 44.1/48/96 kHz at each of
+six grid points (the four coupled corners of the box, the decoupled control, and the shipping
+default) — 2.6× inside the criterion. At the shipping default it is 0.060 cents.
+
+**What binds each face of the box, and it is not the same thing on each:**
+
+- The **coupling ceiling** and the **resonance ceiling** trade against each other; the boundary is a
+  curved surface and the box is the largest one inside it. Measured worst over the three notes
+  nearest each resonance (48 kHz, worst over damping 0.15–1.0):
+
+  | | 20 Hz | 60 | 110 | 180 | 250 | 330 | 400 | 500 |
+  |---|---|---|---|---|---|---|---|---|
+  | coupling 0.20 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.13 |
+  | coupling 0.35 | 0.18 | 0.20 | 0.20 | 0.21 | 0.33 | 0.63 | 0.63 | 7.11 |
+  | coupling 0.50 | 0.38 | 0.41 | 0.58 | 1.31 | 12.06 | 9.96 | 15.79 | 79.9 |
+  | coupling 0.60 | 0.56 | 0.80 | 3.57 | 4.86 | 17.26 | 11.24 | 79.12 | 79.3 |
+
+  Readings at 79–80 are the estimator's ±80-cent search boundary: the fundamental is no longer
+  anywhere near where it was solved for.
+- The **damping ceiling of 1.00** is a separate mechanism and was found at the grid gate rather than
+  in the map above. At damping ≥ 2 the load is dashpot-dominated over a wide band and the worst note
+  moves to the TOP of the range: measured 2.92 / 4.93 / 7.38 cents at damping 2 / 3 / 4 (coupling
+  0.35, resonance 180 Hz, 44.1 kHz, worst over MIDI 21–96, worst note 85–95). At damping 1.0 the same
+  sweep reads 0.03.
+- The **damping floor of 0.15** is where the margin becomes comfortable rather than where the gate
+  breaks (0.05 still reads 1.39 cents at resonance 330, i.e. inside the criterion with 1.4× headroom).
+- The **coupling ceiling of 0.35 is a measured criterion-(1) boundary that coincides with the
+  provisional default, not the default wearing a different hat.** It is written as a literal in the
+  gate, never as `BridgeAdmittanceParams{}.couplingStrength`, and the gate additionally asserts that
+  the shipping default lies inside the range — so if P2.8 raises the default past the boundary the
+  gate fails and the range must be re-derived, which is what D5 already schedules that session to do.
+  D4's expectation is that P2.8 compares *lower* values, all of which are inside. **Criterion (4) is
+  a different boundary and it is BELOW this one — see D7.0.**
+- **The coupling face's evidence above is coarser than the boundary it reports, and the headroom is
+  therefore smaller than "0.35 vs 0.50" reads.** The map samples 0.35 and 0.50, but the criterion-(1)
+  failure at the worst corner (resonance 330 Hz, ζ 0.15, 44.1 kHz, worst over MIDI 21–96) is at
+  coupling **≈0.405**, not 0.50: measured **0.7697 / 1.6281 / 1.8575 / 2.5556 / 3.4742** cents at
+  coupling 0.35 / 0.38 / 0.40 / **0.41** / 0.45. The ceiling has roughly **16 %** of criterion-(1)
+  headroom on this face, not the ~43 % the coarse table suggests. That does not move the ceiling —
+  0.35 is inside — but a reader sizing the margin from the table alone would over-estimate it.
+
+**Criterion (2) — solver convergence — never fires inside the box.** The contraction ratio is
+μ/(2πζ) with μ = `couplingStrength × kBridgeMaxMobilityRatio`; at coupling 0.35 it stays under 0.28
+at every admissible damping and the solver converges in one iteration at every one of the 1368
+gated points. The convergence boundary was measured at damping **0.0197** at coupling 1.0 — i.e. it
+is reachable, but only in the Extended range, with two shipped sliders at their stops.
+
 #### D7.1 — the SHIPPING SIX-STRING topology locks EARLIER than D7.0's isolated pair (Task P2.8)
 
 *Added by Task P2.8, which built the listening material D4 reserves and measured the phenomenon on
@@ -293,53 +344,6 @@ with every verdict column empty. If the author's ear agrees with this table, the
 moves below 0.30 and D7's box is re-derived rather than edited; if it does not, this table stands as
 the measurement the judgement was made against. Either way the ADR now carries the topology that
 ships alongside the one that was convenient to measure.
-
-**Measured worst |error| inside the box: 0.770 cents**, over MIDI 21–96 at 44.1/48/96 kHz at each of
-six grid points (the four coupled corners of the box, the decoupled control, and the shipping
-default) — 2.6× inside the criterion. At the shipping default it is 0.060 cents.
-
-**What binds each face of the box, and it is not the same thing on each:**
-
-- The **coupling ceiling** and the **resonance ceiling** trade against each other; the boundary is a
-  curved surface and the box is the largest one inside it. Measured worst over the three notes
-  nearest each resonance (48 kHz, worst over damping 0.15–1.0):
-
-  | | 20 Hz | 60 | 110 | 180 | 250 | 330 | 400 | 500 |
-  |---|---|---|---|---|---|---|---|---|
-  | coupling 0.20 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.13 |
-  | coupling 0.35 | 0.18 | 0.20 | 0.20 | 0.21 | 0.33 | 0.63 | 0.63 | 7.11 |
-  | coupling 0.50 | 0.38 | 0.41 | 0.58 | 1.31 | 12.06 | 9.96 | 15.79 | 79.9 |
-  | coupling 0.60 | 0.56 | 0.80 | 3.57 | 4.86 | 17.26 | 11.24 | 79.12 | 79.3 |
-
-  Readings at 79–80 are the estimator's ±80-cent search boundary: the fundamental is no longer
-  anywhere near where it was solved for.
-- The **damping ceiling of 1.00** is a separate mechanism and was found at the grid gate rather than
-  in the map above. At damping ≥ 2 the load is dashpot-dominated over a wide band and the worst note
-  moves to the TOP of the range: measured 2.92 / 4.93 / 7.38 cents at damping 2 / 3 / 4 (coupling
-  0.35, resonance 180 Hz, 44.1 kHz, worst over MIDI 21–96, worst note 85–95). At damping 1.0 the same
-  sweep reads 0.03.
-- The **damping floor of 0.15** is where the margin becomes comfortable rather than where the gate
-  breaks (0.05 still reads 1.39 cents at resonance 330, i.e. inside the criterion with 1.4× headroom).
-- The **coupling ceiling of 0.35 is a measured criterion-(1) boundary that coincides with the
-  provisional default, not the default wearing a different hat.** It is written as a literal in the
-  gate, never as `BridgeAdmittanceParams{}.couplingStrength`, and the gate additionally asserts that
-  the shipping default lies inside the range — so if P2.8 raises the default past the boundary the
-  gate fails and the range must be re-derived, which is what D5 already schedules that session to do.
-  D4's expectation is that P2.8 compares *lower* values, all of which are inside. **Criterion (4) is
-  a different boundary and it is BELOW this one — see D7.0.**
-- **The coupling face's evidence above is coarser than the boundary it reports, and the headroom is
-  therefore smaller than "0.35 vs 0.50" reads.** The map samples 0.35 and 0.50, but the criterion-(1)
-  failure at the worst corner (resonance 330 Hz, ζ 0.15, 44.1 kHz, worst over MIDI 21–96) is at
-  coupling **≈0.405**, not 0.50: measured **0.7697 / 1.6281 / 1.8575 / 2.5556 / 3.4742** cents at
-  coupling 0.35 / 0.38 / 0.40 / **0.41** / 0.45. The ceiling has roughly **16 %** of criterion-(1)
-  headroom on this face, not the ~43 % the coarse table suggests. That does not move the ceiling —
-  0.35 is inside — but a reader sizing the margin from the table alone would over-estimate it.
-
-**Criterion (2) — solver convergence — never fires inside the box.** The contraction ratio is
-μ/(2πζ) with μ = `couplingStrength × kBridgeMaxMobilityRatio`; at coupling 0.35 it stays under 0.28
-at every admissible damping and the solver converges in one iteration at every one of the 1368
-gated points. The convergence boundary was measured at damping **0.0197** at coupling 1.0 — i.e. it
-is reachable, but only in the Extended range, with two shipped sliders at their stops.
 
 ### D8 — the gated note band moves in both directions (Task P2.7)
 

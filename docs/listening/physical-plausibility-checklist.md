@@ -173,3 +173,31 @@ so unlike items 14–20 they do not need a host.
 | 21 | `04_palm_mute_chug` — section E, 12.6–18.5 s, the 5/12/21/53/100 ms gap ladder |
 | 24 | `05_low_string_bends` — whole file, on the P2 tree |
 | 26 | `07_param_sweeps_midnote`, `08_harmonics_nodes`, and the `02_open_chords__range*` renders |
+
+### The P1-set items, re-stated against corpus version 2 (appended by Task P2.8 fixes wave 1)
+
+The table two sections up is the **P1 corpus**'s mapping and stays as written. These are the same
+items against the **version 2** renders, added because `docs/listening/P2-20260803.md` §7 makes all
+of 1–27 blocking and eight of them had no row in that sheet. Nothing here renumbers or rewrites an
+item; it names evidence.
+
+| Item | Primary evidence in corpus version 2 |
+|---|---|
+| 5 | `05_low_string_bends` — whole file; section D (18.0–21.0 s), the 3 Hz full-range triangle, is the worst case. Same file as item 24, different question |
+| 7 | `07_param_sweeps_midnote` — 0.5–8.0 s, for the **pickup** half. **See the note below for the pluck half** |
+| 8 | `01_chromatic_singles` — 50.0–59.0 s (MIDI 45 at six velocities) |
+| 9 | `01_chromatic_singles` — 31.0–50.0 s (five 3 s anchors, MIDI 28/45/62/79/96) |
+| 10 | `07_param_sweeps_midnote` — 0.5–8.0 s, for the **pickup** half. **The damper half has NO corpus evidence — see the note below** |
+| 11 | Every phrase's own 2 s tail; `01_chromatic_singles`'s 87 gaps of 70 ms and four gaps of 800 ms |
+| 12 | `04`, `05`, `06`, `07` in full |
+| 13 | `07_param_sweeps_midnote` — 0.5–8.0 s. **First judged at the P2 pass; it has never been judged before** |
+
+**TWO HALVES OF TWO ITEMS HAVE NO CORPUS EVIDENCE AT ALL, and the P2 revision above was wrong to
+imply otherwise.** Item 10's text says "pickup and damper position sweeps in phrase 07"; phrase 07's
+sidecar has **no damper lane** (its four lanes are `pickupPosition01`, `pickupResonanceHz`/`pickupQ`,
+`triodeDrive`, and the material trio), and phrase 08 moves `damperPosition01` only **inside silent
+gaps**, deliberately, so that the position is already settled when the note-off engages it. Item 7 is
+titled "pluck position" but every render leaves `Exciter Position` at its 0.5 default and no variant
+overrides it; what the corpus sweeps is the **pickup**. Both halves are therefore host gestures — one
+knob each — and `docs/listening/P2-20260803.md` §4.2 (b) and (c) write them out. **The rest of both
+items is judgeable from a render.**
