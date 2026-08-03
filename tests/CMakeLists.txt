@@ -99,7 +99,32 @@ include(Catch)
 # ADD_TAGS_AS_LABELS mirrors every Catch2 tag (e.g. [contract]) to a CTest label, so
 # `ctest -L contract` selects by tag exactly as docs/plan.md section 1.5's conventions
 # describe.
-catch_discover_tests(cnpg_tests ADD_TAGS_AS_LABELS)
+#
+# DISCOVERY_MODE PRE_TEST is what makes `ctest -C <cfg>` actually honour <cfg> under the
+# multi-config VS generator the windows-msvc-* presets use (both presets share binaryDir `build`,
+# so Release and Debug are two configurations of ONE build tree). In the default POST_BUILD mode
+# Catch2 discovers tests from a post-build command whose output path carries no $<CONFIG>, so both
+# configurations write the same `cnpg_tests-<hash>_tests.cmake`, every add_test() in it hard-codes
+# an absolute path to whichever configuration was built last, and `cnpg_tests-<hash>_include.cmake`
+# includes that one file unconditionally -- leaving ctest nothing to select between. Building Debug
+# last therefore made `ctest -C Release` run bin/Debug/cnpg_tests.exe while still reporting itself
+# as a Release run, silently voiding the Release half of this project's dual-config verification
+# standard (and inflating ctest wall times, which is what made the P2.7 grid gate look ~10x slower
+# through ctest than in-process). PRE_TEST instead emits one `..._tests-<CONFIG>.cmake` per
+# configuration -- the executable path resolved through $<TARGET_FILE:...> -- plus an include file
+# that dispatches on ${CTEST_CONFIGURATION_TYPE}, so the binary that runs always matches -C. It
+# also fails loudly (a single cnpg_tests_NOT_BUILT test) when the requested configuration has not
+# been built, instead of quietly running the other one.
+#
+# The cost is that discovery moves from build time to just before the first ctest run, spending one
+# `--list-tests --reporter json` invocation per configuration whenever the tests file is older than
+# the binary. The ubuntu CI job is unaffected: its linux-dsp-only preset uses Ninja, and for a
+# single-config generator PRE_TEST emits one unconditional include file, so
+# `ctest --test-dir build-dsp` keeps working with no -C flag. Conversely, under a multi-config
+# generator PRE_TEST requires -C: a bare `ctest --test-dir build` now prints "No configuration for
+# testing specified" and discovers nothing, which is correct -- there is no longer a "last built"
+# configuration for it to guess at.
+catch_discover_tests(cnpg_tests ADD_TAGS_AS_LABELS DISCOVERY_MODE PRE_TEST)
 
 # Regenerate-goldens target (docs/plan.md section 1.6). The section-1.6 draft drives this from
 # `cnpg_render --regenerate-goldens`. cnpg_render has now landed (Task P1.11) and this target
