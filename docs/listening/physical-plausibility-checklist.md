@@ -192,11 +192,13 @@ item; it names evidence.
 | 12 | `04`, `05`, `06`, `07` in full |
 | 13 | `07_param_sweeps_midnote` — 0.5–8.0 s. **First judged at the P2 pass; it has never been judged before** |
 
-**TWO HALVES OF TWO ITEMS HAVE NO CORPUS EVIDENCE AT ALL, and the P2 revision above was wrong to
-imply otherwise.** Item 10's text says "pickup and damper position sweeps in phrase 07"; phrase 07's
-sidecar has **no damper lane** (its four lanes are `pickupPosition01`, `pickupResonanceHz`/`pickupQ`,
-`triodeDrive`, and the material trio), and phrase 08 moves `damperPosition01` only **inside silent
-gaps**, deliberately, so that the position is already settled when the note-off engages it. Item 7 is
+**TWO HALVES OF TWO ITEMS HAVE NO CORPUS EVIDENCE AT ALL, and two item texts in the locked P1 set
+above say otherwise.** Item 10's text says "pickup and damper position sweeps in phrase 07"; phrase
+07's sidecar has **no damper lane** — its seven lanes, across four sweep sections, are
+`pickupPosition01`, then `pickupResonanceHz` with `pickupQ`, then `triodeDrive`, then
+`materialLossGainLow`/`High` with `materialDispersionAmount` — and phrase 08 moves `damperPosition01`
+only **inside silent gaps**, deliberately, so that the position is already settled when the note-off
+engages it. Item 7 is
 titled "pluck position" but every render leaves `Exciter Position` at its 0.5 default and no variant
 overrides it; what the corpus sweeps is the **pickup**. Both halves are therefore host gestures — one
 knob each — and `docs/listening/P2-20260803.md` §4.2 (b) and (c) write them out. **The rest of both
