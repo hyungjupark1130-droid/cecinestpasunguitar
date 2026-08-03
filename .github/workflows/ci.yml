@@ -123,11 +123,21 @@ jobs:
         run: |
           set +e
           bench_exe="build/bin/Release/cnpg_bench.exe"
+          : > cnpg-bench-report.txt
           if [[ -f "$bench_exe" ]]; then
-            echo "Running cnpg_bench..."
-            "$bench_exe" --strings 1 --samplerate 48000 --blocksize 128 --oversample 2 --seconds 10 | tee cnpg-bench-report.txt
+            # Three rows, all at 48 kHz / 128 / 2x. --strings 1 keeps continuity with
+            # docs/bench/p1-baseline.md; the two named --config values are what docs/plan.md
+            # Task P2.9 asks this job to publish. NONE of them gates: the step is
+            # continue-on-error and ends in `exit 0`, and a `|| true` guards each invocation so
+            # one failing row cannot skip the others. The hard 25-30% figure is read off the
+            # dev machine in docs/bench/p2-exit.md, never off a shared runner.
+            for bench_args in "--strings 1" "--config p2_default6" "--config p2_max8"; do
+              echo "=== cnpg_bench $bench_args ===" | tee -a cnpg-bench-report.txt
+              "$bench_exe" $bench_args --samplerate 48000 --blocksize 128 --oversample 2 --seconds 10 \
+                2>&1 | tee -a cnpg-bench-report.txt || true
+            done
           else
-            echo "cnpg_bench binary not found at $bench_exe -- nothing to report." | tee cnpg-bench-report.txt
+            echo "cnpg_bench binary not found at $bench_exe -- nothing to report." | tee -a cnpg-bench-report.txt
           fi
           exit 0
 
