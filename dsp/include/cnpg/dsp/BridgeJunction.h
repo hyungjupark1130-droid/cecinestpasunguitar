@@ -346,8 +346,11 @@ template <typename SampleT> class BridgeJunction final : public IBridgePort<Samp
     //
     // EVALUATED ON THE SMOOTHER TARGETS, not the values in force -- and THE TWO GLIDES ARE NOT THE
     // SAME SHAPE, which is the actual reason rather than a caveat on it. This junction's element
-    // smoothers are 8 ms ONE-POLES (kBridgeSmoothingSeconds), which asymptote and never arrive; the
-    // string's compensation smoother is an 8 ms LINEAR RAMP THAT LANDS on a nameable sample
+    // smoothers are 8 ms ONE-POLES (kBridgeSmoothingSeconds): they asymptote rather than arrive, and
+    // they reach kSmootherSettleRelative (1e-12, this class's snap threshold) only after ~10 600
+    // samples -- 0.22 s at 48 kHz, i.e. 27x the nominal 8 ms, which is why "never arrive" is the
+    // right thing to plan around even though the value does eventually snap. The string's
+    // compensation smoother is an 8 ms LINEAR RAMP THAT LANDS on a nameable sample
     // (WaveguideString::setBridgePhaseDelaySamples -- P2.7 changed it, and the measurement that
     // forced the change is on that declaration). Both are retargeted by the same
     // setAdmittance()/setParams() call, so they START together; they do NOT land together, and

@@ -21,7 +21,29 @@ past listening reports.
    and a timestamp for every concern and every fail. An item with no verdict is not a pass; it
    blocks the milestone until it has one.
 4. Commit the filled report to `docs/listening/P<phase>-<yyyymmdd>.md`, recording the corpus version
-   and the git hash (both are in the render filenames).
+   and the **render-time source hash**. Both are in the render filenames, as `__cv<version>_s<hash>`
+   — a render named `01_chromatic_singles__cv1_s3cca978b000b.wav` gives corpus version `1` and
+   source hash `3cca978b000b`. `cnpg_render` prints the same digest in its startup banner, so it can
+   be copied from the console rather than reconstructed from a filename.
+
+   **That field is a content digest over the DSP sources, not a commit** (`_s`, never `_g`). Task
+   P2.7 removed the configure-time git hash that used to sit there: it named the commit CMake last
+   ran at rather than the code that produced the audio, and was measured filing renders of `1ccfcb1`
+   under the name `_g77b0430` — two code states, one filename (`tests/corpus/README.md` rule 3,
+   `tests/support/SourceHash.h`). The digest is the stronger provenance, because it is checkable
+   from any checkout with no repository history at all. A render whose source tree could not be read
+   stamps `unknown`; if a report shows that, the provenance is missing and the render should be
+   redone from a real checkout. If the report also wants a commit, record `git rev-parse HEAD`
+   separately at render time — **the filename does not carry one.**
+
+   **Do not read a changed digest as changed audio.** It covers source bytes, comments included, so
+   it is a deliberate over-approximation. Across Task P2.7's two fix waves it moved `59d6b426d3f4` →
+   `3cca978b000b` on changes to `dsp/` that were **comments only**, and the audio was measured rather
+   than assumed unchanged: all four corpus phrases reproduce their RMS at the wave's parent commit to
+   the printed digit (−34.29 / −32.63 / −38.65 / −34.95 dBFS at 48 kHz), no golden moved, and the
+   `[regression]` suite that re-renders against them is green. A *matching* digest is the strong
+   claim (identical covered bytes); a differing one says only that the code differs somewhere, not
+   that the instrument sounds different.
 5. Any **fail** blocks milestone closure until it is fixed and re-rendered, or explicitly re-scoped
    with written rationale in the same report. Any **concern** needs either a linked GitHub issue or
    a sentence saying why it is acceptable to ship past.

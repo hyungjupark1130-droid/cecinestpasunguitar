@@ -1446,8 +1446,11 @@ Manual: in Ableton Live at 48 kHz and again at 96 kHz, play against a reference 
 - [ ] `cnpg_calibrate` retained and re-scoped to the **verification harness** over the note × bridge-parameter grid (plus the optional residual trim). Its determinism, CSV/header agreement, and no-audio-thread-allocation criteria above apply to whatever it emits.
 - [ ] **`couplingStrength` is not confirmed here.** It remains provisional per ADR 0007 D4; this task must not record it as the shipping default.
 
-**Task P2.7 outcome (2026-08-01) -- what landed against each criterion.** Full detail in ADR 0007 D7-D9
-and in `.superpowers/.../task-P2.7-report.md`.
+**Task P2.7 outcome (2026-08-01; the Normal-range entry qualified 2026-08-02) -- what landed against
+each criterion.** Full detail in ADR 0007 D7-D9 and in `.superpowers/.../task-P2.7-report.md`.
+`[x]` means the criterion above is discharged AS WRITTEN. **`[~]` means it is only PARTLY discharged
+and the entry says which part** -- exactly one criterion is in that state, and it is a measured
+failure rather than a bookkeeping detail (the Normal range, below).
 
 - [x] **`[tuning]` grid gate.** MIDI 21-96 x {44.1, 48, 96} kHz at six grid points over the provisional
   Normal range (four coupled box corners, the decoupled control, the shipping default). Worst 0.770
@@ -1455,8 +1458,21 @@ and in `.superpowers/.../task-P2.7-report.md`.
   report-only under a widened +/-4 cent bound, with the attribution measured and asserted (the
   DECOUPLED control is worse there than the coupled one -- it is the P1 short-loop fractional-delay
   solve, not the bridge).
-- [x] **Normal range derived** (ADR 0007 D7): `couplingStrength` 0.00-0.35, `bridgeResonanceHz`
-  20-330 Hz, `bridgeDamping` 0.15-1.00. Provisional; P2.8 confirms or revises.
+- [~] **Normal range derived AGAINST CRITERION (1) ALONE -- the criterion above is NOT discharged as
+  written** (ADR 0007 D7, qualified by D7.0): `couplingStrength` 0.00-0.35, `bridgeResonanceHz`
+  20-330 Hz, `bridgeDamping` 0.15-1.00. The criterion asks for the largest contiguous region in
+  which ALL FIVE hold at once. What landed is the largest box inside criterion (1) -- the +/-2 cent
+  tuning bound -- with (2) checked and found never to fire inside it and (3) measured by the
+  live-parameter click gate. **Criterion (4) -- near-unison strings ~25 cents apart do not
+  involuntarily mode-lock -- was MEASURED, and it FAILS at the declared coupling ceiling of 0.35.**
+  At MIDI 45 / 48 kHz a 25-cent detune collapses to 0.003 cents of separation with a +25.02-cent
+  pull on the string nobody detuned; the same lock occurs at the default string material (boundary
+  between 0.32 and 0.35) and in the purely sympathetic case, and at MIDI 53 on the 180 Hz resonance
+  the pair compresses from 25 to 15.10 cents. ADR 0007 D7.0 carries the full table. Criterion (5) is
+  P2.8's ear, as scheduled. **The range is provisional FOR THAT REASON** -- not merely pending a
+  confirmation expected to agree -- and the consequence is that the provisional `couplingStrength`
+  default of 0.35 sits OUTSIDE a criterion-complete Normal range. P2.8 settles the ceiling and the
+  default TOGETHER, because D5's criterion (4) makes them one measurement.
 - [x] **Extended (Effect) range declared** in ADR 0007 D7 and in `BridgeTuning.h`: everything outside
   the box stays available with no tuning guarantee.
 - [x] **Solver contract declared and tested.** Tolerance 0.25 cents (8x tighter than the gate), probe
@@ -1739,11 +1755,19 @@ Device under test: `Oversampler` wrapping `TriodeStage::process` via `processWra
 > the limit is the P1 short-loop fractional-delay solve, not the bridge. The gate asserts that
 > attribution rather than stating it.
 >
-> **The provisional Normal range**, derived from measurement per ADR 0007 D5 and recorded in D7:
-> `couplingStrength` 0.00-0.35, `bridgeResonanceHz` 20-330 Hz, `bridgeDamping` 0.15-1.00. Worst
-> |error| inside it: **0.770 cents** over MIDI 21-96 x 3 rates x 6 grid points. Everything outside is
-> the **Extended (Effect) range** and carries no tuning guarantee. **P2.8 confirms or revises both,
-> together with the `couplingStrength` default, which this task does NOT settle.**
+> **The provisional Normal range**, recorded in ADR 0007 D7: `couplingStrength` 0.00-0.35,
+> `bridgeResonanceHz` 20-330 Hz, `bridgeDamping` 0.15-1.00. Worst |error| inside it: **0.770 cents**
+> over MIDI 21-96 x 3 rates x 6 grid points. Everything outside is the **Extended (Effect) range**
+> and carries no tuning guarantee.
+>
+> **It is NOT the region D5 defines, and saying "derived per D5" here would repeat the error D7.0
+> exists to correct.** D5 asks for the largest region in which all five criteria hold at once. This
+> box is the largest one inside criterion (1); criterion (4) -- near-unison mode-locking -- was
+> MEASURED and FAILS at the 0.35 ceiling (25 cents of separation collapse to 0.003 with a
+> +25.02-cent pull). See ADR 0007 **D7.0**, and the outcome block above, which marks this criterion
+> `[~]` rather than `[x]` for exactly this reason. **P2.8 confirms or revises the range together with
+> the `couplingStrength` default, which this task does NOT settle** -- and it inherits a known
+> failure rather than an open question.
 >
 > **The solve is a closed form and the fixed point is about UNIQUENESS** (ADR 0007 D9). Evaluating the
 > port's phase delay at the target makes the target exactly a root of the loop equation, so the value

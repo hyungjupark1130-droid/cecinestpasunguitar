@@ -14,13 +14,49 @@ flat (locked location), with one manifest, `corpus.json`.
 2. **Versioned.** `corpus.json` carries an integer `corpusVersion`. It increments by one whenever a
    phrase is added. Because of rule 1, a corpus version identifies exactly one set of file
    contents — not merely one set of filenames.
-3. **Render filenames carry that version, and the git hash.** `cnpg_render --corpus` writes
-   `<phrase stem>__cv<corpusVersion>_g<git hash>.wav`, so a WAV on disk names both the input corpus
-   and the build that rendered it (`docs/plan.md` section 4.8: "Render filenames embed corpus
-   version + git hash so listening notes are attributable"). The git hash is resolved at CMake
-   configure time and therefore names the parent of the commit that landed the binary — close
-   enough to attribute a listening note to a build, and deliberately *not* the self-consistent
-   content hash the golden sidecars need (see `tests/support/SourceHash.h` for that distinction).
+3. **Render filenames carry that version, and a render-time content hash.** `cnpg_render --corpus`
+   writes `<phrase stem>__cv<corpusVersion>_s<source hash>.wav`, the hash being 12 hex characters —
+   `01_chromatic_singles__cv1_s3cca978b000b.wav` on the tree that landed Task P2.7's second fix wave
+   — so a WAV on disk names both the input corpus and the exact code that rendered it
+   (`docs/plan.md` section 4.8, as amended by Task P2.7's carry-forward C2: "Render filenames embed
+   corpus version + a **render-time content hash** so listening notes are attributable").
+   `cnpg_render` also prints the digest in its startup banner, so it is readable without parsing a
+   filename.
+
+   **The prefix is `_s`, never `_g`, and the change is not cosmetic.** The field used to be a
+   configure-time `git rev-parse --short HEAD`, resolved when CMake last ran rather than when the
+   binary was built or run — and that failed in the ordinary way, not a contrived one. Measured on
+   this repository: a `build/` tree configured at `77b0430` produced renders of the code at
+   `1ccfcb1` and filed them as `..._cv1_g77b0430.wav`, three commits stale. **Two different code
+   states, one filename** — precisely the confusion this field exists to prevent, and the reason the
+   argument that once stood here (that the configure-time hash "names the parent of the commit that
+   landed the binary — close enough") is withdrawn: it names neither reliably.
+
+   What replaced it is a SHA-256 digest computed at **render** time over `dsp/include`, `dsp/src`,
+   `tests/support/P1Chain.h` and `tests/render` — the bytes a render is actually a function of —
+   truncated to its first 12 hex characters. Two code states that differ in those bytes get
+   different names *by construction*, which is exactly what the configure-time hash could not
+   promise; what remains is only the ordinary birthday risk of a 48-bit digest, not a systematic
+   collision every un-reconfigured tree walks into. It is verifiable from any checkout with no
+   repository history and no git at all, and the recipe is published in `tests/support/SourceHash.h`
+   (which also covers the golden sidecars' digest, computed by the same primitive over a smaller
+   root set). If the source tree cannot be read the field reads `unknown` rather than failing the
+   render. Deliberately **not** covered: the corpus itself — it has its own version in the same
+   filename, and folding it in would rename every render whenever a phrase was added.
+
+   **Any example of that digest goes stale, and that is the feature, not a defect in the example.**
+   It is a digest of the *source*, not of the audio, so it changes whenever a covered byte changes —
+   including a comment. Observed across Task P2.7's two fix waves, whose `dsp/` changes were comments
+   only: `59d6b426d3f4` → `3cca978b000b`, with no audio-path byte moved and no golden moved — and the
+   audio measured unchanged rather than assumed, all four phrases reproducing their RMS at the wave's
+   parent commit to the printed digit (−34.29 / −32.63 / −38.65 / −34.95 dBFS, 48 kHz). The field is
+   therefore a conservative
+   over-approximation: **a changed digest means "different code", never by itself "different
+   sound".** The direction it guarantees is the useful one — the same digest means the same covered
+   bytes, which is what makes a listening note reproducible.
+
+   A render filename does **not** carry a commit, and no listening note should claim it does. If a
+   report wants one, record `git rev-parse HEAD` separately at render time.
 4. **The manifest is checked, not trusted.** `durationSeconds` is verified against the actual
    rendered length on every `--corpus` run (10 ms tolerance) and the render fails if they disagree,
    so the manifest cannot quietly go stale against the files it describes.

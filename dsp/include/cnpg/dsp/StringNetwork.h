@@ -482,8 +482,38 @@ template <typename SampleT> class StringNetwork {
     double bridgeTuningResidualCents(int stringIndex) const noexcept;
 
     // Number of solves since reset() that landed on the fallback. A running count rather than a
-    // flag, because "the instrument spent part of this render outside its tuning guarantee" is a
-    // thing a test has to be able to assert about a whole render and not only about a final state.
+    // flag, so a test can ask about every solve a render performed rather than only about the last
+    // one.
+    //
+    // *** IT IS NOT A WHOLE-RENDER STATEMENT ABOUT THE INSTRUMENT, AND THIS DECLARATION USED TO SAY
+    // IT WAS. *** It counts solves that RAN since reset(). It cannot see a non-convergent solve that
+    // ran BEFORE the reset and is still in force, and two behaviours of this class compose into
+    // exactly that case:
+    //
+    //   - reset() clears this count (StringNetwork.cpp) but deliberately does NOT clear
+    //     bridgeTuningConverged_, which is state rather than a tally;
+    //   - applyStringParams() skips the solve entirely when the string's bent target, the port's
+    //     admittance generation and the loading-port count are all bitwise unchanged.
+    //
+    // So a note played at its own string's REST PITCH is never re-solved: the last solve was the one
+    // clearStringState() ran on the way back to that pitch, which happened before reset() zeroed the
+    // count. Measured on this tree at 48 kHz, string 0 resting at MIDI 40, the resonance parked on
+    // the played note:
+    //
+    //     played 53, coupling 1.0 / damping 0.01   fallbacks 1 | converged false | residual 2.1914 c
+    //     played 40, coupling 1.0 / damping 0.01   fallbacks 0 | converged FALSE | residual 2.1903 c
+    //     played 40, shipping default admittance   fallbacks 0 | converged true  | residual 0.0016 c
+    //
+    // The middle row is a whole render running on a non-convergent solve that carries 2.19 cents of
+    // probe residual -- against a 2.0-cent gate and a 0.25-cent solver tolerance -- with this counter
+    // reading 0. So `REQUIRE(net.bridgeTuningFallbacks() == 0)` written at a string's rest pitch
+    // PASSES UNCONDITIONALLY AND ASSERTS NOTHING. Vacuity is this project's recurring failure mode;
+    // meet it here, in the tree, rather than in a review.
+    //
+    // WHAT TO WRITE INSTEAD: assert bridgeTuningConverged(stringIndex) beside the count. That one is
+    // state, so it survives the reset and describes the solve actually in force, whether or not this
+    // render re-ran it. Both are read together in tests/dsp/WaveguideStringTuningTests.cpp, which is
+    // non-vacuous only because it plays MIDI 45 on a string resting at MIDI 40 and so does re-solve.
     unsigned long long bridgeTuningFallbacks() const noexcept { return bridgeTuningFallbacks_; }
 
     // The network's own default BridgeJunction, for tests and for the plugin's parameter surface.
