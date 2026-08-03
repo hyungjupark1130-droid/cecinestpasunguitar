@@ -127,10 +127,12 @@ so it can proceed; **P2.8 confirms or revises it** in the same session that sett
 `couplingStrength` default. Criterion 4 is the one that ties the range to D4: mode-locking is a
 coupling phenomenon, so the coupling default and the range ceiling are the same measurement.
 
-**Read D7.0 before D7's table.** The region D7 declares is derived from criterion (1) alone, and
-**criterion (4) is measured to FAIL at its coupling ceiling** — so D7's box is not, today, the
-five-criteria region this section defines. That gap is the reason the range is provisional, and
-closing it is P2.8's.
+**Read D7.0 before D7's table, and D7.1 after it.** The region D7 declares is derived from
+criterion (1) alone, and **criterion (4) is measured to FAIL at its coupling ceiling** — so D7's box
+is not, today, the five-criteria region this section defines. That gap is the reason the range is
+provisional. D7.1 adds the same measurement on the **shipping six-string topology**, where the
+boundary is **lower still** (between 0.20 and 0.30, against 0.32–0.35 on an isolated pair). Closing
+the gap is P2.8's listening pass, which has not yet been performed.
 
 Settings **outside** the Normal range remain available as an **Extended (Effect) range**. They
 carry **no tuning guarantee** — this is where D3's bounded physical detuning lives, and it is a
@@ -188,9 +190,17 @@ criterion (3) measured by the live-parameter click gate. **Criterion (4) — "ne
 cents apart do not involuntarily mode-lock" — is NOT satisfied at the coupling ceiling of 0.35.** It
 was not merely left unmeasured; it was measured, and it fails.
 
-**The measurement.** Two strings at MIDI 45, string 1 offset +25 cents via `tuningOffsetCents`, the
-shipping bridge otherwise, both plucked, 48 kHz, 7 s, sustain material, peak of each string's own tap
-inside ±80 cents of its own nominal:
+**Read the topology label on every table in this section.** There are now two independent
+measurements of criterion (4) — P2.7's, on an **isolated pair** of strings driven directly, and
+P2.8's, on the **shipping six-string instrument** through `NoteAllocator` and the monitoring chain.
+They do not agree about where the boundary is, and **they are deliberately not reconciled into one
+number**: they are two configurations, both real, and the disagreement is itself the finding. P2.7's
+is below; P2.8's is in D7.1.
+
+**The measurement (TOPOLOGY: two strings, isolated pair, direct `NoteEvent` injection).** Two strings
+at MIDI 45, string 1 offset +25 cents via `tuningOffsetCents`, the shipping bridge otherwise, both
+plucked, 48 kHz, 7 s, sustain material, peak of each string's own tap inside ±80 cents of its own
+nominal:
 
 | `couplingStrength` | string 0 | string 1 | separation | pull on string 0 |
 |---|---|---|---|---|
@@ -230,6 +240,59 @@ statement of fact, which is this section.
 **The consequence, stated so P2.8 does not have to discover it: the provisional `couplingStrength`
 default sits OUTSIDE a criterion-complete Normal range.** It is inside the criterion-(1) box declared
 above, and outside the region where all five of D5's criteria hold. P2.8 settles both, together.
+
+#### D7.1 — the SHIPPING SIX-STRING topology locks EARLIER than D7.0's isolated pair (Task P2.8)
+
+*Added by Task P2.8, which built the listening material D4 reserves and measured the phenomenon on
+the configuration that actually ships. It records a fact and proposes nothing: the ceiling and the
+default remain the author's, per D4 and D5.*
+
+D7.0's tables are measured on **two strings, driven directly**. The instrument ships **six strings on
+one bridge**, allocated by `NoteAllocator`, with the four strings nobody is playing resting at their
+open tuning (P2.7's rest-pitch fix) and therefore *in the same loop*. That is a different system, and
+it does not have the same boundary.
+
+**The measurement (TOPOLOGY: six strings, `GuitarFingering`, the shipping default chain).** Corpus
+phrase `02_open_chords.mid` section C, rendered by `cnpg_render --variants` as
+`02_open_chords__unison<NNN>`. MIDI 45 lands on string 1 (fret 0) and MIDI 46 on string 0 (fret 6);
+`stringTuningOffsetCents1` = +25 and `stringTuningOffsetCents0` = −50 put the two strings at
+**111.60 Hz and 113.22 Hz — 25.00 cents apart**, which is D7.0's pair on D7.0's strings. Both struck,
+30 ms apart, as a player would. 48 kHz, FFT over 31–36 s, peaks inside 109–116 Hz, levels relative to
+the stronger peak:
+
+| `couplingStrength` | what survives in the band | separation |
+|---|---|---|
+| 0.00 | 111.603 Hz @ −0.3 dB, 113.205 Hz @ 0.0 dB | **24.677 cents** |
+| 0.10 | 111.626 @ −1.8, 113.205 @ 0.0 | **24.322 cents** |
+| 0.20 | 111.671 @ −6.8, 113.205 @ 0.0 | **23.612 cents** |
+| 0.30 | 113.182 only | **ONE PEAK — locked** |
+| 0.32 | 113.182 only | **ONE PEAK — locked** |
+| 0.35 | 113.182 only | **ONE PEAK — locked** |
+
+**On this topology the criterion-(4) boundary sits between 0.20 and 0.30**, against **0.32–0.35** for
+D7.0's isolated pair at the same default string material. The shipping instrument locks *earlier*
+than the ADR previously recorded.
+
+Two further facts, because each changes what the listening pass is listening for:
+
+- **The lock is progressive, not a threshold.** The detuned partner is not present-then-absent; it is
+  absorbed — **−0.3, −1.8, −6.8 dB** — and then gone. So at coupling 0.20 the question is not "did it
+  lock" (it did not) but whether a partner 6.8 dB down is still the chord that was played. D7.0's
+  isolated-pair tables cannot show this, because they report only the peak frequencies.
+- **Nothing here contradicts D7.0.** Six strings on one bridge is a more strongly coupled system than
+  two: the four unplayed strings resting at their open pitches are additional loads sharing the same
+  junction, and the bridge's effective admittance seen by any one string is a function of how many
+  strings are live (which is checklist item 16's whole subject). A lower boundary on the busier
+  topology is the expected direction; what was not known before this measurement is **how much**
+  lower, and that it crosses below 0.30.
+
+**What this does NOT do.** It does not lower the declared ceiling, propose a default, or re-derive
+D7's box. D5 makes criterion (4) a musical judgement and D4 reserves it for the P2.8 listening pass,
+which at the time of writing **has not been performed** — `docs/listening/P2-20260803.md` is prepared
+with every verdict column empty. If the author's ear agrees with this table, the coupling ceiling
+moves below 0.30 and D7's box is re-derived rather than edited; if it does not, this table stands as
+the measurement the judgement was made against. Either way the ADR now carries the topology that
+ships alongside the one that was convenient to measure.
 
 **Measured worst |error| inside the box: 0.770 cents**, over MIDI 21–96 at 44.1/48/96 kHz at each of
 six grid points (the four coupled corners of the box, the decoupled control, and the shipping
@@ -359,3 +422,12 @@ range (D7) and the **provisional** `couplingStrength` default are both settled b
 **D7's box is criterion-(1)-complete but not D5-complete** — criterion (4) fails at its coupling
 ceiling, measured, per D7.0. P2.8 therefore does not merely confirm the range; it has an established
 failure to resolve, and D5 makes resolving it the same act as choosing the default.
+
+**As of Task P2.8 (2026-08-03) that confirmation is still outstanding, and the defect is now known to
+be larger than D7.0 recorded.** P2.8 built the comparison material D4 reserves — the coupling ladder,
+the near-unison ladder, and settings at and outside all three faces of the box — and measured
+criterion (4) on the **shipping six-string topology**, where the boundary sits between **0.20 and
+0.30** rather than D7.0's 0.32–0.35 (D7.1). It recorded **no verdict**:
+`docs/listening/P2-20260803.md` is the prepared session sheet and every verdict column in it,
+including the `couplingStrength` value and the Normal range, is deliberately empty. Both remain
+provisional, and P2.9 must not treat a green board as confirmation of either (D4).

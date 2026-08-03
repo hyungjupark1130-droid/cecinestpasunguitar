@@ -6,15 +6,24 @@ free automated parameter sweeps — continuously and regardless of this document
 the layer on top: the questions a measurement cannot answer, asked of the actual rendered audio, by
 the author, once per milestone.
 
-**Versioned, and appended to rather than rewritten.** This is the P1 revision, created by Task
-P1.11. Task P2.8 appends its own items (sympathetic coupling, palm-mute chug, pedal-held chords,
-retrigger-mode contrast). Items are never renumbered: `corpus.json` cites them by number, and so do
-past listening reports.
+**Versioned, and appended to rather than rewritten.** Created by Task P1.11 as the P1 revision;
+**this is the P2 revision, appended by Task P2.8** (items 22-27, plus the corpus-v2 evidence table
+at the end). Items are never renumbered: `corpus.json` cites them by number, and so do past
+listening reports.
 
 ## Procedure
 
-1. Render the corpus:
-   `build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p1 --samplerate 48000 --blocksize 128`
+1. Render the corpus. P1 used one command; from corpus version 2 there are three, and the third is
+   what the P2 comparison items (15, 22, 26, 27) are judged from:
+
+   ```
+   build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p1 --samplerate 48000 --blocksize 128
+   build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p2 --rates 44100,48000,96000
+   build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p2 --samplerate 48000 --variants
+   ```
+
+   `--samplerate` writes flat into `--out`; `--rates` writes one subdirectory per rate, because the
+   filename carries no rate (`tests/corpus/README.md`, "Rendering the corpus").
 2. Listen on monitoring you name in the report — the device matters to the verdicts and an unnamed
    device makes a "concern" unreproducible.
 3. Give **every** item exactly one verdict: **pass** / **concern** / **fail**. Cite the WAV filename
@@ -89,9 +98,19 @@ These are not in `docs/plan.md` section 4.8's list of twelve. They were added wh
 created the behaviour also created a question a measurement cannot answer, and each names the task
 that added it. First judged at the P2 listening pass (Task P2.8).
 
-Items 1, 2, 4, 6 and 10's P2 halves, and items 14–20, are all judged from a HOST rather than from
-the corpus: the corpus renders through `cnpg_render`, which is still the single-string P1 chain, so
-nothing in it exercises allocation, chords, the pedal, or the coupled bridge under six real voices.
+**THE SENTENCE THAT USED TO STAND HERE IS OBSOLETE AS OF CORPUS VERSION 2, AND IT MATTERED.** It
+read: "Items 1, 2, 4, 6 and 10's P2 halves, and items 14–20, are all judged from a HOST rather than
+from the corpus: the corpus renders through `cnpg_render`, which is still the single-string P1
+chain, so nothing in it exercises allocation, chords, the pedal, or the coupled bridge under six
+real voices." Task P2.8 made that false: phrases 02, 04 and 06 render on **six strings through
+`GuitarFingering`** with the loaded bridge and real dampers, so allocation, chords, the pedal and
+sympathetic coupling are all in the corpus now.
+
+**Exactly one of those items still needs a host, and it is item 16** — a string-count change under a
+ringing chord. Nothing in the corpus moves `numStrings` (the renderer can automate it, but no phrase
+does), so `docs/listening/P2.6-ableton-checks.md` check B remains the only evidence for it. Items
+18, 19 and 21 are now judgeable from a render *as well as* from a host, and the host version is
+still the better one for 18 (a moving progression is a gesture, not a phrase).
 `docs/listening/P2.6-ableton-checks.md` is the executable form of that session — the two manual
 checks deferred since Task P2.1 plus the retrigger and pedal items — and it should be run before or
 alongside the P2.8 pass rather than after it.
@@ -106,7 +125,24 @@ alongside the P2.8 pass rather than after it.
 | 18 | **Fingering plausibility** | With `Allocation Mode` = Guitar Fingering, do chords land where a player's hand would put them? The rule is "lowest fret among strings that own no note, ties to least-recently-used", and on an open C major it produces x32010 unprompted. Does a moving chord progression stay plausible, or does it wander onto implausible strings as notes are held and released? | P2.6 |
 | 19 | **Steals** | Play more simultaneous notes than there are strings. A steal displaces the note struck longest ago, with no synthesized note-off and no click. Does that sound like a guitarist running out of strings, or like a bug? Also: a note the fingering table cannot reach (below the low E, above the 24th fret) is DROPPED — silence, not a transposition. Is silence the right answer to play? | P2.6 |
 | 20 | **Sustain pedal** | With CC64 held, notes ring past their key releases and damp together on pedal-up. Six dampers landing on one sample measure −1.07 dB of click excess against a 3 dB criterion — is that inaudible in a dense held chord on a coupled bridge, where the six released strings are all still feeding each other? | P2.6 |
-| 21 | **Re-striking just after a note-off** | A released note is over: a NoteOn landing on a string whose note was released CLEARS that string and plucks it fresh. If it lands soon after the note-off, the tail it discards is still loud, and the clear is a one-sample step. **Measured, worst case within half a cycle of each age: 5.5 ms → 19.69 dB of click excess, 12.4 ms → 21.48 dB, 21.3 ms → 16.64 dB, 52.7 ms → 0.30 dB, and 0 dB from 100 ms up, all against a 3 dB criterion whose level-placed hard-cut control reads 30.74 dB.** So the headless gate says this IS a discontinuity below about 50 ms and says nothing about whether anyone hears it under a fresh full-velocity pluck landing on the same sample. Play fast repeated notes and a staccato line with short gaps: does a re-strike 5–20 ms after a release tick, or does the new attack mask it? **This is pre-P2.6 behaviour that nothing ever measured, not a new defect** — but it is now measured, and if the answer is "it ticks", the fix is a short fade before the clear on the fresh path over a string that still has state, at the cost of moving the corpus renders off the P1 parent. | P2.6 |
+| 21 | **Re-striking just after a note-off (P2.6)** | A released note is over: a NoteOn landing on a string whose note was released CLEARS that string and plucks it fresh. If it lands soon after the note-off, the tail it discards is still loud, and the clear is a one-sample step. **Measured, worst case within half a cycle of each age: 5.5 ms → 19.69 dB of click excess, 12.4 ms → 21.48 dB, 21.3 ms → 16.64 dB, 52.7 ms → 0.30 dB, and 0 dB from 100 ms up, all against a 3 dB criterion whose level-placed hard-cut control reads 30.74 dB.** So the headless gate says this IS a discontinuity below about 50 ms and says nothing about whether anyone hears it under a fresh full-velocity pluck landing on the same sample. Play fast repeated notes and a staccato line with short gaps: does a re-strike 5–20 ms after a release tick, or does the new attack mask it? **This is pre-P2.6 behaviour that nothing ever measured, not a new defect** — but it is now measured, and if the answer is "it ticks", the fix is a short fade before the clear on the fresh path over a string that still has state, at the cost of moving the corpus renders off the P1 parent. | P2.6 |
+
+### The six P2 items (`docs/plan.md` Task P2.8), added by Task P2.8
+
+These are the six the P2.8 task definition names, in its words. Each of them **overlaps an earlier
+item and is not a duplicate of it**, and the "what it adds" column says exactly what the overlap is,
+because judging the same thing twice is how a checklist stops being read. Items 22–27 are judged
+from the **corpus renders**, which as of corpus version 2 are six real strings on a loaded bridge —
+so unlike items 14–20 they do not need a host.
+
+| # | Item | What to listen for | What it adds over the earlier item | Added by |
+|---|---|---|---|---|
+| 22 | **Sympathetic coupling is audible and musical — and at what strength** | The `coupling*` ladder over phrase 02: 0.00 / 0.10 / 0.20 / 0.30 / 0.32 / 0.35. Section B (21–29 s) is the held low E under staccato notes. Which value makes the instrument sound like an instrument? Headless: beat depth 10.08 / 3.59 / 2.28 / 1.62 dB at coupling 0.1 / 0.35 / 0.5 / 1.0 — richness FALLS as coupling rises. | Item 14 asks "is 0.35 right?" with a knob in a host and no anchor. This is a fixed six-render A/B whose values are all measured boundary points, and **it is the item that decides the shipped default** (ADR 0007 D4). | P2.8 |
+| 23 | **Palm-mute chug damps convincingly without machine-gun artifacts** | Phrase 04, sections A–D. Do 16 identical note-ons sound like sixteen *picks*, or like one sample retriggered? Listen for identical attack transients, and for level creeping up across a run (energy the damper failed to remove). | Item 2 asks whether a muted note is a pitched thump. This asks whether a *sequence* of them is playable — the sameness artifact only exists in the repetition, and item 2 can be passed by a single good chug. | P2.8 |
+| 24 | **Bends stay in tune and click-free at the extremes** | Phrase 05, whole file, on the P2 tree. The bend extremes now sit on a bridge whose phase-delay compensation **re-solves every block** as the wheel moves (ADR 0007 D9), and the corpus render's pitch moved up to ~5 cents at P2.7. Does the wheel still glide, and does the pitch still arrive where the wheel says? | Item 5 was judged in P1 on one string against a rigid termination, where nothing re-solved. The compensation under a moving wheel is new machinery on old material. | P2.8 |
+| 25 | **Pedal-held chords ring and release together** | Phrase 06, all five sections. Section E is six dampers landing on one sample (headless: −1.07 dB of click excess against a 3 dB criterion). Section C is a re-strike under the pedal that must survive the pedal-up. Section D is the half-pedal sweep: exactly one damp each way, no stutter. | Item 20 is the host check with a real pedal. This is the recorded artifact, so a concern here is reproducible from a file rather than from a gesture. | P2.8 |
+| 26 | **Mid-note sweeps morph without zipper noise** | Phrase 07 (pickup, resonance, drive, material) **plus** phrase 08's damper-position steps **plus** the `range*` renders' bridge settings. Any stepping, any grain, any change that arrives as an event rather than as a motion. | Item 10's damper half was deferred to P2 and item 13's hysteretic pickup quantisation was never judged. The bridge parameters are new at P2.7 and their live-change gate measured −0.057 / −0.033 / +0.115 dB — clean by the metric, unjudged by ear. | P2.8 |
+| 27 | **Physical vs Synth retrigger characters are distinct** | The two `retrig*` renders of phrase 03, back to back. Sections B and C are the slurs. Could a listener tell which is selected without being told? | Items 3 and 4 judge each mode **alone**, and each can pass while the pair is indistinguishable. This is the contrast, and it is the one thing two separate verdicts cannot express. | P2.8 |
 
 ## Which P1 phrase is the evidence for which item
 
@@ -120,3 +156,20 @@ alongside the P2.8 pass rather than after it.
 | 10 | `07_param_sweeps_midnote` — 0.5–8.0 s; the damper half of the item waits for P2 |
 | 11 | `01_chromatic_singles` gaps throughout; every phrase's own 2 s tail |
 | 12 | `05_low_string_bends` and `07_param_sweeps_midnote` in full |
+
+## …and which corpus-v2 render is the evidence for which P2 item (Task P2.8)
+
+| Item | Primary evidence |
+|---|---|
+| 1 | `08_harmonics_nodes` — ten note-offs onto p = 1/2, 1/3, 1/4, 1/5 and the 0.15 control |
+| 2, 23 | `04_palm_mute_chug` — A/B/C/D at 0.2–12.4 s; F (19.0–21.8 s) is the mute against a let-ring |
+| 3, 4, 27 | `03_legato_retrigger__retrigPhysical` and `…__retrigSynth` — slurs at 5.5–13.0 s |
+| 6, 20, 25 | `06_sustain_chords` — A 0.2–5.0 s, B 6.0–12.0 s, C 13.0–18.0 s, D 18.9–23.2 s, E 24.5–29.0 s |
+| 14, 22 | `02_open_chords__coupling000/010/020/030/032/035` — section B, 21.0–29.2 s |
+| 15 | `02_open_chords__unison000/010/020/030/032/035` — section C, 30.0–40.0 s |
+| 16 | Host only (`P2.6-ableton-checks.md` check B). No corpus render moves the string count. |
+| 17 | `03_legato_retrigger__retrigPhysical` — section B, 5.5–9.1 s |
+| 18, 19 | `02_open_chords` — section A for the fingering, section D at 41.0–44.0 s for the steal |
+| 21 | `04_palm_mute_chug` — section E, 12.6–18.5 s, the 5/12/21/53/100 ms gap ladder |
+| 24 | `05_low_string_bends` — whole file, on the P2 tree |
+| 26 | `07_param_sweeps_midnote`, `08_harmonics_nodes`, and the `02_open_chords__range*` renders |

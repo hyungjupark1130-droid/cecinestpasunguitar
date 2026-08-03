@@ -1,7 +1,7 @@
 {
   "schema": "cnpg-corpus/1",
-  "corpusVersion": 1,
-  "comment": "Versioned, append-only MIDI phrase corpus (docs/plan.md section 4.8). See README.md for the versioning rules, the full per-phrase authoring specification, and what every field below means. corpusVersion is an integer that increments whenever a phrase is ADDED; existing phrases and their bytes never change, so a render filename carrying a corpus version identifies exactly one set of MIDI files. Version 1 is the P1 set (01, 03, 05, 07); Task P2.8 appends 02, 04, 06, 08 and bumps it to 2.",
+  "corpusVersion": 2,
+  "comment": "Versioned, append-only MIDI phrase corpus (docs/plan.md section 4.8). See README.md for the versioning rules, the full per-phrase authoring specification, and what every field below means. corpusVersion is an integer that increments whenever a phrase is ADDED; existing phrases and their bytes never change, so a render filename carrying a corpus version identifies exactly one set of MIDI files. Version 1 is the P1 set (01, 03, 05, 07); version 2 appends the P2 set (02, 04, 06, 08) at Task P2.8. The P1 entries below are BYTE-FOR-BYTE what version 1 carried, including the fields they do not set: numStrings and allocationMode default to the single-string full-range configuration cnpg_render used through P1, which is what keeps a frozen phrase entry rendering the configuration its own `exercises` field describes.",
   "phrases": [
     {
       "file": "01_chromatic_singles.mid",
@@ -50,6 +50,68 @@
       "sidecar": "07_param_sweeps_midnote.json",
       "params": {},
       "durationSeconds": 33.0
+    },
+    {
+      "file": "02_open_chords.mid",
+      "phase": "P2",
+      "description": "Seven strummed open-position chords (E, A, D, G, C, Am, Em) held to ring; then the low E held under twelve staccato notes above it; then the near-unison pair (MIDI 45 on string 1 and MIDI 46 on string 0, first held together and then string 0 alone against string 1 at rest), which the coupling comparison configs detune into a 25-cent pair; then seven simultaneous notes on six strings, so the seventh steals.",
+      "exercises": "Six real voices on one loaded bridge: fingering plausibility, sympathetic shimmer, chord stability below the limiter ceiling, near-unison mode locking (ADR 0007 D5 criterion 4), and the steal policy.",
+      "checklistItems": [14, 15, 19, 22],
+      "retriggerMode": "Physical",
+      "seed": 2,
+      "sidecar": null,
+      "numStrings": 6,
+      "allocationMode": "GuitarFingering",
+      "params": {},
+      "durationSeconds": 46.0
+    },
+    {
+      "file": "04_palm_mute_chug.mid",
+      "phase": "P2",
+      "description": "ABUSE. Eighth-note and sixteenth-note chugging on the open low E, power-chord chugs, a long-short-short gallop, a re-strike gap ladder at 5/12/21/53/100 ms after each note-off, and chugs resolving into a let-ring. Rendered with the damper near the bridge and only partly absorbing, which is what a palm mute is on this instrument.",
+      "exercises": "Fast retriggers into a partially absorbing damper: short PITCHED thumps rather than clicks, no energy buildup between hits, no machine-gun sameness, and whether a fresh attack masks the state clear a re-strike performs (checklist item 21).",
+      "checklistItems": [2, 21, 23],
+      "retriggerMode": "Physical",
+      "seed": 4,
+      "sidecar": null,
+      "numStrings": 6,
+      "allocationMode": "GuitarFingering",
+      "params": {
+        "damperPosition01": 0.92,
+        "damperMaxLoss": 0.45,
+        "damperFeltTimeMs": 20.0
+      },
+      "durationSeconds": 23.83
+    },
+    {
+      "file": "06_sustain_chords.mid",
+      "phase": "P2",
+      "description": "Chords under CC64: one chord held past its key releases; a second chord arriving over the first while the pedal still holds it; a re-strike under the pedal that must survive the pedal-up; a slow half-pedal sweep across the 64 threshold in both directions; and a six-string chord released by one pedal-up.",
+      "exercises": "CC64 deferral end to end -- notes ringing past their note-offs, six dampers landing on one sample, a re-strike cancelling a pending release, and one clean transition per threshold crossing rather than a stutter.",
+      "checklistItems": [6, 20, 25],
+      "retriggerMode": "Physical",
+      "seed": 6,
+      "sidecar": null,
+      "numStrings": 6,
+      "allocationMode": "GuitarFingering",
+      "params": {},
+      "durationSeconds": 31.0
+    },
+    {
+      "file": "08_harmonics_nodes.mid",
+      "phase": "P2",
+      "description": "Ten notes (MIDI 40 then MIDI 45), each rung for 0.9 s and then released and left to ring for 2.9 s with the damper sitting on a node. The sidecar steps damperPosition01 to 1/2, 1/3, 1/4, 1/5 and finally to the default 0.15 before each note, always inside a silent gap, so the damper is already AT the node when the note-off engages it. ONE string, and the tap off the midpoint, both for measurement reasons stated in README.md: on six coupled strings the neighbours ring at exactly the partials under test, and a tap at the default 0.5 sits on a node of every even partial.",
+      "exercises": "Harmonic behaviour of a point damper: p = 1/2 suppresses the fundamental and leaves the octave, p = 1/3 leaves the twelfth, and the 0.15 control is the position with no low-order node on it.",
+      "checklistItems": [1],
+      "retriggerMode": "Physical",
+      "seed": 8,
+      "sidecar": "08_harmonics_nodes.json",
+      "numStrings": 1,
+      "allocationMode": "FreeZones",
+      "params": {
+        "pickupPosition01": 0.87
+      },
+      "durationSeconds": 31.9
     }
   ]
 }

@@ -18,6 +18,7 @@ add_executable(cnpg_tests
     dsp/BridgeEnergyTierOneTests.cpp
     dsp/BridgePortContractTests.cpp
     dsp/BridgeTuningClickTests.cpp
+    dsp/CorpusSweepTests.cpp
     dsp/CoupledStringsTests.cpp
     dsp/DamperEnergyTests.cpp
     dsp/DamperFeltTimeTests.cpp

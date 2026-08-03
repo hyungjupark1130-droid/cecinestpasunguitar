@@ -61,14 +61,59 @@ flat (locked location), with one manifest, `corpus.json`.
    rendered length on every `--corpus` run (10 ms tolerance) and the render fails if they disagree,
    so the manifest cannot quietly go stale against the files it describes.
 
-### Current version: 1 (P1 — phrases 01, 03, 05, 07)
+### Current version: 2 (P1 — phrases 01, 03, 05, 07; P2 — phrases 02, 04, 06, 08)
 
-Task P2.8 appends `02_open_chords.mid`, `04_palm_mute_chug.mid`, `06_sustain_chords.mid`, and
-`08_harmonics_nodes.mid` + `.json`, and bumps `corpusVersion` to 2. It also adds the
-per-`RetriggerMode` variant renders of `03_legato_retrigger.mid` — those are *render
-configurations*, not new MIDI files, so they do not change the corpus itself. Phrase 03 is rendered
-in the default (Physical) mode only in P1 because the full Physical/Synth semantics need
-`DamperJunction`, which is Task P2.2.
+Task P2.8 appended `02_open_chords.mid`, `04_palm_mute_chug.mid`, `06_sustain_chords.mid`, and
+`08_harmonics_nodes.mid` + `.json`, and bumped `corpusVersion` to 2. It also added the
+per-`RetriggerMode` variant renders of `03_legato_retrigger.mid` and the coupling / near-unison /
+Normal-range comparison sets — those are *render configurations*, not new MIDI files, so they do not
+change the corpus itself. Phrase 03 is rendered in the default (Physical) mode only in P1 because
+the full Physical/Synth semantics need `DamperJunction`, which is Task P2.2.
+
+### Per-phrase render configuration, and why the DEFAULTS are the P1 ones
+
+A manifest entry may carry `numStrings` (1..8) and `allocationMode` (`"GuitarFingering"` or
+`"FreeZones"`) alongside `retriggerMode` and `params`. **Both default to the P1 single-string,
+full-range-`FreeZones` configuration, and that default is load-bearing rather than nostalgic.**
+Rule 1 freezes a committed phrase's bytes, and an entry's fields are part of what "cv1 identifies
+exactly one set of inputs" means, so the P1 entries do not state a count and the absence has to keep
+meaning what it meant when they were written:
+
+- **Phrase 01** is a chromatic run from MIDI 21 to 108. The shipped 6-string EADGBE fingering table
+  spans 40..88, so under it 40 of those notes are **unassignable** and `cnpg_render` fails the
+  render rather than quietly dropping them.
+- **Phrase 03**'s legato slurs are retriggers *only while every note lands on the same string*. On
+  six strings each slur note takes a free string instead, and there is no legato left to judge —
+  which is exactly what the phrase exists for.
+
+The P2 entries state their configuration explicitly, and for 02, 04 and 06 it is the plugin's
+shipped default: **6 strings, `GuitarFingering`** over the default open notes 40/45/50/55/59/64.
+
+**Phrase 08 is the exception, and the reason is a measurement.** It renders on **one** string with
+the tap at `pickupPosition01` 0.87, because the item it exists for — checklist item 1, "the damper
+at p = 1/2 suppresses the fundamental and leaves the octave" — is a *single-string* physical
+statement that six coupled strings make unmeasurable. The neighbours ring at exactly the partials
+under test — string 5's open E4 (329.6 Hz) **is** the 4th partial of the low E, and string 0's open
+E2 is the 2nd partial of E3 — and an idle string's damper is *released*, because it never had a note
+to release. Measured on the six-string cut of this phrase, second harmonic over fundamental at
+p = 1/2, 1/3, 1/4, 1/5 and the 0.15 control:
+
+| | p = 1/2 | 1/3 | 1/4 | 1/5 | 0.15 |
+|---|---|---|---|---|---|
+| six strings, MIDI 52 | +7.2 dB | +8.0 | +8.2 | +8.4 | +8.7 |
+| six strings, MIDI 40 | **+1.9 dB** | +12.4 | +0.1 | +15.5 | −0.7 |
+| **one string, tap 0.87, MIDI 40** | **+100.1 dB** | +18.2 | +9.0 | −30.0 | −31.7 |
+
+The six-string MIDI 52 row varies by **1.5 dB across the whole sweep and shows no node structure at
+all** — what it measures is the neighbours, not the node.
+
+The tap moves off the default 0.5 for a second, independent reason: a tap at the midpoint sits on a
+node of *every even partial*, so the octave the item asks for is suppressed by the pickup before the
+damper is ever consulted. On one string with the tap at 0.87 the phrase reads the fundamental
+**100.1 dB** below the 2nd harmonic at p = 1/2 and **120.2 dB** below the 3rd at p = 1/3, with the
+loudest surviving partial being H4, H3, H4 and H5 at p = 1/2, 1/3, 1/4 and 1/5 respectively — each
+one exactly the partial whose node the damper is sitting on — and the 0.15 control leaving the
+fundamental loudest.
 
 ## Manifest fields
 
@@ -123,9 +168,26 @@ accepts both spellings (`tests/render/RenderMain.cpp`, `kParamNames`); new phras
 `stringMaterial*` form.
 
 Not every accepted parameter name does something in P1. `damperPosition01` in particular is stored
-by `StringNetworkParams` and is **inert** until `DamperJunction` lands in Task P2.2
-(`dsp/include/cnpg/dsp/StringNetwork.h`, "P1 SCOPE"): `cnpg_render` accepts it so a P2 phrase does
-not need a renderer change, and a P1 render will not respond to it.
+by `StringNetworkParams` and was **inert** until `DamperJunction` landed in Task P2.2:
+`cnpg_render` accepted it so a P2 phrase would not need a renderer change, and a P1 render did not
+respond to it. From P2.2 it is live, and `08_harmonics_nodes.json` is the phrase that drives it.
+
+Task P2.8 added the P2 half of the vocabulary, all of them shipped APVTS ids: `damperMaxLoss`,
+`damperFeltTimeMs`, `bridgeCoupling`, `bridgeResonanceHz`, `bridgeDamping`, and
+`stringTuningOffsetCents0` … `stringTuningOffsetCents7`.
+
+**`retriggerMode` and `numStrings` are deliberately NOT lanes**, and the reason is recorded in
+`tests/render/RenderMain.cpp` as well as here, because a stepped-lane implementation of both was
+built during Task P2.8 and then removed. A `retriggerMode` lane has no technical obstacle but nothing
+would drive it — the plan's deliverable is per-mode *variant renders*, which `kRenderVariants`
+produces — and a `numStrings` lane's whole gesture (a count reduction under a held chord) **cannot**
+be a corpus render at all: it makes the held notes' note-offs undeliverable, `NoteAllocator` counts
+them on `unaddressableNoteOffCount()` by design, and `cnpg_render` fails the render on a non-zero
+reading, also by design. Neither behaviour should be weakened to manufacture a listening artifact,
+so that gesture stays a host check (`docs/listening/P2.6-ableton-checks.md` check B, which is
+checklist item 16's only evidence). Both remain per-phrase manifest fields, which is where a value
+that does not move belongs — as do `triodeBypass` and `cabBypass`, for the reason the P1 note above
+gives.
 
 ## How these files were authored
 
@@ -237,11 +299,117 @@ the tail.
 Exact breakpoint times and values are in `07_param_sweeps_midnote.json`, which is the authoritative
 copy; the table above is a summary.
 
+### `02_open_chords.mid` — 46.000 s render, 120 events
+
+Rendered on **6 strings, `GuitarFingering`**. Every chord below is a real open-position shape and
+the allocator puts it where a player's hand would: E major arrives as 022100, G major as 320003.
+
+- **A (0.20–20.50 s) — seven strummed open chords.** Each chord's notes are struck low to high,
+  **0.012 s apart**, velocity **100**, and each note is released **2.30 s after its own note-on**.
+  One chord every 3.00 s from 0.20 s:
+
+  | at | chord | notes |
+  |---|---|---|
+  | 0.20 | E major (022100) | 40, 47, 52, 56, 59, 64 |
+  | 3.20 | A major (x02220) | 45, 52, 57, 61, 64 |
+  | 6.20 | D major (xx0232) | 50, 57, 62, 66 |
+  | 9.20 | G major (320003) | 43, 47, 50, 55, 59, 67 |
+  | 12.20 | C major (x32010) | 48, 52, 55, 60, 64 |
+  | 15.20 | A minor (x02210) | 45, 52, 57, 60, 64 |
+  | 18.20 | E minor (022000) | 40, 47, 52, 55, 59, 64 |
+
+- **B (21.00–29.20 s) — sympathetic shimmer.** Note-on MIDI 40, velocity 108, at 21.00; note-off at
+  29.20. Under it, twelve staccato notes at velocity **96**, each **0.12 s** long, starting at
+  22.00 s and **0.60 s** apart: 64, 71, 67, 74, 59, 76, 62, 71, 79, 67, 83, 64.
+- **C (30.00–40.00 s) — the near-unison pair.** Note-on 45/100 at 30.00 and 46/100 at 30.03, both
+  released at 36.00; then note-on 46/104 at 36.60, released at 40.00. MIDI 45 lands on string 1
+  (fret 0) and MIDI 46 on string 0 (fret 6) — the pair ADR 0007 D7.0 measured. The second half is
+  the *purely sympathetic* case: string 0 alone, with string 1 resting at its open pitch.
+- **D (41.00–44.00 s) — the steal.** Six notes at 41.00 + 0.012·i, velocity 100: 40, 47, 52, 56, 59,
+  64. Then note-on 69/100 at 42.50, which finds every candidate string owned and displaces the
+  least-recently-triggered one. All seven note-offs at 44.00; the displaced note's is stale and is
+  dropped, by design.
+
+### `04_palm_mute_chug.mid` — 23.830 s render, 234 events
+
+Rendered on **6 strings, `GuitarFingering`**, with `damperPosition01` **0.92**, `damperMaxLoss`
+**0.45** and `damperFeltTimeMs` **20**. That combination *is* the palm mute on this instrument: the
+damper sits near the bridge, is only partly absorbing (so a muted note is a short **pitched** thump
+rather than a dead click), and engages fast.
+
+- **A (0.20 s).** 16 note-ons on MIDI 40, velocity 110, **0.16 s** apart, each released **0.055 s**
+  after its own note-on.
+- **B (3.20 s).** 24 note-ons on MIDI 40, velocity 104, **0.09 s** apart, each 0.045 s long.
+- **C (6.00 s).** 12 power-chord chugs: MIDI 40 **and** 47 together at velocity 108, **0.18 s**
+  apart, each 0.060 s long.
+- **D (8.60 s) — gallop.** Eight repetitions of long-short-short on MIDI 40, velocity 106: note
+  lengths 0.075 / 0.045 / 0.045 s at step sizes 0.24 / 0.12 / 0.12 s.
+- **E (12.60 s) — the re-strike gap ladder (checklist item 21).** On MIDI 43, velocity 108, notes
+  0.180 s long. Four notes at each of five gaps between one note-off and the next note-on —
+  **0.005, 0.012, 0.021, 0.053, 0.100 s** — with 0.50 s of silence between groups. Those are the
+  four ages the headless gate measured (19.69 / 21.48 / 16.64 / 0.30 dB of click excess) plus the
+  100 ms point where it reads 0.
+- **F (19.00 s) — chugs into a let-ring.** 8 chugs on MIDI 45, velocity 108, 0.14 s apart, 0.050 s
+  long; then note-on 45/112 at 20.33, released at 21.83.
+
+### `06_sustain_chords.mid` — 31.000 s render, 98 events
+
+Rendered on **6 strings, `GuitarFingering`**, shipped defaults otherwise. Every chord is strummed
+low to high **0.012 s** apart at the stated velocity, and every note of a chord is released on the
+one stated instant. CC64 is controller 64 on channel 0; `NoteAllocator` reads ≥ 64 as pedal-down.
+
+- **A.** CC64 = 127 at 0.20. Chord {40, 47, 52, 56, 59, 64} velocity 100 at 0.40, keys released at
+  1.60 (held by the pedal). CC64 = 0 at 5.00.
+- **B.** CC64 = 127 at 6.00. {45, 52, 57, 60, 64} velocity 100 at 6.20, keys up at 7.20;
+  {48, 52, 55, 60, 64} velocity 100 at 8.00 **over** it, keys up at 9.20. CC64 = 0 at 12.00.
+- **C.** CC64 = 127 at 13.00. Note-on 45/104 at 13.20, note-off at 14.00 (held); note-on 45/104
+  again at 14.60, which **cancels** that held note-off. CC64 = 0 at 16.50 — the note must not damp.
+  Note-off 45 at 18.00.
+- **D — the half-pedal sweep.** CC64 = 127 at 18.90; chord {50, 57, 62, 66} velocity 100 at 19.00,
+  keys up at 20.20. Then CC64 stepped **down** from 21.00 s, 0.05 s apart, values 120, 112, …, 0
+  (16 messages, `120 − 8·i`), and **up** from 22.00 s, same spacing, values 0, 8, …, 120; CC64 = 0 at
+  23.20. Exactly one threshold crossing each way.
+- **E.** CC64 = 127 at 24.50. Chord {40, 47, 52, 56, 59, 64} velocity 104 at 24.60, keys up at
+  26.00. CC64 = 0 at 29.00 — six dampers landing on one sample.
+
+### `08_harmonics_nodes.mid` + `.json` — 31.900 s render, 20 events
+
+Rendered on **one** string with `pickupPosition01` **0.87** — see "Per-phrase render configuration"
+above for the measurement that forced both.
+
+Ten notes, velocity **104**, each released **0.90 s** after its own note-on, one every **3.20 s**
+from 0.20 s. The first five are MIDI **40**, the second five MIDI **45**. The sidecar drives
+`damperPosition01` through **1/2, 1/3, 1/4, 1/5, 0.15** for each note in that order, moving between
+values with a **50 ms** ramp that ends **0.30 s before** the note-on — i.e. entirely inside a silent
+gap, so the damper is already at the node when the note-off engages it and this phrase never sweeps
+a position under a ringing string (that is phrase 07's job). The lane holds flat everywhere else;
+that is why each node has *two* breakpoints rather than one.
+
+`08_harmonics_nodes.json` is the authoritative copy of the times and values.
+
 ## Rendering the corpus
 
 ```
 build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p1 --samplerate 48000 --blocksize 128
+build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p2 --rates 44100,48000,96000
+build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p2 --samplerate 48000 --variants
 ```
+
+**`--samplerate` writes flat into `--out`; `--rates` writes `<out>/<rate>/`.** A render filename
+carries the phrase, the variant, the corpus version and the source digest, and deliberately not the
+sample rate (rule 3) — so three rates in one directory would be three renders with one name and only
+the last would survive. Measured on the first cut of `--rates`: it produced 8 files, all of them
+96 kHz.
+
+`--variants` adds the built-in P2 comparison configurations (`tests/render/RenderMain.cpp`,
+`kRenderVariants`): the per-`RetriggerMode` pair over phrase 03, the `couplingStrength` ladder and
+the near-unison ladder over phrase 02, and the settings at and outside the provisional Normal range.
+Their filenames carry the variant name ahead of the `__cv<n>_s<hash>` tail, which stays terminal so
+the checklist's step 4 still reads the corpus version and digest off the end.
+
+`--bridge-phase-blind` attaches a bridge port that forwards everything to a real `BridgeJunction` and
+reports **zero** reflection phase delay — Task P2.4's instrument, the negative control for P2.7's
+compensation. It is not the instrument and no listening verdict may be recorded against it.
 
 `renders/` is git-ignored: the WAVs are build products of the corpus plus a commit, reproducible at
 any time from either.

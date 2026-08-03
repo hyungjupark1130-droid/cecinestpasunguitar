@@ -74,8 +74,10 @@
 
 #include "support/P1Chain.h"
 
+#include "cnpg/dsp/BridgeJunction.h"
 #include "cnpg/dsp/Common.h"
 #include "cnpg/dsp/EventQueue.h"
+#include "cnpg/dsp/IBridgePort.h"
 #include "cnpg/dsp/MidiTranslation.h"
 #include "cnpg/dsp/NoteAllocator.h"
 #include "cnpg/dsp/Oversampler.h"
@@ -95,6 +97,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -472,6 +475,12 @@ bool readJsonFile(const fs::path& path, JsonValue& out, std::string& error) {
 // (triodeBypass, cabBypass, retriggerMode) are per-phrase settings, not lanes: they are read from a
 // manifest entry's own fields, because interpolating "bypass" between breakpoints is not a
 // meaningful operation and a lane that silently thresholded at 0.5 would be a trap.
+// Task P2.8 added the P2 half of this vocabulary: the three bridge-admittance parameters, the two
+// damper parameters that are not the position, and the eight per-string tuning offsets. All of them
+// are APVTS parameters the plugin already ships (plugin/src/Parameters.h), and all of them are
+// continuous, so they are lanes on the same footing as the P1 set. The DISCRETE P2 parameters --
+// retriggerMode and numStrings -- are a separate vocabulary below, because a linearly interpolated
+// "mode" is the trap this comment's P1 half already refused.
 enum class AutomatableParam {
     ExciterDefaultPosition,
     ExciterDefaultHardness,
@@ -481,6 +490,19 @@ enum class AutomatableParam {
     StringMaterialDispersionAmount,
     PickupPosition01,
     DamperPosition01,
+    DamperMaxLoss,
+    DamperFeltTimeMs,
+    BridgeCoupling,
+    BridgeResonanceHz,
+    BridgeDamping,
+    StringTuningOffsetCents0,
+    StringTuningOffsetCents1,
+    StringTuningOffsetCents2,
+    StringTuningOffsetCents3,
+    StringTuningOffsetCents4,
+    StringTuningOffsetCents5,
+    StringTuningOffsetCents6,
+    StringTuningOffsetCents7,
     PickupResonanceHz,
     PickupQ,
     PickupOutputGainDb,
@@ -489,6 +511,36 @@ enum class AutomatableParam {
     OutputGainDb,
     LimiterCeilingDb
 };
+
+// -----------------------------------------------------------------------------------------------
+// THE DISCRETE PARAMETERS ARE **NOT** LANES, AND THE REASON IS A MEASUREMENT (Task P2.8)
+// -----------------------------------------------------------------------------------------------
+//
+// docs/plan.md's P2.8 step text asks for "positions, coupling, material, retriggerMode switches
+// driven alongside MIDI". The first three are lanes above. The fourth, and `numStrings` with it, are
+// NOT, and this file carried a stepped-lane implementation of both for part of the task before it
+// was removed. Recording why, because "we could add it later" is not the same claim as "it would
+// work":
+//
+//   - `retriggerMode` as a mid-render lane has no technical obstacle, but nothing would drive it.
+//     The plan's own file list spells the deliverable as "per-retriggerMode VARIANT RENDERS of
+//     03_legato_retrigger.mid (render configurations, not a new MIDI file)", which is what
+//     kRenderVariants below produces. A parse-and-apply path that no shipped corpus sidecar and no
+//     shipped variant ever exercises is exactly the vacuity this project keeps finding, so it is not
+//     shipped.
+//
+//   - `numStrings` as a mid-render lane is worse than unexercised: the gesture it exists for CANNOT
+//     be a corpus render as the tool is specified. A count reduction under a held chord takes
+//     strings out of the active set while they own notes, so their note-offs become undeliverable --
+//     NoteAllocator counts them on unaddressableNoteOffCount(), by design, and renderOne() FAILS the
+//     render on a non-zero reading, also by design (see there: a non-zero count means something moved
+//     a count the render did not ask to move). Both behaviours are correct and neither should be
+//     weakened to let a listening artifact exist. The gesture therefore stays a HOST check --
+//     docs/listening/P2.6-ableton-checks.md check B, which is checklist item 16's only evidence and
+//     is documented as such in the checklist.
+//
+// Both remain per-phrase manifest fields (`retriggerMode`, `numStrings`), which is where a value
+// that does not move belongs.
 
 struct ParamNameEntry {
     const char* name;
@@ -520,6 +572,20 @@ constexpr ParamNameEntry kParamNames[] = {
     // respond to it; accepting-and-documenting beats rejecting a name the manifest schema will
     // need one phase later.
     {"damperPosition01", AutomatableParam::DamperPosition01},
+    // ---- the P2 additions (Task P2.8) --------------------------------------------------------
+    {"damperMaxLoss", AutomatableParam::DamperMaxLoss},
+    {"damperFeltTimeMs", AutomatableParam::DamperFeltTimeMs},
+    {"bridgeCoupling", AutomatableParam::BridgeCoupling},
+    {"bridgeResonanceHz", AutomatableParam::BridgeResonanceHz},
+    {"bridgeDamping", AutomatableParam::BridgeDamping},
+    {"stringTuningOffsetCents0", AutomatableParam::StringTuningOffsetCents0},
+    {"stringTuningOffsetCents1", AutomatableParam::StringTuningOffsetCents1},
+    {"stringTuningOffsetCents2", AutomatableParam::StringTuningOffsetCents2},
+    {"stringTuningOffsetCents3", AutomatableParam::StringTuningOffsetCents3},
+    {"stringTuningOffsetCents4", AutomatableParam::StringTuningOffsetCents4},
+    {"stringTuningOffsetCents5", AutomatableParam::StringTuningOffsetCents5},
+    {"stringTuningOffsetCents6", AutomatableParam::StringTuningOffsetCents6},
+    {"stringTuningOffsetCents7", AutomatableParam::StringTuningOffsetCents7},
     {"pickupResonanceHz", AutomatableParam::PickupResonanceHz},
     {"pickupQ", AutomatableParam::PickupQ},
     {"pickupOutputGainDb", AutomatableParam::PickupOutputGainDb},
@@ -575,6 +641,34 @@ void applyParam(cnpg::test::P1ChainParams& params, AutomatableParam which, float
     case AutomatableParam::DamperPosition01:
         params.network.damperPosition01 = value;
         break;
+    case AutomatableParam::DamperMaxLoss:
+        params.network.damper.maxLoss = value;
+        break;
+    case AutomatableParam::DamperFeltTimeMs:
+        params.network.damper.feltTimeConstantMs = value;
+        break;
+    case AutomatableParam::BridgeCoupling:
+        params.network.bridge.couplingStrength = value;
+        break;
+    case AutomatableParam::BridgeResonanceHz:
+        params.network.bridge.resonanceHz = value;
+        break;
+    case AutomatableParam::BridgeDamping:
+        params.network.bridge.damping = value;
+        break;
+    case AutomatableParam::StringTuningOffsetCents0:
+    case AutomatableParam::StringTuningOffsetCents1:
+    case AutomatableParam::StringTuningOffsetCents2:
+    case AutomatableParam::StringTuningOffsetCents3:
+    case AutomatableParam::StringTuningOffsetCents4:
+    case AutomatableParam::StringTuningOffsetCents5:
+    case AutomatableParam::StringTuningOffsetCents6:
+    case AutomatableParam::StringTuningOffsetCents7: {
+        const auto slot = static_cast<std::size_t>(static_cast<int>(which) -
+                                                   static_cast<int>(AutomatableParam::StringTuningOffsetCents0));
+        params.network.perString[slot].tuningOffsetCents = value;
+        break;
+    }
     case AutomatableParam::PickupResonanceHz:
         params.pickup.resonanceHz = value;
         break;
@@ -658,8 +752,17 @@ struct AutomationLane {
     mutable std::size_t cursor_ = 0;
 };
 
-bool parseAutomation(const fs::path& path, std::vector<AutomationLane>& out, std::string& error) {
-    out.clear();
+struct Automation {
+    std::vector<AutomationLane> continuous;
+
+    void rewind() noexcept {
+        for (AutomationLane& lane : continuous)
+            lane.rewind();
+    }
+};
+
+bool parseAutomation(const fs::path& path, Automation& out, std::string& error) {
+    out = Automation{};
 
     JsonValue root;
     if (!readJsonFile(path, root, error))
@@ -686,39 +789,44 @@ bool parseAutomation(const fs::path& path, std::vector<AutomationLane>& out, std
             return false;
         }
 
-        AutomationLane parsed;
-        parsed.name = param->text;
-        if (!lookupParamName(parsed.name, parsed.param)) {
-            error = path.string() + ": unknown automation parameter \"" + parsed.name + "\"; known names are " +
-                    knownParamNames();
+        const std::string name = param->text;
+        AutomatableParam continuousParam{};
+        if (!lookupParamName(name, continuousParam)) {
+            error =
+                path.string() + ": unknown automation parameter \"" + name + "\"; known names are " + knownParamNames();
             return false;
         }
 
         const JsonValue* breakpoints = lane.find("breakpoints");
         if (breakpoints == nullptr || breakpoints->type != JsonValue::Type::Array || breakpoints->values.empty()) {
-            error = path.string() + ": lane \"" + parsed.name + "\" needs a non-empty \"breakpoints\" array";
+            error = path.string() + ": lane \"" + name + "\" needs a non-empty \"breakpoints\" array";
             return false;
         }
 
+        std::vector<Breakpoint> parsedBreakpoints;
         double previousTime = -std::numeric_limits<double>::infinity();
         for (const JsonValue& breakpoint : breakpoints->values) {
             const JsonValue* time = breakpoint.find("time");
             const JsonValue* value = breakpoint.find("value");
             if (time == nullptr || time->type != JsonValue::Type::Number || value == nullptr ||
                 value->type != JsonValue::Type::Number) {
-                error = path.string() + ": lane \"" + parsed.name +
+                error = path.string() + ": lane \"" + name +
                         "\" has a breakpoint without numeric \"time\" and \"value\" fields";
                 return false;
             }
             if (time->number < previousTime) {
-                error = path.string() + ": lane \"" + parsed.name + "\" breakpoints must be non-decreasing in time";
+                error = path.string() + ": lane \"" + name + "\" breakpoints must be non-decreasing in time";
                 return false;
             }
             previousTime = time->number;
-            parsed.breakpoints.push_back(Breakpoint{time->number, value->number});
+            parsedBreakpoints.push_back(Breakpoint{time->number, value->number});
         }
 
-        out.push_back(std::move(parsed));
+        AutomationLane parsed;
+        parsed.name = name;
+        parsed.param = continuousParam;
+        parsed.breakpoints = std::move(parsedBreakpoints);
+        out.continuous.push_back(std::move(parsed));
     }
 
     return true;
@@ -728,12 +836,28 @@ bool parseAutomation(const fs::path& path, std::vector<AutomationLane>& out, std
 // Corpus manifest.
 // -------------------------------------------------------------------------------------------
 
+// THE DEFAULTS BELOW ARE THE P1 SINGLE-STRING CONFIGURATION, AND THAT IS DELIBERATE (Task P2.8).
+//
+// tests/corpus/README.md rule 1 freezes a committed phrase's bytes, and a phrase entry's fields are
+// part of what "cv1 identifies exactly one set of inputs" means. The P1 entries (01, 03, 05, 07)
+// therefore do not carry `numStrings` or `allocationMode`, and their absence has to keep meaning
+// what it meant when they were written: one string, FreeZones over the whole of MIDI. That is not a
+// nostalgic default -- it is what makes each of those phrases still MEAN what its own `exercises`
+// field says. Phrase 01 is a chromatic run from MIDI 21 to 108, which the shipped 6-string EADGBE
+// fingering table cannot play at all (it spans 40..88, so 40 notes would come back UNASSIGNABLE and
+// the render would fail); phrase 03's legato slurs are retriggers only while every note lands on
+// the same string, and on six strings each slur note would take a free string instead and there
+// would be no legato left to judge. The P2 entries (02, 04, 06, 08) state their configuration
+// explicitly, and it is the plugin's shipped default: 6 strings, GuitarFingering.
 struct PhraseEntry {
     std::string file;    // MIDI filename, relative to the corpus directory
     std::string sidecar; // automation sidecar filename, or empty
     std::string description;
     std::string retriggerModeName = "Physical";
     cnpg::dsp::RetriggerMode retriggerMode = cnpg::dsp::RetriggerMode::Physical;
+    int numStrings = 1;
+    std::string allocationModeName = "FreeZones";
+    cnpg::dsp::AllocationMode allocationMode = cnpg::dsp::AllocationMode::FreeZones;
     long long seed = 0;
     double durationSeconds = 0.0; // the manifest's recorded expected render length
     std::vector<std::pair<AutomatableParam, double>> paramOverrides;
@@ -833,6 +957,37 @@ bool parseManifest(const fs::path& path, CorpusManifest& out, std::string& error
             entry.retriggerModeName = mode->text;
         }
 
+        if (const JsonValue* strings = phrase.find("numStrings"); strings != nullptr && !strings->isNull()) {
+            if (strings->type != JsonValue::Type::Number) {
+                error = path.string() + ": phrase \"" + entry.file + "\" has a non-numeric \"numStrings\"";
+                return false;
+            }
+            const auto requested = static_cast<int>(std::llround(strings->number));
+            if (requested < 1 || requested > cnpg::dsp::kMaxStrings) {
+                error = path.string() + ": phrase \"" + entry.file + "\" asks for " + std::to_string(requested) +
+                        " string(s); the instrument has 1.." + std::to_string(cnpg::dsp::kMaxStrings);
+                return false;
+            }
+            entry.numStrings = requested;
+        }
+
+        if (const JsonValue* mode = phrase.find("allocationMode"); mode != nullptr && !mode->isNull()) {
+            if (mode->type != JsonValue::Type::String) {
+                error = path.string() + ": phrase \"" + entry.file + "\" has a non-string \"allocationMode\"";
+                return false;
+            }
+            if (mode->text == "GuitarFingering") {
+                entry.allocationMode = cnpg::dsp::AllocationMode::GuitarFingering;
+            } else if (mode->text == "FreeZones") {
+                entry.allocationMode = cnpg::dsp::AllocationMode::FreeZones;
+            } else {
+                error = path.string() + ": phrase \"" + entry.file + "\" has allocationMode \"" + mode->text +
+                        "\"; expected \"GuitarFingering\" or \"FreeZones\"";
+                return false;
+            }
+            entry.allocationModeName = mode->text;
+        }
+
         if (const JsonValue* seed = phrase.find("seed"); seed != nullptr && seed->type == JsonValue::Type::Number)
             entry.seed = static_cast<long long>(seed->number);
 
@@ -868,7 +1023,15 @@ struct RenderSpec {
     fs::path midiPath;
     fs::path sidecarPath; // empty if the phrase has no automation
     cnpg::dsp::RetriggerMode retriggerMode = cnpg::dsp::RetriggerMode::Physical;
+    int numStrings = 1;
+    cnpg::dsp::AllocationMode allocationMode = cnpg::dsp::AllocationMode::FreeZones;
     std::vector<std::pair<AutomatableParam, double>> paramOverrides;
+    // THE NEGATIVE CONTROL (Task P2.8, carry-forward C2). When set, the bridge in the loop is a
+    // port that forwards every IBridgePort call to a real BridgeJunction and overrides exactly one
+    // method -- reflectionPhaseDelaySamples() -- to report 0. That is Task P2.4's instrument: same
+    // scattering, same storage, same dissipation, no phase-delay term in the loop-length solve. Any
+    // difference between the two renders is P2.7's compensation and can be nothing else.
+    bool bridgePhaseBlind = false;
     double sampleRate = 48000.0;
     int blockSize = 128;
 
@@ -921,47 +1084,85 @@ int pitchWheelValue(std::uint8_t data1, std::uint8_t data2) noexcept {
     return (static_cast<int>(data2) << 7) | static_cast<int>(data1);
 }
 
+// The negative control for carry-forward C2 and for the [contract] gate that pins it: a port that
+// IS Task P2.4's bridge. Every call forwards to a real BridgeJunction -- it scatters, stores and
+// dissipates identically -- and exactly one method is overridden to report 0, which is the P2.7
+// compensation removed and nothing else. The same construction lives in
+// tests/dsp/TuningAccuracyTests.cpp for the same reason; it is duplicated here rather than shared
+// because cnpg_render links cnpg_dsp only and that file is a Catch2 translation unit.
+class PhaseBlindBridgePort final : public cnpg::dsp::IBridgePort<cnpg::dsp::Sample> {
+  public:
+    void prepare(double sampleRate, int maxBlockSize, int numPorts, const float* portImpedances) override {
+        inner_.prepare(sampleRate, maxBlockSize, numPorts, portImpedances);
+    }
+    void reset() noexcept override { inner_.reset(); }
+    void scatter(const cnpg::dsp::Sample* incident, cnpg::dsp::Sample* outgoing, int numPorts) noexcept override {
+        inner_.scatter(incident, outgoing, numPorts);
+    }
+    cnpg::dsp::Sample bridgeOutput() const noexcept override { return inner_.bridgeOutput(); }
+    void setLossBypassed(bool bypass) noexcept override { inner_.setLossBypassed(bypass); }
+    void setAdmittance(const cnpg::dsp::BridgeAdmittanceParams& p) noexcept override { inner_.setAdmittance(p); }
+    bool isQuiescent() const noexcept override { return inner_.isQuiescent(); }
+    cnpg::dsp::Sample64 storageEnergy() const noexcept override { return inner_.storageEnergy(); }
+
+    // THE ONE DIFFERENCE.
+    double reflectionPhaseDelaySamples(int portIndex, double frequencyHz, int numPorts) const noexcept override {
+        (void)portIndex;
+        (void)frequencyHz;
+        (void)numPorts;
+        return 0.0;
+    }
+
+  private:
+    cnpg::dsp::BridgeJunction<cnpg::dsp::Sample> inner_;
+};
+
 // Renders one phrase into `samples`. Everything it touches is constructed fresh here, so calling it
 // twice in a row with the same arguments is exactly the in-process determinism check
 // --verify-determinism performs.
-void renderPhrase(const MidiFileContents& midi, const RenderSpec& spec, std::vector<AutomationLane>& lanes,
-                  long long totalSamples, std::vector<float>& samples, RenderStats& stats) {
+void renderPhrase(const MidiFileContents& midi, const RenderSpec& spec, Automation& automation, long long totalSamples,
+                  std::vector<float>& samples, RenderStats& stats) {
     samples.assign(static_cast<std::size_t>(totalSamples), 0.0f);
     stats = RenderStats{};
     stats.numSamples = totalSamples;
     stats.durationSeconds = static_cast<double>(totalSamples) / spec.sampleRate;
     stats.midiEvents = static_cast<long long>(midi.events.size());
 
-    for (AutomationLane& lane : lanes)
-        lane.rewind();
+    automation.rewind();
 
-    // P1 is the single-string vertical slice, matching PluginProcessor's kP1NumStrings.
-    constexpr int kP1NumStrings = 1;
+    const int numStrings = std::clamp(spec.numStrings, 1, cnpg::dsp::kMaxStrings);
 
     cnpg::test::P1Chain chain;
-    chain.prepare(spec.sampleRate, spec.blockSize, kP1NumStrings, cnpg::dsp::Oversampler::kDefaultFactor);
+    PhaseBlindBridgePort blindPort;
+    chain.prepare(spec.sampleRate, spec.blockSize, numStrings, cnpg::dsp::Oversampler::kDefaultFactor);
+    if (spec.bridgePhaseBlind)
+        chain.network.setBridgePort(blindPort);
     chain.reset();
 
     cnpg::dsp::NoteAllocator allocator;
-    allocator.prepare(kP1NumStrings);
-    {
-        // EVERY NOTE GOES TO THE ONE STRING, stated explicitly rather than inherited (Task P2.6).
-        // This tool is the P1 single-string vertical slice and its whole point is that the corpus
-        // renders the same way it always has; the allocator's shipping default is now
-        // GuitarFingering over an EADGBE table, which on ONE string spans MIDI 40..64 and would
-        // silently drop every corpus note outside it -- phrase 01 is a chromatic sweep. A full-range
-        // FreeZones table is what "put it on the string" means now that the allocator has an
-        // opinion. The multi-string corpus is Task P2.8's.
-        cnpg::dsp::NoteAllocatorParams allocatorParams;
-        allocatorParams.mode = cnpg::dsp::AllocationMode::FreeZones;
-        allocatorParams.activeStringCount = kP1NumStrings;
+    // The CAPACITY, exactly as PluginProcessor::prepareToPlay() does it: prepare() is
+    // message-thread-only and the count is a realtime parameter, so the count travels on
+    // NoteAllocatorParams::activeStringCount below and is re-applied every block.
+    allocator.prepare(cnpg::dsp::kMaxStrings);
+
+    cnpg::dsp::NoteAllocatorParams allocatorParams;
+    allocatorParams.mode = spec.allocationMode;
+    allocatorParams.activeStringCount = numStrings;
+    if (spec.allocationMode == cnpg::dsp::AllocationMode::FreeZones) {
+        // FULL-RANGE ZONES, stated explicitly rather than inherited (Task P2.6). The allocator's
+        // own FreeZones default is the fingering table, which spans MIDI 40..88 on six strings and
+        // would silently drop every corpus note outside it -- phrase 01 is a chromatic sweep from
+        // MIDI 21. A full-range table is what "put it on a string" means for a phrase whose
+        // manifest entry does not name an allocation mode; see PhraseEntry for why that default is
+        // the P1 one.
         for (auto& zone : allocatorParams.zones)
             zone = cnpg::dsp::StringZone{0, 127};
-        allocator.setParams(allocatorParams);
     }
+    allocator.setParams(allocatorParams);
 
     cnpg::test::P1ChainParams baseParams = cnpg::test::makeDefaultP1ChainParams();
     baseParams.network.retriggerMode = spec.retriggerMode;
+    baseParams.numStrings = numStrings;
     for (const auto& setting : spec.paramOverrides)
         applyParam(baseParams, setting.first, static_cast<float>(setting.second));
 
@@ -1001,9 +1202,18 @@ void renderPhrase(const MidiFileContents& midi, const RenderSpec& spec, std::vec
 
         cnpg::test::P1ChainParams blockParams = baseParams;
         const double blockStartSeconds = static_cast<double>(rendered) / spec.sampleRate;
-        for (const AutomationLane& lane : lanes)
+        for (const AutomationLane& lane : automation.continuous)
             applyParam(blockParams, lane.param, static_cast<float>(lane.valueAt(blockStartSeconds)));
         blockParams.network.pitchBendSemitones = pitchBendSemitones;
+
+        // The allocator is retargeted from the same block's values, immediately before it is used,
+        // exactly as PluginProcessor::renderChunk() does it -- so a numStrings lane moves the count
+        // the allocator assigns against and the count StringNetwork accepts events for on the same
+        // block, and the two cannot disagree about which strings a note may land on.
+        if (blockParams.numStrings != allocatorParams.activeStringCount) {
+            allocatorParams.activeStringCount = blockParams.numStrings;
+            allocator.setParams(allocatorParams);
+        }
 
         noteEvents.clear();
         allocator.allocate(rawEvents.data(), static_cast<int>(rawEvents.size()), noteEvents);
@@ -1055,24 +1265,40 @@ struct RenderArgs {
     std::string corpus;
     std::string out;
     std::string sidecar;
-    double sampleRate = 48000.0;
+    std::vector<double> sampleRates{48000.0};
     int blockSize = 128;
     bool verifyDeterminism = false;
+    bool variants = false;
+    bool bridgePhaseBlind = false;
+    // --rates was given (as opposed to --samplerate or the default). It selects the OUTPUT LAYOUT,
+    // and that is not a cosmetic difference: a render filename carries the phrase, the variant, the
+    // corpus version and the source digest, and deliberately NOT the sample rate
+    // (tests/corpus/README.md rule 3), so three rates written into one directory would be three
+    // renders with one name and only the last would survive. Measured on the first cut of this
+    // flag: `--rates 44100,48000,96000` produced 8 files, all of them 96 kHz. --rates therefore
+    // writes <out>/<rate>/, one subdirectory per rate, and --samplerate keeps the flat layout the
+    // P1 command and tests/dsp/RenderTests.cpp already use.
+    bool perRateDirectories = false;
 };
 
 void printUsage(std::FILE* stream) {
     std::fprintf(stream,
                  "usage: cnpg_render --midi <file> --out <wav> [--sidecar <json>] [--samplerate R] "
-                 "[--blocksize B] [--verify-determinism]\n"
-                 "       cnpg_render --corpus <dir> --out <dir> [--samplerate R] [--blocksize B] "
-                 "[--verify-determinism]\n"
+                 "[--blocksize B] [--verify-determinism] [--bridge-phase-blind]\n"
+                 "       cnpg_render --corpus <dir> --out <dir> [--rates R1,R2,...] [--blocksize B] "
+                 "[--verify-determinism] [--variants] [--bridge-phase-blind]\n"
                  "  --midi <file>          one Standard MIDI File to render\n"
                  "  --corpus <dir>         a corpus directory containing corpus.json; renders every phrase\n"
                  "  --out <path>           output WAV file (--midi mode) or output directory (--corpus mode)\n"
                  "  --sidecar <json>       automation sidecar for --midi mode (--corpus reads it from the manifest)\n"
-                 "  --samplerate R         render sample rate in Hz (default 48000)\n"
+                 "  --samplerate R         render sample rate in Hz (default 48000); one rate\n"
+                 "  --rates R1,R2,...      render at every listed rate (--corpus mode), into <out>/<rate>/ --\n"
+                 "                         the filename carries no rate, so one directory per rate\n"
                  "  --blocksize B          render block size in samples (default 128)\n"
-                 "  --verify-determinism   render each phrase twice in-process and require bit-identical output\n");
+                 "  --verify-determinism   render each phrase twice in-process and require bit-identical output\n"
+                 "  --variants             also render the built-in P2 comparison configurations (Task P2.8)\n"
+                 "  --bridge-phase-blind   attach a bridge port that reports zero reflection phase delay --\n"
+                 "                         Task P2.4's instrument, the negative control for P2.7's compensation\n");
 }
 
 bool parseDouble(const char* text, double& out) noexcept {
@@ -1130,10 +1356,39 @@ bool parseArgs(int argc, char** argv, RenderArgs& args) {
             args.sidecar = value;
         } else if (arg == "--samplerate") {
             const char* value = nextValue("--samplerate");
-            if (value == nullptr || !parseDouble(value, args.sampleRate)) {
+            double rate = 0.0;
+            if (value == nullptr || !parseDouble(value, rate)) {
                 std::fprintf(stderr, "cnpg_render: invalid --samplerate value\n");
                 return false;
             }
+            args.sampleRates.assign(1, rate);
+        } else if (arg == "--rates") {
+            const char* value = nextValue("--rates");
+            if (value == nullptr)
+                return false;
+            std::vector<double> rates;
+            const std::string list = value;
+            std::size_t start = 0;
+            while (start <= list.size()) {
+                const std::size_t comma = list.find(',', start);
+                const std::string field =
+                    list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                double rate = 0.0;
+                if (field.empty() || !parseDouble(field.c_str(), rate)) {
+                    std::fprintf(stderr, "cnpg_render: invalid --rates value '%s'\n", field.c_str());
+                    return false;
+                }
+                rates.push_back(rate);
+                if (comma == std::string::npos)
+                    break;
+                start = comma + 1;
+            }
+            args.sampleRates = std::move(rates);
+            args.perRateDirectories = true;
+        } else if (arg == "--variants") {
+            args.variants = true;
+        } else if (arg == "--bridge-phase-blind") {
+            args.bridgePhaseBlind = true;
         } else if (arg == "--blocksize") {
             const char* value = nextValue("--blocksize");
             if (value == nullptr || !parseInt(value, args.blockSize)) {
@@ -1163,8 +1418,8 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
         return false;
     }
 
-    std::vector<AutomationLane> lanes;
-    if (!spec.sidecarPath.empty() && !parseAutomation(spec.sidecarPath, lanes, error)) {
+    Automation automation;
+    if (!spec.sidecarPath.empty() && !parseAutomation(spec.sidecarPath, automation, error)) {
         std::fprintf(stderr, "cnpg_render: %s\n", error.c_str());
         return false;
     }
@@ -1185,12 +1440,12 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
 
     std::vector<float> samples;
     RenderStats stats;
-    renderPhrase(midi, spec, lanes, totalSamples, samples, stats);
+    renderPhrase(midi, spec, automation, totalSamples, samples, stats);
 
     if (verifyDeterminism) {
         std::vector<float> second;
         RenderStats secondStats;
-        renderPhrase(midi, spec, lanes, totalSamples, second, secondStats);
+        renderPhrase(midi, spec, automation, totalSamples, second, secondStats);
         if (second.size() != samples.size() ||
             std::memcmp(second.data(), samples.data(), samples.size() * sizeof(float)) != 0) {
             std::fprintf(stderr,
@@ -1206,10 +1461,26 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
         return false;
     }
 
-    std::printf("  %-34s -> %s\n", label.c_str(), outputPath.string().c_str());
+    // THE GAIN-STRUCTURE LINE (Task P2.8's acceptance criterion "rendered WAVs peak below the
+    // SoftClipLimiter ceiling on default settings"). The ceiling in force is the one this render
+    // actually ran with -- a phrase or a variant may automate limiterCeilingDb, and comparing
+    // against the struct default would then be comparing against a number nothing enforced.
+    // Reported as HEADROOM rather than as a bare peak, because "below the ceiling" is a distance
+    // and a listening note that records the peak alone cannot say how close it came.
+    cnpg::test::P1ChainParams ceilingParams = cnpg::test::makeDefaultP1ChainParams();
+    for (const auto& setting : spec.paramOverrides)
+        applyParam(ceilingParams, setting.first, static_cast<float>(setting.second));
+    double ceilingDb = static_cast<double>(ceilingParams.limiter.ceilingDb);
+    for (const AutomationLane& lane : automation.continuous)
+        if (lane.param == AutomatableParam::LimiterCeilingDb)
+            for (const Breakpoint& breakpoint : lane.breakpoints)
+                ceilingDb = std::max(ceilingDb, breakpoint.value);
+
+    std::printf("  %-46s -> %s\n", label.c_str(), outputPath.string().c_str());
     std::printf("    %lld samples (%.3f s), %lld MIDI event(s), peak %.2f dBFS, rms %.2f dBFS, dc %.2f dBFS\n",
                 stats.numSamples, stats.durationSeconds, stats.midiEvents, dbOf(stats.peak), dbOf(stats.rms),
                 dbOf(std::fabs(stats.dcOffset)));
+    std::printf("    limiter ceiling %.2f dBFS, headroom %.2f dB\n", ceilingDb, ceilingDb - dbOf(stats.peak));
     std::printf("    nonFinite=%lld subnormal=%lld droppedNoteEvents=%u unassignableNotes=%u outOfRangeNotes=%u "
                 "unaddressableNoteOffs=%u%s\n",
                 stats.nonFiniteSamples, stats.subnormalSamples, stats.droppedNoteEvents, stats.unassignableNotes,
@@ -1248,6 +1519,18 @@ bool renderOne(const RenderSpec& spec, const fs::path& outputPath, bool verifyDe
                      label.c_str(), stats.unaddressableNoteOffs);
         return false;
     }
+    // The limiter is hard-wired LAST in the chain and its ceiling is a horizontal asymptote
+    // (SoftClipLimiter.h), so a peak above it is not a loud render -- it is the limiter having been
+    // bypassed, mis-ordered, or fed a non-finite sample the scan above did not reach. Failed on
+    // rather than merely printed for that reason. The 0.01 dB slack absorbs the float32 round trip
+    // through the WAV's own sample values, nothing more.
+    if (dbOf(stats.peak) > ceilingDb + 0.01) {
+        std::fprintf(stderr,
+                     "cnpg_render: %s peaks at %.4f dBFS, ABOVE the %.4f dBFS SoftClipLimiter ceiling that ran "
+                     "last in its own chain\n",
+                     label.c_str(), dbOf(stats.peak), ceilingDb);
+        return false;
+    }
 
     return true;
 }
@@ -1277,13 +1560,178 @@ const std::string& renderSourceDigest() {
 // pass that depends on it. The digest is computed at RENDER time over dsp/include, dsp/src,
 // tests/support/P1Chain.h and tests/render, so it names the bytes that produced the audio and is
 // verifiable from any checkout with no repository history at all. See tests/support/SourceHash.h.
-std::string renderFileName(const std::string& midiFileName, long long corpusVersion) {
+std::string renderFileName(const std::string& midiFileName, long long corpusVersion, const std::string& variant) {
     std::string stem = midiFileName;
     const auto dot = stem.find_last_of('.');
     if (dot != std::string::npos)
         stem.erase(dot);
+    if (!variant.empty())
+        stem += "__" + variant;
+    // THE `__cv<n>_s<hash>` SUFFIX STAYS TERMINAL, and a variant name goes in FRONT of it. The
+    // procedure a person follows (docs/listening/physical-plausibility-checklist.md step 4) reads
+    // the corpus version and the source digest off the END of a filename; putting the variant name
+    // after them would break the one thing that makes a listening note attributable.
     return stem + "__cv" + std::to_string(corpusVersion) + "_s" + renderSourceDigest() + ".wav";
 }
+
+// -------------------------------------------------------------------------------------------
+// The built-in P2 comparison configurations (Task P2.8).
+// -------------------------------------------------------------------------------------------
+//
+// RENDER CONFIGURATIONS, NOT CORPUS PHRASES -- docs/plan.md's P2.8 file list says so in as many
+// words about the per-retriggerMode pair, and the same reasoning covers the rest: a comparison is a
+// set of parameter settings over material that already exists, and adding a MIDI file per setting
+// would bump the corpus version for something that is not new material
+// (tests/corpus/README.md rule 2).
+//
+// They live here, in the tool, rather than in a JSON file beside the corpus, for the same reason:
+// tests/corpus/ is the append-only record of what is PLAYED, and these are statements about how it
+// is rendered. A variant inherits everything from its phrase's manifest entry and overrides only
+// what it names.
+struct VariantOverride {
+    const char* name;
+    double value;
+};
+
+struct RenderVariant {
+    const char* phraseFile;
+    const char* suffix;        // goes into the filename, ahead of the __cv<n>_s<hash> tail
+    const char* purpose;       // one line, printed with the render and quoted in the listening document
+    const char* retriggerMode; // nullptr = inherit the phrase's own
+    VariantOverride overrides[6] = {{nullptr, 0.0}, {nullptr, 0.0}, {nullptr, 0.0},
+                                    {nullptr, 0.0}, {nullptr, 0.0}, {nullptr, 0.0}};
+};
+
+// The near-unison pair, spelled once. Phrase 02's section C plays MIDI 45 (which GuitarFingering
+// puts on string 1, fret 0) and MIDI 46 (string 0, fret 6). The two offsets below bring those two
+// strings to 111.60 Hz and 113.22 Hz -- 25.00 cents apart, the separation ADR 0007 D7.0 measured
+// collapsing to 0.003 cents at coupling 0.35.
+//
+// WHY THE MIDI IS A SEMITONE AND THE INSTRUMENT MAKES THE UNISON. NoteAllocator's invariant is that
+// at most one string owns a given (channel, note), so two simultaneous NoteOns for the SAME note on
+// one channel are a retrigger of one string, not two strings at one pitch -- and a guitar unison is
+// always the same MIDI note. The two ways out are per-note channels (which is the P5 MPE seam, and
+// which a host that rewrites the channel on a clip would silently undo, so the phrase would not
+// survive the live replay the checklist asks for) or the instrument's own per-string tuning
+// offsets, which are shipped +/-50-cent APVTS parameters. This uses the second. The MIDI reads as a
+// minor second; what SOUNDS is a 25-cent pair, on strings 0 and 1, which is the configuration under
+// test.
+#define CNPG_NEAR_UNISON_OFFSETS {"stringTuningOffsetCents0", -50.0}, {"stringTuningOffsetCents1", 25.0}
+
+constexpr RenderVariant kRenderVariants[] = {
+    // ---- the per-RetriggerMode pair over phrase 03 (docs/plan.md P2.8 file list) --------------
+    {"03_legato_retrigger.mid",
+     "retrigPhysical",
+     "checklist 3/17/27 -- Physical: the old note continues into the new one over a 30 ms glide",
+     "Physical",
+     {}},
+    {"03_legato_retrigger.mid",
+     "retrigSynth",
+     "checklist 4/27 -- Synth: fade, clear, instant restart at the new pitch, no trace of the old",
+     "Synth",
+     {}},
+
+    // ---- the couplingStrength ladder over phrase 02 (ADR 0007 D4) ----------------------------
+    // Six values, and each one is a MEASURED boundary rather than a round number:
+    //   0.00  the decoupled control. Without it "less coupling" has no zero and the beat-depth
+    //         claim has no baseline; it is also bridgeOutput() == 0 by construction.
+    //   0.10  ADR 0007 D4's own low anchor: beat depth 10.08 dB, against 3.59 at 0.35.
+    //   0.20  the highest value D7.0 measured NOT to mode-lock at the sustain material
+    //         (25.045 cents of separation survive).
+    //   0.30  where the two string materials DISAGREE: 0.003 cents at the sustain material,
+    //         25.14 cents at the default one. The most informative single point in the set.
+    //   0.32  the highest DEFAULT-material value measured not to lock (25.18 cents).
+    //   0.35  the provisional default, which locks at both materials (0.33 cents at the default
+    //         material, a +24.67-cent pull).
+    {"02_open_chords.mid",
+     "coupling000",
+     "coupling 0.00 -- the decoupled control",
+     nullptr,
+     {{"bridgeCoupling", 0.00}}},
+    {"02_open_chords.mid", "coupling010", "coupling 0.10 -- beat depth 10.08 dB", nullptr, {{"bridgeCoupling", 0.10}}},
+    {"02_open_chords.mid",
+     "coupling020",
+     "coupling 0.20 -- highest measured NON-locking value",
+     nullptr,
+     {{"bridgeCoupling", 0.20}}},
+    {"02_open_chords.mid",
+     "coupling030",
+     "coupling 0.30 -- the two string materials disagree here",
+     nullptr,
+     {{"bridgeCoupling", 0.30}}},
+    {"02_open_chords.mid",
+     "coupling032",
+     "coupling 0.32 -- highest non-locking at the DEFAULT material",
+     nullptr,
+     {{"bridgeCoupling", 0.32}}},
+    {"02_open_chords.mid",
+     "coupling035",
+     "coupling 0.35 -- the PROVISIONAL default; locks at both materials",
+     nullptr,
+     {{"bridgeCoupling", 0.35}}},
+
+    // ---- the same ladder with the near-unison pair detuned (ADR 0007 D5 criterion 4) ----------
+    {"02_open_chords.mid",
+     "unison000",
+     "25-cent pair, coupling 0.00 -- what NOT locking sounds like",
+     nullptr,
+     {CNPG_NEAR_UNISON_OFFSETS, {"bridgeCoupling", 0.00}}},
+    {"02_open_chords.mid",
+     "unison010",
+     "25-cent pair, coupling 0.10",
+     nullptr,
+     {CNPG_NEAR_UNISON_OFFSETS, {"bridgeCoupling", 0.10}}},
+    {"02_open_chords.mid",
+     "unison020",
+     "25-cent pair, coupling 0.20 -- 25.045 cents survive",
+     nullptr,
+     {CNPG_NEAR_UNISON_OFFSETS, {"bridgeCoupling", 0.20}}},
+    {"02_open_chords.mid",
+     "unison030",
+     "25-cent pair, coupling 0.30 -- the material-dependent boundary",
+     nullptr,
+     {CNPG_NEAR_UNISON_OFFSETS, {"bridgeCoupling", 0.30}}},
+    {"02_open_chords.mid",
+     "unison032",
+     "25-cent pair, coupling 0.32",
+     nullptr,
+     {CNPG_NEAR_UNISON_OFFSETS, {"bridgeCoupling", 0.32}}},
+    {"02_open_chords.mid",
+     "unison035",
+     "25-cent pair, coupling 0.35 -- separation collapses to 0.003 cents",
+     nullptr,
+     {CNPG_NEAR_UNISON_OFFSETS, {"bridgeCoupling", 0.35}}},
+
+    // ---- at and outside the provisional Normal range (ADR 0007 D7/D7.0, criterion 5) ---------
+    // Criterion (5) is "the bridge still behaves as an INSTRUMENT COMPONENT rather than an overt
+    // resonant effect", and it cannot be judged from inside the box alone: a boundary is only a
+    // boundary if what is on the other side of it sounds different.
+    {"02_open_chords.mid",
+     "rangeResCeiling",
+     "resonance 330 Hz / damping 0.15 / coupling 0.35 -- the worst corner INSIDE the box (0.770 cents)",
+     nullptr,
+     {{"bridgeResonanceHz", 330.0}, {"bridgeDamping", 0.15}, {"bridgeCoupling", 0.35}}},
+    {"02_open_chords.mid",
+     "rangeResOutside",
+     "resonance 500 Hz -- OUTSIDE the box, no tuning guarantee",
+     nullptr,
+     {{"bridgeResonanceHz", 500.0}, {"bridgeDamping", 0.15}, {"bridgeCoupling", 0.35}}},
+    {"02_open_chords.mid",
+     "rangeDampCeiling",
+     "damping 1.00 -- the box's damping ceiling",
+     nullptr,
+     {{"bridgeDamping", 1.00}}},
+    {"02_open_chords.mid",
+     "rangeDampOutside",
+     "damping 4.00 -- the slider stop, OUTSIDE the box; the worst note migrates to the TOP",
+     nullptr,
+     {{"bridgeDamping", 4.00}}},
+    {"02_open_chords.mid",
+     "rangeCouplingOutside",
+     "coupling 1.00 -- the slider stop, OUTSIDE the box; -14.06..+13.41 cents uncompensated",
+     nullptr,
+     {{"bridgeCoupling", 1.00}}},
+};
 
 } // namespace
 
@@ -1309,8 +1757,23 @@ int main(int argc, char** argv) {
                              "(--corpus reads each phrase's sidecar from the manifest)\n");
         return 1;
     }
-    if (!(args.sampleRate > 0.0) || args.sampleRate > 500000.0) {
-        std::fprintf(stderr, "cnpg_render: --samplerate must be a positive, finite value\n");
+    if (args.sampleRates.empty()) {
+        std::fprintf(stderr, "cnpg_render: no sample rate requested\n");
+        return 1;
+    }
+    for (const double rate : args.sampleRates) {
+        if (!(rate > 0.0) || rate > 500000.0) {
+            std::fprintf(stderr, "cnpg_render: every rate must be a positive, finite value\n");
+            return 1;
+        }
+    }
+    if (args.sampleRates.size() > 1 && !args.midi.empty()) {
+        std::fprintf(stderr, "cnpg_render: --rates lists more than one rate, which needs --corpus "
+                             "(--midi mode writes one named file and cannot name several)\n");
+        return 1;
+    }
+    if (args.variants && args.corpus.empty()) {
+        std::fprintf(stderr, "cnpg_render: --variants applies to --corpus mode only\n");
         return 1;
     }
     if (args.blockSize < 1 || args.blockSize > 1000000) {
@@ -1318,8 +1781,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("cnpg_render -- P1 chain, %.0f Hz, %d-sample blocks, source %s\n", args.sampleRate, args.blockSize,
-                renderSourceDigest().c_str());
+    std::printf("cnpg_render -- %d-sample blocks, source %s%s\n", args.blockSize, renderSourceDigest().c_str(),
+                args.bridgePhaseBlind ? ", BRIDGE PHASE-BLIND (the P2.4 negative control, NOT the instrument)" : "");
     // stdout is block-buffered when it is a pipe or a file -- which is exactly how the [contract]
     // test and any CI step capture it -- while stderr is not, so without these flushes a diagnostic
     // would land in the captured log ABOVE the progress lines that led to it. Flushing at each
@@ -1331,8 +1794,9 @@ int main(int argc, char** argv) {
         RenderSpec spec;
         spec.midiPath = fs::path(args.midi);
         spec.sidecarPath = args.sidecar.empty() ? fs::path{} : fs::path(args.sidecar);
-        spec.sampleRate = args.sampleRate;
+        spec.sampleRate = args.sampleRates.front();
         spec.blockSize = args.blockSize;
+        spec.bridgePhaseBlind = args.bridgePhaseBlind;
 
         const fs::path outputPath(args.out);
         if (!renderOne(spec, outputPath, args.verifyDeterminism, spec.midiPath.filename().string()))
@@ -1354,19 +1818,82 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
 
     const fs::path outputDir(args.out);
-    for (const PhraseEntry& phrase : manifest.phrases) {
+
+    // The base configuration of one phrase, before any variant is layered on it.
+    const auto specForPhrase = [&](const PhraseEntry& phrase, double sampleRate) {
         RenderSpec spec;
         spec.midiPath = corpusDir / phrase.file;
         spec.sidecarPath = phrase.sidecar.empty() ? fs::path{} : corpusDir / phrase.sidecar;
         spec.retriggerMode = phrase.retriggerMode;
+        spec.numStrings = phrase.numStrings;
+        spec.allocationMode = phrase.allocationMode;
         spec.paramOverrides = phrase.paramOverrides;
-        spec.sampleRate = args.sampleRate;
+        spec.bridgePhaseBlind = args.bridgePhaseBlind;
+        spec.sampleRate = sampleRate;
         spec.blockSize = args.blockSize;
         spec.expectedDurationSeconds = phrase.durationSeconds;
+        return spec;
+    };
 
-        const fs::path outputPath = outputDir / renderFileName(phrase.file, manifest.corpusVersion);
-        if (!renderOne(spec, outputPath, args.verifyDeterminism, phrase.file))
-            return 1;
+    for (const double sampleRate : args.sampleRates) {
+        // See RenderArgs::perRateDirectories: the filename does not carry the rate, so several rates
+        // need several directories or they overwrite each other.
+        char rateName[32];
+        std::snprintf(rateName, sizeof(rateName), "%.0f", sampleRate);
+        const fs::path rateDir = args.perRateDirectories ? outputDir / rateName : outputDir;
+        std::error_code directoryError;
+        fs::create_directories(rateDir, directoryError);
+
+        std::printf("  --- %.0f Hz -> %s ---\n", sampleRate, rateDir.string().c_str());
+        std::fflush(stdout);
+
+        for (const PhraseEntry& phrase : manifest.phrases) {
+            const RenderSpec spec = specForPhrase(phrase, sampleRate);
+            const fs::path outputPath = rateDir / renderFileName(phrase.file, manifest.corpusVersion, std::string{});
+            const std::string label = phrase.file + " [" + std::to_string(phrase.numStrings) + " string(s), " +
+                                      phrase.allocationModeName + ", " + phrase.retriggerModeName + "]";
+            if (!renderOne(spec, outputPath, args.verifyDeterminism, label))
+                return 1;
+        }
+
+        if (!args.variants)
+            continue;
+
+        for (const RenderVariant& variant : kRenderVariants) {
+            const PhraseEntry* phrase = nullptr;
+            for (const PhraseEntry& candidate : manifest.phrases)
+                if (candidate.file == variant.phraseFile)
+                    phrase = &candidate;
+            if (phrase == nullptr) {
+                // A variant naming a phrase the manifest does not carry is a BUILD-TIME mistake that
+                // would otherwise show up as a missing WAV nobody looked for -- so it fails the run.
+                std::fprintf(stderr, "cnpg_render: variant '%s' names phrase '%s', which is not in %s\n",
+                             variant.suffix, variant.phraseFile, manifestPath.string().c_str());
+                return 1;
+            }
+
+            RenderSpec spec = specForPhrase(*phrase, sampleRate);
+            if (variant.retriggerMode != nullptr)
+                spec.retriggerMode = (std::string(variant.retriggerMode) == "Synth")
+                                         ? cnpg::dsp::RetriggerMode::Synth
+                                         : cnpg::dsp::RetriggerMode::Physical;
+            for (const VariantOverride& setting : variant.overrides) {
+                if (setting.name == nullptr)
+                    continue;
+                AutomatableParam which{};
+                if (!lookupParamName(setting.name, which)) {
+                    std::fprintf(stderr, "cnpg_render: variant '%s' sets unknown parameter '%s'\n", variant.suffix,
+                                 setting.name);
+                    return 1;
+                }
+                spec.paramOverrides.emplace_back(which, setting.value);
+            }
+
+            const fs::path outputPath = rateDir / renderFileName(phrase->file, manifest.corpusVersion, variant.suffix);
+            const std::string label = std::string(variant.suffix) + ": " + variant.purpose;
+            if (!renderOne(spec, outputPath, args.verifyDeterminism, label))
+                return 1;
+        }
     }
 
     return 0;

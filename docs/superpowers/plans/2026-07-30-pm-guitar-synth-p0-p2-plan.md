@@ -1525,10 +1525,62 @@ Extend the versioned MIDI corpus with exactly the four P2 additions listed above
 ```
 cmake --build build --config Release --target cnpg_render cnpg_tests
 build\bin\Release\cnpg_render.exe --corpus tests\corpus --rates 44100,48000,96000 --out renders\p2
-build\bin\Release\cnpg_tests.exe "CorpusSweep*"
+build\bin\Release\cnpg_render.exe --corpus tests\corpus --out renders\p2 --samplerate 48000 --variants
+build\bin\Release\cnpg_tests.exe "CORPUS SWEEP*"
 build\bin\Release\cnpg_tests.exe "[denormal]"
 ```
 Manual: author listening pass over `renders\p2\*.wav` in Ableton Live (also replaying the corpus MIDI live through the plugin), judged against `docs/listening/physical-plausibility-checklist.md`; results committed.
+
+**Task P2.8 outcome (2026-08-03) -- THE TASK IS HALF DONE BY DESIGN, AND THIS ENTRY SAYS WHICH
+HALF.** The corpus, the render tooling, the automated sweeps, the checklist and the *preparation* of
+the listening materials landed. **The listening pass itself has NOT been performed** -- the
+`couplingStrength` sign-off and the Normal-range confirmation are musical judgements the author
+reserved explicitly (ADR 0007 D4 and D5 criterion 5), and no implementer may record a verdict for
+them. `docs/listening/P2-20260803.md` is the prepared session sheet, with every verdict column
+empty. Full detail in `.superpowers/.../task-P2.8-report.md`.
+
+- [x] **The four new corpus entries** (02, 04, 06, 08 + its `.json` sidecar) and `corpusVersion` 2
+  exist, are committed, and render headlessly at all three rates without error (24 renders, every
+  counter zero, `--verify-determinism` green). The per-`RetriggerMode` variant renders of 03 are
+  produced, alongside 17 further comparison configurations.
+- [x] **`CorpusSweepTests` `[contract]` passes.** Worst whole-render click statistic **0.5557**
+  against a limit of **1.0** over 8 phrases x 3 rates; zero NaN/Inf; zero subnormal. The gate is
+  shown to fail on the defect it exists to catch: a level-placed hard cut reads **1.0000** (exactly,
+  by construction) and a level-placed sign flip **1.9963**, against the clean render's 0.3295.
+- [x] **The `[denormal]` state-inspection case on the 6-string coupled render with dampers passes**
+  -- 0 subnormal samples in the output, the taps and the bridge feed over a 60 s tail, with the state
+  snapshotted at the deepest LIVE block rather than at the end (at the end the silence watchdog has
+  zeroed everything, which is how the first cut of the case was vacuous). Non-vacuity: the identical
+  render with `ScopedFtzDazGuard` removed produces **956 / 4 783 354 / 263 570** subnormal samples.
+  The timing-ratio case stays local-only per section 4.6 and passes on the dev machine (ratio 1.13
+  against a limit of 2.0).
+- [x] **Checklist updated in the same commit series** -- items 22-27 appended, each stating what it
+  adds over the earlier item it overlaps, plus a corpus-v2 evidence table.
+- [x] **Rendered WAVs peak below the SoftClipLimiter ceiling**, re-measured off the files rather than
+  taken from the tool's log: 10.66-19.57 dB of headroom below the -0.30 dBFS ceiling at 48 kHz. The
+  renderer now FAILS a render that peaks above the ceiling in force.
+- [ ] **`couplingStrength` sign-off -- OPEN, and reserved for the author.** The comparison material
+  is built and measured: six coupling values (0.00/0.10/0.20/0.30/0.32/0.35, every one a measured
+  boundary point) over phrase 02, and the same six with a near-unison pair 25.00 cents apart on
+  strings 0 and 1. Measured on those renders, the pair survives at 24.677 / 24.322 / 23.612 cents at
+  coupling 0.00/0.10/0.20 and collapses to a **single peak** at 0.30/0.32/0.35 -- so in the shipping
+  six-string configuration the criterion-(4) boundary sits between **0.20 and 0.30**, LOWER than the
+  0.32-0.35 that ADR 0007 D7.0 measured on two isolated strings.
+- [ ] **Provisional Normal range -- OPEN, and reserved for the author.** Material at and outside all
+  three faces of the box is rendered (`range*`). The session sheet states plainly that the
+  provisional default sits outside a criterion-complete Normal range and that lowering the default
+  likely moves the ceiling with it.
+
+**Carry-forward C2 from Task P2.7 is CLOSED.** The corpus RMS attribution was open because two
+causes changed at once. It is settled twice over. Structurally: `scatter()` is only ever handed
+`loopStrings_` ports, and the P1 corpus configuration renders ONE string, so there are no idle
+strings in it and the rest-pitch fix cannot reach it. Empirically: a `--bridge-phase-blind` render
+reproduces the pre-P2.7 RMS of all four P1 phrases to the printed digit (**-34.28 / -32.72 / -38.64
+/ -34.92 dBFS**, against P2.7's tree at -34.29 / -32.63 / -38.65 / -34.95). **100 % of the delta is
+the compensation moving every note's pitch; the rest-pitch fix contributes exactly nothing.** The
+"contradiction" dissolves with it: phrase 03 moved most because it lives on MIDI 45, where the
+compensation is largest (+4.826 cents), while phrase 01 sweeps the whole range, where it reverses
+sign across the resonance and averages out.
 
 ---
 
