@@ -33,9 +33,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     const float pickupTrimDefaultDb = cnpg::dsp::PickupTapParams{}.outputGainDb;
     const juce::NormalisableRange<float> pickupTrimDbRange(pickupTrimDefaultDb - 24.0f, pickupTrimDefaultDb + 24.0f);
 
-    // Exciter
+    // Exciter. The position default is READ from cnpg::dsp::PluckExciterParams rather than retyped
+    // here, exactly as the damper's is: the derivation, the criterion it satisfies and the cost all
+    // live at the field (PluckExciter.h), and a plugin that restated the number could ship a
+    // geometry the dsp side never agreed to. It was 0.5 through P2.9 -- the midpoint, which nulls
+    // every even partial at the pick as well as at the tap.
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::exciterDefaultPosition),
-                                                           "Exciter Position", unitRange, 0.5f));
+                                                           "Exciter Position", unitRange,
+                                                           cnpg::dsp::PluckExciterParams{}.defaultPosition));
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::exciterDefaultHardness),
                                                            "Exciter Hardness", unitRange, 0.5f));
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::exciterNoiseAmount), "Exciter Noise",
@@ -64,8 +69,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupOutputGainDb),
                                                            "Pickup Output Gain", pickupTrimDbRange, pickupTrimDefaultDb,
                                                            juce::AudioParameterFloatAttributes().withLabel("dB")));
+    // Same rule as the exciter position above and the damper position below: the default is read
+    // from the dsp-side struct, never retyped. See StringNetwork.h for why the tap sits 1/16 of the
+    // string from the bridge instead of on the midpoint it occupied through P2.9.
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupPosition01), "Pickup Position",
-                                                           unitRange, 0.5f));
+                                                           unitRange,
+                                                           cnpg::dsp::StringNetworkParams{}.pickupPosition01));
 
     // Damper (Task P2.2). Position and depth are the two controls that make a palm mute and a
     // natural harmonic playable rather than emergent-only: p = 0.5 leaves a released note ringing

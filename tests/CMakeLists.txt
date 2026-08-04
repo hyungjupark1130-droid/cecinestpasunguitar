@@ -24,6 +24,7 @@ add_executable(cnpg_tests
     dsp/DamperFeltTimeTests.cpp
     dsp/DamperNodeSuppressionTests.cpp
     dsp/DamperReleaseSpectrumTests.cpp
+    dsp/DefaultVoicingTests.cpp
     dsp/DenormalTests.cpp
     dsp/EventQueueTests.cpp
     dsp/MidiTranslationTests.cpp

@@ -766,3 +766,88 @@ the trade table and the re-pointing ledger:
 `couplingStrength = 0.35` is still PROVISIONAL, and `docs/listening/P2-20260803.md` is still empty.
 One defect found by one ear on one note is not an audition. If anything it is evidence for §9's
 first line rather than against it — a green board did not catch this, and was never going to.
+
+---
+
+## 11. Appended after the exit: the default VOICING was set, on the same listening finding
+
+**This section does not amend §1–§9 either, and it does not amend §10.** Same standing as §10: the
+exit gate closed on 2026-08-03 without an audition, §9's first line records that nobody listened,
+and §10 records what happened when somebody did. This is the second thing that came out of the same
+listening pass — the author asked whether the plugin could be made to sound like a plausible
+instrument **from a dry load, with no knob-turning** — and it is recorded here for the same reason.
+
+### The finding
+
+`pickupPosition01` and `PluckExciterParams::defaultPosition` both shipped at **0.5**, the exact
+midpoint of the string, and they shipped at the **same** value.
+
+A point contact couples to mode *n* through `sin(n*pi*d)`, so it is exactly blind to every partial
+with a node at *d* — the same physics §10's damper fix is about, pointed at the pick and the coil
+instead of the felt. Written as a rational `a/b` in lowest terms the null set is exactly
+`{b, 2b, 3b, ...}`: **onset b, density 1/b**. `b = 2` is the smallest value `b` can take, so
+**d = 1/2 is provably the worst single point on the whole slider** — simultaneously the lowest
+possible onset (partial 2, the octave) and the highest possible density (half of every partial the
+instrument produces). Both defaults sat on it, and because they sat on the *same* value the two
+combs coincided and every null was **squared**.
+
+Measured through the shipping chain at the low open E, dB below the loudest partial:
+
+| partial | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| old default | 0.0 | **−48.9** | −3.4 | **−43.1** | −0.6 | **−48.1** | −16.4 | **−43.5** |
+
+Half the harmonic series was not attenuated. It was **absent**. The instrument's default voice was
+odd-harmonic-only across the whole register — 35.8 to 50.8 dB of even-partial deficit on every one
+of the six open strings.
+
+`docs/listening/physical-plausibility-checklist.md` **item 7 already names this in words** —
+*"near-middle plucks are hollow, with suppressed even harmonics"* — and the shipped default **was**
+the near-middle pluck. Item 7 is also the item whose pluck half P2.8's review found has **no corpus
+evidence at all**, because every render leaves Exciter Position at 0.5.
+
+### What changed
+
+| | was | now | derived from |
+|---|---|---|---|
+| `PluckExciterParams::defaultPosition` | 0.5 | **1 − 1/9 = 0.8889** | 1/9 of the string from the bridge, 2.833" on a 25.5" scale; first null partial 9 |
+| `StringNetworkParams::pickupPosition01` | 0.5 | **1 − 1/16 = 0.9375** | 1/16 from the bridge, 1.594"; a Stratocaster bridge pickup's pole line; first null partial 16 |
+| `kNominalPickupTrimDb` | 24.8 dB | **25.3 dB** | re-derived from the measurement that *defines* it, because the tap position is one of its inputs |
+
+The criterion is closed form: partials 2–6 are the ones that spell tempered intervals (2 and 4 are
+octaves, 3 and 6 fifths within 2 cents, 5 a major third 14 cents flat) and **partial 7 is the first
+that names no tempered interval at all**, so requiring no null in [2, 6] is `onset >= 7`, i.e.
+`d <= 1/7`. Of the three positions a real electric guitar actually has a pickup at — bridge 0.06,
+middle 0.15, neck 0.25 of the string from the bridge — **only the bridge clears it**, and that is a
+derivation rather than a preference: a real middle or neck coil gets away with nulling partial 6 or
+4 because it has a finite aperture, and this model's tap is a point.
+
+Nothing was changed that could not be derived. `noiseAmount` stays at **0** and the string material
+stays at 0.5 / 0.5 / 0.0; both are argued with measurements in the task note rather than moved.
+
+### The cost, stated where §10 states its own
+
+| | |
+|---|---|
+| **Fundamental** | coupling to it is `sin(pi*d)` at both ends, so the shipped pair costs **23.5 dB** of it. At the low E the fundamental goes from being the loudest partial in the note to sitting 20 dB under partial 4 — checklist item 7's *"brighter and thinner"*, arriving as the default. |
+| **Sustained chord level** | corpus phrases 02 and 06 lose **7.7 / 8.4 dB** of energy over 200 Hz–4 kHz. **At most ~1 dB of that is attributable to choosing the bridge**: measured over five admissible geometries, the minimum-loss one (pluck 1/8, tap 1/7) reads *lower* than the bridge above 200 Hz and only 6 dB higher below it. The loss is the criterion's, not the position's — the old default was loud precisely because the midpoint costs 0 dB of fundamental, and it paid for that by deleting the even partials. |
+| **Peak level and headroom** | **unchanged.** Single string MIDI 45 at velocity 1.0 stays inside the −18 dBFS ±1 dB gate; a six-string open chord at velocity 1.0 peaks −11.36 dBFS, **11.06 dB under the limiter ceiling**. |
+| **Calibration rate-independence** | `kNominalPickupTrimDb`'s three-rate spread widens from **0.08 dB to 0.844 dB**, because a near-bridge tap weights the upper partials and those are the rate-sensitive ones. The constant is now a compromise across rates rather than a measurement that agreed three times. |
+| **Corpus** | every phrase moved; worst RMS move **−8.78 dB** (`02_open_chords`), worst peak move **−5.68 dB** (`01_chromatic_singles`). |
+| **Goldens** | **did not move.** `worst |golden diff| 0` on both layers, because `StringIrScenarios` pins its own geometry (pluck 0.28, tap 0.87, noise 0.25) and never reads these defaults. |
+
+### Three `[contract]` gates now hold it, each shown RED at 0.5 / 0.5 in its own body
+
+`tests/dsp/DefaultVoicingTests.cpp` — the rendered even-partial deficit over the six open strings
+(shipping 5.29 dB worst, old geometry 35.80 dB *weakest*, limit 18); the closed form asserted on the
+defaults themselves with no render in it; and **the six-string chord's headroom**, which is the
+first time the "+16 dB summing budget fits under the ceiling" promise has been measured rather than
+inferred (`docs/listening/P2-20260803.md` records it as an inference, and §8.3 item 6 above records
+that the *other* level gate cannot fire). Full derivation, the whole candidate grid, the loudness
+accounting, and a measured `couplingStrength` recommendation the author has not been asked to
+accept: `.superpowers/sdd/2026-07-30-pm-guitar-synth-p0-p2-plan/task-default-voicing.md`.
+
+**What this changes about the exception above: nothing, again.** The voicing sign-off is still not
+performed, `couplingStrength = 0.35` is still PROVISIONAL and is still the author's alone, and
+`docs/listening/P2-20260803.md` is still empty. Two defects found from one recording is still not an
+audition — it is two more reasons §9's first line was the right thing to write.

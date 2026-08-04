@@ -141,12 +141,62 @@ inline constexpr double kRetuneRampSeconds = 0.030;
 // note in either mode and the two modes render it bit-identically (tests/dsp/RetriggerModeTests.cpp).
 inline constexpr double kSynthFadeSeconds = 0.002;
 
+// ---- WHERE THE PICKUP SITS, AND WHY IT IS NOT THE MIDDLE OF THE STRING ------------------------
+//
+// A tap at a fraction d from a termination reads mode n through the same comb the exciter deposits
+// through, |sin(n*pi*d)| (PluckExciter.h derives it once; this is the other end of the same
+// physics). Its first null is at partial 1/d, and for d = a/b in lowest terms the null set is
+// exactly {b, 2b, 3b, ...}. d = 1/2 is therefore the worst point on the whole slider -- onset 2,
+// density 1/2 -- and it is where this default sat through P2.9, coincident with the exciter's, so
+// the two combs multiplied into a single squared null on every even partial. Measured through the
+// shipping chain at the low open E, partials 2/4/6/8 came out 43 / 43 / 48 / 44 dB below the loudest
+// partial. Half the harmonic series was not attenuated; it was absent.
+//
+// A pickup comb is CHARACTERISTIC and is not the defect -- it is most of what distinguishes one
+// pickup position from another, and P2.2's node-suppression feature is built on exactly this
+// physics used deliberately. What has to go is the null on the partials that carry the instrument's
+// identity, which PluckExciter.h derives as [2, 6] (partial 7 is the first that names no tempered
+// interval). That criterion, onset = 1/d >= 7, is the same one applied here:
+//
+//   real pickup positions on a 25.5" scale     d from the bridge   onset   satisfies [2,6]?
+//     bridge single coil, 1.5 - 1.75"             0.059 - 0.069     16      YES
+//     middle single coil, ~3.9"                   0.153              6.5    no, nulls partial 6-7
+//     neck single coil,   ~6.3"                   0.247              4      no, nulls the DOUBLE OCTAVE
+//
+// The BRIDGE PICKUP IS THE ONLY REAL PICKUP POSITION THAT SATISFIES IT, and that is a derivation
+// rather than a preference. A real middle or neck pickup gets away with nulling partial 4 or 6
+// because its coil has a finite aperture -- roughly half an inch, 0.02 of the string -- which turns
+// each null into a finite dip; this model's tap is a POINT and its nulls are exact. It is the same
+// finite-width argument the damper report makes about a real palm, and it lands here for the same
+// reason. 1/16 = 0.0625 is 1.594" on a 25.5" scale, the centre of the window real bridge pickups
+// occupy, and it states itself: the first null is partial 16.
+//
+// THE COST. Coupling to the fundamental is sin(pi*d), so a tap at 1/16 reads the fundamental
+// 20*log10(sin(pi/16)) = 14.2 dB weaker than a tap at the midpoint does. Measured on the low open E
+// through the shipping chain, the fundamental goes from being the loudest partial in the note to
+// sitting 20 dB under partial 4. THAT IS THE BRIDGE-PICKUP SOUND and the checklist already names
+// it -- item 7, "near-bridge plucks are noticeably brighter and thinner". The trade this change
+// makes is the fundamental for the harmonic series, and it is worth making because a note missing
+// its octave is not a guitar note while a note with a weak fundamental is one every electric
+// guitarist has played. What it does NOT cost is the gain staging: the six-string open chord at the
+// default velocity still peaks 10.4 dB under the limiter ceiling. It DOES move the -18 dBFS
+// per-string calibration by 0.1 to 0.96 dB depending on sample rate, so kNominalPickupTrimDb was
+// re-derived from the same measurement that defines it -- 24.8 -> 25.3 dB, PickupTap.h.
+//
+// Written as a distance from the BRIDGE and subtracted: sin^2 is symmetric about 0.5 so 1 - 1/16
+// and 1/16 are acoustically near-identical (near-identical, not identical -- the bridge is
+// compliant and the nut is rigid), but a pickup physically belongs at the bridge end and only the
+// bridge-referred value makes the "Pickup Position" label read true.
+inline constexpr float kDefaultTapDistanceFromBridge01 = 1.0f / 16.0f;
+
 struct StringNetworkParams {
     RetriggerMode retriggerMode = RetriggerMode::Physical;
     float pitchBendSemitones = 0.0f; // global bend, +/-kPitchBendRangeSemitones (Common.h); not an APVTS
                                      // parameter -- the plugin drives it from the MIDI pitch
                                      // wheel via pitchWheelToSemitones() (MidiTranslation.h)
-    float pickupPosition01 = 0.5f;   // tap position; continuously modulatable while ringing
+    // Tap position, 0 = nut, 1 = bridge; continuously modulatable while ringing. See the derivation
+    // immediately above this struct for where 1/16 comes from and what it cost.
+    float pickupPosition01 = 1.0f - kDefaultTapDistanceFromBridge01;
 
     // Junction position, 0 = nut, 1 = bridge. Continuously modulatable while a note rings from
     // Task P2.3: this value is a block-snapshotted TARGET, per-sample smoothed inside process()
@@ -265,9 +315,20 @@ static_assert(std::is_trivially_copyable_v<StringNetworkParams>,
 
 // StringNetwork seeds its per-(string, tap) position smoothers with this same value, so a
 // prepare() before the first setParams() starts the taps where the parameter says they are rather
-// than gliding in from 0. Pinned here so the two cannot drift apart silently.
-static_assert(StringNetworkParams{}.pickupPosition01 == 0.5f,
-              "StringNetwork::kDefaultTapPosition01 must track StringNetworkParams::pickupPosition01's default.");
+// than gliding in from 0.
+//
+// That invariant used to be held by a static_assert pinning the LITERAL 0.5 here, which is a weaker
+// thing than it looks: it protects against the two drifting apart only for as long as somebody
+// remembers to edit both. StringNetwork::kDefaultTapPosition01 is now DERIVED from the field below
+// it (see its definition), so they cannot drift at all and no assertion is needed to say so.
+//
+// What is asserted here instead is the property the default was MOVED for, which nothing else in
+// the header would catch: the tap must not sit close enough to a termination's mirror point to null
+// a partial the instrument's identity depends on. It is not a gate that only passes -- at the value
+// this replaced, d = 1/2, the left-hand side is exactly 2.
+static_assert(1.0f / kDefaultTapDistanceFromBridge01 >= 7.0f,
+              "The default pickup tap must not null a partial in [2, 6] -- the partials that spell "
+              "the intervals the instrument plays. See the derivation above StringNetworkParams.");
 
 template <typename SampleT> class StringNetwork;
 
@@ -597,15 +658,19 @@ template <typename SampleT> class StringNetwork {
     // onto their targets, and a caller that prepares before its first setParams() -- which is the
     // documented order, and what every headless executable and the plugin itself do -- would
     // otherwise start every tap at position 0 (the nut, where the two rails cancel to near-silence)
-    // and glide it to 0.5 over the first 8 ms of the very first block. The single smoother this
-    // array replaced carried the same default for the same reason.
+    // and glide it to the parameter's default over the first 8 ms of the very first block. The
+    // single smoother this array replaced carried the same default for the same reason.
     static constexpr std::array<double, kTapSlots> filledTapSlots(double value) noexcept {
         std::array<double, kTapSlots> slots{};
         for (double& slot : slots)
             slot = value;
         return slots;
     }
-    static constexpr double kDefaultTapPosition01 = 0.5;
+    // DERIVED from the parameter's own default rather than restated as a literal, so the smoother
+    // seed and the parameter cannot drift apart at all -- which is strictly stronger than the
+    // static_assert that used to pin the two together by hand (see the note above StringNetwork's
+    // forward declaration).
+    static constexpr double kDefaultTapPosition01 = static_cast<double>(StringNetworkParams{}.pickupPosition01);
 
     // Same argument as filledTapSlots above, for the Synth retrigger fade: an array of zeros would
     // mean "every string is fully faded out" on an instance nobody has reset yet, and the diagnostic

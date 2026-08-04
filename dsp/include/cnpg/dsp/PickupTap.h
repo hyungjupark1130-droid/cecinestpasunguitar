@@ -72,10 +72,11 @@ template <typename SampleT> struct StringTapBuffers; // full definition: StringN
 // note's fundamental. Measured end to end (StringNetwork -> PickupTap, every other parameter at its
 // default, MIDI 45 / A2 at velocity 1.0, 2 s render), that path delivers:
 //
-//   44.1 kHz: -42.80 dBFS     48 kHz: -42.82 dBFS     96 kHz: -42.74 dBFS
+//   44.1 kHz: -42.917 dBFS    48 kHz: -43.092 dBFS    96 kHz: -43.761 dBFS
 //
-// -- i.e. it is remarkably rate-independent (0.08 dB spread), so ONE constant calibrates every
-// supported rate. kNominalPickupTrimDb is that constant, rounded to 0.1 dB, and it is the default
+// -- so ONE constant calibrates every supported rate, though no longer to the 0.08 dB the first
+// measurement of it enjoyed; see the re-derivation block below.
+// kNominalPickupTrimDb is that constant, rounded to 0.1 dB, and it is the default
 // of outputGainDb below; plugin/src/Parameters.cpp reads it straight out of PickupTapParams{} for
 // the APVTS default and centres the knob's +/-24 dB range on it, so the plugin's default state IS
 // the calibrated state and the two cannot drift apart.
@@ -88,7 +89,32 @@ template <typename SampleT> struct StringTapBuffers; // full definition: StringN
 // -18 dBFS is the NOMINAL the rest of the chain is gain-staged against (TriodeStage.h's drive
 // calibration, the +16 dB multi-string summing budget), and the calibration reference is the
 // specific documented scenario above -- not an automatic gain control.
-inline constexpr float kNominalPickupTrimDb = 24.8f;
+//
+// ---- RE-DERIVED AFTER THE DEFAULT VOICING MOVED (after the P2.9 exit) ------------------------
+//
+// "Every other parameter at its default" INCLUDES THE TAP POSITION, and that is exactly what
+// changed: pickupPosition01 moved from the string's midpoint to 1/16 of the string from the bridge
+// (StringNetwork.h has the derivation). This constant is DEFINED by the measurement above, so it
+// had to be re-measured rather than inherited. It was 24.8 dB, against readings of
+// -42.80 / -42.82 / -42.74 dBFS.
+//
+// Per rate the exact trims the new geometry asks for are 24.917 / 25.092 / 25.761 dB. One constant
+// cannot be all three, so it sits at the MIDPOINT OF THE EXTREMES, (24.917 + 25.761)/2 = 25.339,
+// rounded to 25.3 -- which is the value that maximises the SMALLER of the two margins against the
+// +/-1 dB acceptance (tests/dsp/MonitoringChainTests.cpp). That leaves the gate reading
+// -17.617 / -17.792 / -18.461 dBFS: worst deviation 0.461 dB, worst margin 0.539 dB.
+//
+// Keeping 24.8 would NOT have failed the gate -- it would have read -18.12 / -18.29 / -18.96, i.e.
+// inside it at 96 kHz by 0.039 dB. That is a gate that passes rather than a calibration that holds,
+// and it is the reason this constant moved rather than being left alone.
+//
+// THE COST, because it is a real one: the rate spread widened from 0.08 dB to 0.844 dB. A tap 1/16
+// of the string from the bridge weights the UPPER partials -- its comb |sin(n*pi/16)| rises to its
+// peak at partial 8 -- and the upper partials are the ones whose loop-filter and fractional-delay
+// behaviour differs most between 44.1 and 96 kHz. So this is now a compromise across three rates
+// rather than a measurement that happened to agree at all three, and a future change that widens
+// the spread further will run out of margin here before it runs out anywhere else.
+inline constexpr float kNominalPickupTrimDb = 25.3f;
 
 struct PickupTapParams {
     float resonanceHz = 2500.0f;               // RLC resonant frequency

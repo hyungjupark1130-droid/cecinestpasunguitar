@@ -22,7 +22,12 @@ using namespace cnpg::dsp;
 
 TEST_CASE("PluckExciterParams: default-constructs to its documented defaults and copies by value", "[contract]") {
     PluckExciterParams params;
-    REQUIRE(params.defaultPosition == 0.5f);
+    // 1 - 1/9 of the string from the nut, i.e. 1/9 of it from the BRIDGE -- 2.833" on a 25.5"
+    // scale, an ordinary picking position. It was 0.5 through P2.9, the midpoint, which is the
+    // single worst point on the slider: it nulls the octave and every even partial above it. The
+    // derivation, the criterion and the cost are all at the field (PluckExciter.h); this pins that
+    // the shipped value is the derived one and not something an edit walked back.
+    REQUIRE(params.defaultPosition == 1.0f - 1.0f / 9.0f);
     REQUIRE(params.defaultHardness == 0.5f);
     REQUIRE(params.noiseAmount == 0.0f);
 
@@ -35,11 +40,14 @@ TEST_CASE("StringNetworkParams: nests StringMaterialParams and PluckExciterParam
           "[contract]") {
     StringNetworkParams params;
     REQUIRE(params.retriggerMode == RetriggerMode::Physical);
-    REQUIRE(params.pickupPosition01 == 0.5f);
+    // 1/16 of the string from the BRIDGE -- 1.594" on a 25.5" scale, where a bridge single coil
+    // sits. Also 0.5 through P2.9, coincident with the exciter above, which squared every even
+    // partial's null. See StringNetwork.h for the derivation and PluckExciter.h for the criterion.
+    REQUIRE(params.pickupPosition01 == 1.0f - 1.0f / 16.0f);
     REQUIRE(params.stringMaterial.lossGainLow == 0.5f);
     REQUIRE(params.stringMaterial.lossGainHigh == 0.5f);
     REQUIRE(params.stringMaterial.dispersionAmount == 0.0f);
-    REQUIRE(params.exciter.defaultPosition == 0.5f);
+    REQUIRE(params.exciter.defaultPosition == 1.0f - 1.0f / 9.0f);
 
     // The per-string block (Task P2.1), one entry per kMaxStrings slot. Every slot defaults to "in
     // tune, on, and carrying no envelope scaling", so a StringNetworkParams built from nothing is a
