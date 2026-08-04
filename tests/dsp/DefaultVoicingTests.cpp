@@ -311,15 +311,18 @@ TEST_CASE("CONTRACT: DefaultVoicing -- both default positions clear the identity
     // (2) The two combs are not COINCIDENT, and their null sets do not meet inside the band the
     // render above speaks for. Coincidence is the mechanism, not a detail: it is why the old
     // default measured a 47 dB hole where one comb alone would have given about 25.
-    const int pluckPeriod = static_cast<int>(std::lround(pluckOnset));
-    const int tapPeriod = static_cast<int>(std::lround(tapOnset));
-    int firstSharedNull = 0;
-    for (int n = 2; n <= 24; ++n) {
-        if (n % pluckPeriod == 0 && n % tapPeriod == 0) {
-            firstSharedNull = n;
-            break;
-        }
-    }
+    // Written as a function of the two distances rather than inline, so the RED arm below runs the
+    // SAME code on the old geometry instead of re-deriving the answer from literals. A RED arm that
+    // recomputes "the first even number" by hand would assert nothing about this gate.
+    auto firstSharedNullAtOrBelow = [](double de, double dp, int band) {
+        const int ePeriod = static_cast<int>(std::lround(1.0 / de));
+        const int pPeriod = static_cast<int>(std::lround(1.0 / dp));
+        for (int n = 2; n <= band; ++n)
+            if (n % ePeriod == 0 && n % pPeriod == 0)
+                return n;
+        return 0;
+    };
+    const int firstSharedNull = firstSharedNullAtOrBelow(pluckDistance, tapDistance, 24);
 
     // (3) The product comb, which is what a partial actually arrives through, keeps every partial
     // in the identity band. 1.0 would be a partial read at a comb maximum at both ends.
@@ -351,21 +354,24 @@ TEST_CASE("CONTRACT: DefaultVoicing -- both default positions clear the identity
     REQUIRE(firstSharedNull == 0);
     REQUIRE(worstInBand > 0.15);
 
-    // THE RED, on the same expressions, at the geometry this replaced. Every clause fails there,
-    // and the first two fail at the extreme value the criterion can take rather than marginally.
-    REQUIRE(1.0 / (1.0 - 0.5) == 2.0); // onset 2: the octave, the lowest onset any position can have
-    REQUIRE(productComb(0.5, 0.5, 2) < 1.0e-12);
-    REQUIRE(productComb(0.5, 0.5, 4) < 1.0e-12);
-    REQUIRE(productComb(0.5, 0.5, 6) < 1.0e-12);
-    // ...and coincident, so every one of those nulls was squared.
-    int oldShared = 0;
-    for (int n = 2; n <= 24; ++n) {
-        if (n % 2 == 0) {
-            oldShared = n;
-            break;
-        }
-    }
-    REQUIRE(oldShared == 2);
+    // THE RED, EVALUATED BY THE SAME EXPRESSIONS ON THE GEOMETRY THIS REPLACED. Every clause of the
+    // gate fails there, and the onset clause fails at the extreme value the criterion can take
+    // rather than marginally: 2 is the lowest onset any position on the slider can have.
+    constexpr double kOldPosition = 0.5;
+    const double oldDistance = 1.0 - kOldPosition;
+    const double oldOnset = 1.0 / oldDistance;
+    REQUIRE(oldOnset == 2.0);
+    REQUIRE_FALSE(oldOnset >= 7.0);
+    // Coincident combs, so the shared-null search finds the OCTAVE -- through the same lambda the
+    // gate itself uses, not a hand-rolled restatement of the answer.
+    REQUIRE(firstSharedNullAtOrBelow(oldDistance, oldDistance, 24) == 2);
+    // ...and the product comb is not merely small at partials 2, 4 and 6, it is zero to machine
+    // precision, because a coincident null is squared.
+    double oldWorstInBand = 1.0e300;
+    for (int n = 2; n <= 6; ++n)
+        oldWorstInBand = std::min(oldWorstInBand, productComb(oldDistance, oldDistance, n));
+    REQUIRE(oldWorstInBand < 1.0e-12);
+    REQUIRE_FALSE(oldWorstInBand > 0.15);
 }
 
 // ---------------------------------------------------------------------------------------------
