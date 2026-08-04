@@ -711,20 +711,55 @@ partial in `[2, N]` to be damped at least as hard as the fundamental gives `p <=
 guarantees the band `[2, 24]` at 98.4% of the 4x margin that criterion can ever deliver. The same
 measurement then reads **−12.7 dB**, a 36.7 dB improvement.
 
-**It is not free, and the exit gate's own numbers are the ones it costs.** Coupling to the
-fundamental is `sin^2(pi*p)`, so the felt is **13.1x weaker** on it: a C3 note-off falls 60 dB in
-**0.650 s** instead of 0.200 s (the same note undamped takes 2.03 s), the silence watchdog holds a
-released string in the per-sample loop about **2.5x longer**, which is a direct addition to the CPU
-figure §3 reports, and a note-after-note re-strike 50–100 ms after a release now truncates a tail
-**13 dB louder**. There is no depth or felt-time headroom to spend against any of that — `maxLoss = 1`
-is already the matched termination and is measured monotone in depth, and the 40 → 20 ms felt floor
-moves the note-off by 0–12 ms. Only position moves it, which is why the durable fix is a damper with
-finite contact width and is scoped separately.
+### It is not free: it closes one defect, creates a second, and worsens a third it did not create
+
+Coupling to the fundamental is `sin^2(pi*p)`, so the felt is **13.1x weaker** on it. Two costs, both
+on gestures a player uses constantly — and the second of them has a part that is **not this change's
+to give back**, which the decomposition below separates out:
+
+| | cost | measured |
+|---|---|---|
+| **1. Note-off speed** | **3.25x slower** | C3 falls 60 dB in **0.650 s**, was 0.200 s (undamped: 2.03 s). Worst in the low-mid register: MIDI 28 goes 1.230 s → 2.010 s |
+| **2. Re-strike click** | **13 dB louder**, clean boundary **50 ms → 500 ms** | note-after-note click excess by note-off age, criterion 3 dB: at p = 0.15, `19.69 / 21.48 / 16.64 / 0.30 / 0 / 0 / 0`; at 1/25, `20.00 / 24.12 / 23.34 / 13.29 / 13.34 / 3.16 / 0` for 5 / 10 / 20 / 50 / 100 / 200 / 500 ms |
+
+The silence watchdog also holds a released string in the per-sample loop about **2.5x longer**, which
+adds to the CPU figure §3 reports (not re-measured — the §3 hard gate has 16x of headroom).
+
+**THERE IS NO COMPENSATING ADJUSTMENT, and that is the fact that decides whether the durable fix is
+optional.** `maxLoss = 1` is already the matched resistive termination — measured monotone in depth
+at every position, and past it the junction becomes a rigid pin — and taking the felt time from 40 ms
+to its 20 ms floor moves t(−60 dB) by **0 ms**. **Position is the only knob**, so the note-off
+slowdown is unavoidable at *every* position that clears the comb; 1/25 is the cheapest such position,
+not an expensive one. The author is therefore choosing between three states, not two:
+
+| | the comb | note-off | re-strike click 50–200 ms | re-strike click **≤ 20 ms** |
+|---|---|---|---|---|
+| keep p = 0.15 | **+24.1 dB at 915.7 Hz** | 0.200 s | clean from 50 ms | **17–21 dB, item 21** |
+| **ship p = 1/25 (this change)** | −12.7 dB, gone | **0.650 s** | **+13 dB, clean from 500 ms** | **20–24 dB, item 21** |
+| finite contact width (scoped separately) | gone at **every** position | back to ~0.200 s | back to ~clean from 50 ms | **STILL 17–21 dB, item 21** |
+
+### These are THREE defects with THREE owners, not one trade
+
+| # | defect | measured | who closes it |
+|---|---|---|---|
+| **1** | The harmonic comb | +24.07 → **−12.67 dB**, a 36.7 dB improvement | **closed here**, by position; finite width would close it at *every* position rather than only below 1/21 |
+| **2** | The note-off slowdown | 0.200 → **0.650 s** at C3 | **created here**; finite width takes it back essentially in full, because the whole 3.25x is the price of pushing the first node past partial 24 |
+| **3** | The **≤ 20 ms** re-strike click | **17–24 dB** at ages 5 / 10 / 20 ms | **NEITHER.** Pre-existing at p = 0.15 (19.69 / 21.48 / 16.64 dB), 0.3–6.7 dB worse here (20.00 / 24.12 / 23.34). It is **checklist item 21**, *"Re-striking just after a note-off (P2.6)"* — P2.6's state clear discarding a still-loud tail — and it needs a **fade on the fresh path** |
+
+**Read defect 3 twice.** The 50–200 ms band of that same click *is* this change's doing and finite
+width does take it back. The ≤ 20 ms band does not move with the damper **at all**, and that is
+measured rather than argued: the discarded tail's level relative to the note replacing it reads
+**−5.665 / −5.886 / −6.108 dB** at 5 / 10 / 20 ms at p = 0.15, and **−5.665 / −5.886 / −6.106 dB**
+at 1/25 — identical to three decimals, because 5–20 ms after a note-off no damper of any width at
+any position has had time to act. **Anyone reading the cost table alone would conclude the durable
+fix closes everything. It does not, and item 21 would then sit unowned.**
 
 Two `[contract]` gates now hold the finding, both demonstrated RED at p = 0.15 in their own bodies:
-`tests/dsp/DamperReleaseSpectrumTests.cpp`. Four existing gates were re-pointed deliberately and
-every one of them is recorded with both readings. Full derivation, the whole-slider sweep, the trade
-table and the re-pointing ledger:
+`tests/dsp/DamperReleaseSpectrumTests.cpp`. **Six** existing gates were re-pointed deliberately, each
+recorded at its own site with both readings — and one of the six is a *strengthening*: the
+click-metric companion's full-note-off carve-out is gone, because that carve-out existed only
+because the residue at p = 0.15 was brighter than the note. Full derivation, the whole-slider sweep,
+the trade table and the re-pointing ledger:
 `.superpowers/sdd/2026-07-30-pm-guitar-synth-p0-p2-plan/task-damper-node-comb.md`.
 
 **What this changes about the exception above: nothing.** The voicing sign-off is still not performed,
