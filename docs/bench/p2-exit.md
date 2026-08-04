@@ -847,6 +847,46 @@ that the *other* level gate cannot fire). Full derivation, the whole candidate g
 accounting, and a measured `couplingStrength` recommendation the author has not been asked to
 accept: `.superpowers/sdd/2026-07-30-pm-guitar-synth-p0-p2-plan/task-default-voicing.md`.
 
+### A STRUCTURAL FINDING ABOUT THE GOLDEN CORPUS — the second blind spot in two days
+
+**This is the part of §11 that outlives the change it came from, and it belongs on §8.3's triage
+list rather than only here.**
+
+The goldens did not move, and the reason is not that this change was gentle. It is that
+`tests/support/StringIrScenarios.cpp` **overrides every one of the three fields this task touched**,
+before either scenario renders a sample:
+
+| override | line(s) | what it hides |
+|---|---|---|
+| `params.pickupPosition01 = kStringIrTapPosition` (0.87) | `:39`, `:90` | the tap default |
+| `params.exciter.noiseAmount = kStringIrNoiseAmount` (0.25) | `:41`, `:92` | the noise default |
+| `noteOn.pluckPosition = kStringIrPluckPosition` (0.28) | `:56`, `:113` | the exciter default |
+
+The third is belt-and-braces: `resolveNoteParam` (`dsp/src/StringNetwork.cpp:20-24`) returns the
+event's value whenever it is in [0, 1] and only falls back to `params_.exciter.defaultPosition`
+otherwise — and 0.28 is in range, so the default is never consulted even if the scenario had not set
+it. **The golden path reads none of the moved defaults, and therefore cannot see a default-voicing
+regression at all.**
+
+**That is the SECOND structural blind spot found in the golden corpus in two days, and both were
+found by chasing an audible defect rather than by any gate:**
+
+| # | blind spot | consequence | status |
+|---|---|---|---|
+| 1 | **No note-offs at all.** `StringIrScenarios.cpp` emits `NoteOn` only (recorded at §10 and in `task-damper-node-comb.md` §6). | No golden can see RELEASE behaviour. It is why the damper node comb survived to the author's ears. | **STILL OPEN** — no gate covers it; the damper's own gate is a separate file |
+| 2 | **Geometry defaults overridden**, above. | No golden can see what the instrument sounds like when a user simply LOADS it. | **closed by `tests/dsp/DefaultVoicingTests.cpp`**, which measures at the shipping defaults by construction |
+
+**Both are the same shape: the goldens pin *a* configuration, not *the shipping* configuration.**
+That is a legitimate and deliberate property of a regression baseline — a fixed-geometry instrument
+response is exactly what makes it stable and byte-comparable — but it means the golden suite is
+evidence that *the physics did not change*, and it is **not** evidence that *the instrument sounds
+right*. Two defaults that made the shipped instrument audibly wrong passed it unmoved, twice.
+
+The practical consequence for whoever does the final review: **a green golden board says nothing
+about voicing, and both times it has been read as though it did.** The gates that can speak for the
+shipped configuration are `DamperReleaseSpectrumTests.cpp` and `DefaultVoicingTests.cpp`, and there
+are exactly two of them.
+
 **What this changes about the exception above: nothing, again.** The voicing sign-off is still not
 performed, `couplingStrength = 0.35` is still PROVISIONAL and is still the author's alone, and
 `docs/listening/P2-20260803.md` is still empty. Two defects found from one recording is still not an
