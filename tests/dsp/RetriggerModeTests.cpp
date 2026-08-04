@@ -1299,7 +1299,16 @@ TEST_CASE("CONTRACT: re-striking a released string clears it, and what that disc
     // THE SWEEP IS NOT DEGENERATE: the earliest re-strike discards far more than the latest, which
     // is the whole reason age is swept rather than probed at one point. If this collapsed, every row
     // would be measuring the same thing and the gate would be one point wearing seven hats.
-    REQUIRE(rows.front().discardedStepDbfs - rows.back().discardedStepDbfs > 40.0);
+    //
+    // 30 dB rather than 40, RE-POINTED when the damper default moved from 0.15 to 1/25. The spread
+    // is between a 5 ms-old note-off and a 500 ms-old one, and 500 ms of felt takes far less out of
+    // the string than it used to for one derived reason: coupling to the fundamental is sin^2(pi*p),
+    // so the felt is 13.1x weaker on it (StringNetworkParams::damperPosition01). Measured
+    // -33.996 dBFS -> -125.998 dBFS (92.00 dB of spread) at p = 0.15 and -33.688 -> -72.618
+    // (38.93 dB) here. Nothing about the sweep's SHAPE changed -- the rows are still strictly
+    // ordered in age, which the loop below still asserts -- but the LEVEL the late rows sit at moved
+    // by 53 dB, and that is what re-points every threshold in the rest of this case.
+    REQUIRE(rows.front().discardedStepDbfs - rows.back().discardedStepDbfs > 30.0);
     // ...and no two rows landed on the same sample, which is the failure mode the half-period search
     // window exists to prevent and which a full-period one actually produced.
     for (std::size_t i = 1; i < rows.size(); ++i) {
@@ -1327,9 +1336,31 @@ TEST_CASE("CONTRACT: re-striking a released string clears it, and what that disc
     // So the criterion is asserted where it holds and the FAILURE is asserted where it does not, and
     // both directions are gated. Asserting only the passing half would let a future change quietly
     // widen the bad region; asserting only the shape would let one quietly appear inside the clean
-    // one. The threshold is measured, not chosen: it is the first swept age at which both readings
-    // clear 3 dB, and the row before it is required to fail.
-    constexpr double kClickFreeFromMs = 50.0;
+    // one.
+    //
+    // *** THE BOUNDARY MOVED FROM 50 ms TO 500 ms WHEN THE DAMPER DEFAULT MOVED TO 1/25, AND THAT
+    // *** IS A REAL COST OF THAT REVISION ON THE COMMONEST GESTURE IN PLAYING.
+    // The click is the state clear discarding whatever tail is still there, so its size IS the tail's
+    // level, and a felt 13.1x weaker on the fundamental leaves a much louder tail for much longer.
+    // Measured on this sweep, click excess by note-off age:
+    //
+    //     age        5 ms   10 ms  20 ms  50 ms  100 ms  200 ms  500 ms
+    //     p = 0.15   19.69  21.48  16.64   0.30    0        0       0
+    //     p = 1/25   20.00  24.12  23.34  13.29   13.34     3.16    0
+    //
+    // ...and the SHAPE of the transition changed with it, which is why the assertions below did too.
+    // At p = 0.15 it was a cliff -- 16.64 dB at 20 ms to 0.30 dB at 50 ms -- so one boundary index
+    // could be asserted from both sides with 13 dB of margin on the failing side and 2.7 dB on the
+    // clean one. At 1/25 it is a RAMP, and 200 ms reads 3.16 dB, i.e. it fails the 3 dB criterion by
+    // 0.16 dB. Pinning a single index through that row would be pinning a coin toss. So the two-sided
+    // assertion is kept and the transition row is excluded from it BY NAME: ages at or under 100 ms
+    // must fail (worst margin 10.3 dB), ages at or over 500 ms must pass (margin 3 dB), and 200 ms is
+    // recorded as the transition and carries only the bound that holds everywhere.
+    //
+    // The finding this leaves on the record for whoever scopes the finite-width damper: a note-after-
+    // note re-strike 50-100 ms after the release now truncates a tail 13 dB louder than it did.
+    constexpr double kClickAudibleUpToMs = 100.0;
+    constexpr double kClickFreeFromMs = 500.0;
 
     for (const Row& row : rows) {
         INFO("nominal note-off age " << row.nominalAgeMs << " ms, placed at " << row.actualAgeMs << " ms");
@@ -1341,7 +1372,7 @@ TEST_CASE("CONTRACT: re-striking a released string clears it, and what that disc
         if (row.nominalAgeMs >= kClickFreeFromMs) {
             REQUIRE(row.excessDb <= cnpg::test::kClickMetricToleranceDb);
             REQUIRE(row.levelExcessDb <= cnpg::test::kClickMetricToleranceDb);
-        } else {
+        } else if (row.nominalAgeMs <= kClickAudibleUpToMs) {
             // NOT a tolerated failure: an ASSERTED one. This is the finding, pinned in the direction
             // that matters -- if a later change makes an early re-strike click-free, this line goes
             // red and whoever made it has to come and move the boundary deliberately.
@@ -1354,16 +1385,18 @@ TEST_CASE("CONTRACT: re-striking a released string clears it, and what that disc
         rows.begin(), rows.end(), [](const Row& row) { return row.excessDb <= cnpg::test::kClickMetricToleranceDb; });
     REQUIRE(firstClean != rows.end());
     REQUIRE(firstClean != rows.begin());
-    REQUIRE(firstClean->nominalAgeMs == kClickFreeFromMs);
+    // The clean region begins after the transition row rather than at a pinned index -- see above.
+    REQUIRE(firstClean->nominalAgeMs > kClickAudibleUpToMs);
     const double worstCleanDb = std::max_element(firstClean, rows.end(), [](const Row& a, const Row& b) {
                                     return a.excessDb < b.excessDb;
                                 })->excessDb;
 
-    std::cout << "[contract] re-strike over a released string: the state clear IS a click for note-off ages under "
-              << kClickFreeFromMs << " ms (worst " << rows.front().excessDb << " dB at " << rows.front().actualAgeMs
+    std::cout << "[contract] re-strike over a released string: the state clear IS a click for note-off ages up to "
+              << kClickAudibleUpToMs << " ms (worst " << rows.front().excessDb << " dB at " << rows.front().actualAgeMs
               << " ms, against a level-placed hard cut of " << rows.front().hardCutDb << " dB) and clean from "
-              << kClickFreeFromMs << " ms up (worst " << worstCleanDb
-              << " dB). This is pre-P2.6 behaviour restored and first measured, not new -- see the comment above\n";
+              << firstClean->nominalAgeMs << " ms up (worst " << worstCleanDb
+              << " dB). This is pre-P2.6 behaviour restored and first measured, not new -- see the comment above; the "
+                 "boundary was 50 ms at the p = 0.15 damper default and moved with it\n";
 
     // BOTH MODES TAKE THE SAME PATH, because the predicate is mode-independent -- worth one direct
     // assertion rather than an argument, since Synth's whole purpose is to fade before it clears and
@@ -1594,7 +1627,14 @@ TEST_CASE("CONTRACT: a retrigger damper choke has no state left to act on, and b
         // 10.7 ms of elapsed time in which no new note existed. That is the trade the refusal
         // declines, and declining it is a judgement about playability, not about whether the felt
         // does anything.
-        REQUIRE(suppressionDb < -1.0);
+        //
+        // RE-POINTED FROM -1.0 TO -0.10 WHEN THE DAMPER DEFAULT MOVED TO 1/25, and the move
+        // OVERDETERMINES the refusal rather than softening it: coupling to the fundamental is
+        // sin^2(pi*p), so the same 10.7 ms of felt now takes 0.152 dB out of the ringing string
+        // where it took 1.493 dB at p = 0.15. The bound keeps the same ~50% of headroom under the
+        // measurement that -1.0 had under -1.493, and what a choke would buy for its latency is
+        // now an order of magnitude smaller than it was when the clause was refused.
+        REQUIRE(suppressionDb < -0.10);
     }
 }
 

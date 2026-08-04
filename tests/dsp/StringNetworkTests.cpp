@@ -633,12 +633,15 @@ TEST_CASE("CONTRACT: StringNetwork NoteOff damps the string and then clears it",
     release.push(noteOff(0, kMidiNote));
 
     // The window is longer than P1's 0.7 s, and the reason is physics rather than slack: a POINT
-    // damper at p = 0.15 has an exact node on partial 20 and cannot touch it at all, so that
-    // partial rides the string's own loop loss down while everything the damper can reach is
-    // already gone. The silence watchdog waits for the whole tail, node partials included, to fall
-    // under -100 dBFS (measured: ~0.5 s at MIDI 45, 48 kHz), which is what "clears the string"
-    // honestly means once a damper is doing the damping instead of a gain.
-    const int blocks = static_cast<int>(1.5 * kRate / kBlock);
+    // damper at p has an exact node on every partial n = k/p and cannot touch those at all, so they
+    // ride the string's own loop loss down while everything the damper can reach is already gone.
+    // The silence watchdog waits for the whole tail, node partials included, to fall under
+    // -100 dBFS, which is what "clears the string" honestly means once a damper is doing the
+    // damping instead of a gain. The window was widened again when the default position moved to
+    // 1/25: coupling to the fundamental is sin^2(pi*p), so the felt is 13.1x weaker on it than at
+    // 0.15 and the whole tail takes correspondingly longer (measured at MIDI 45, 48 kHz: the clear
+    // moved from ~0.5 s to ~1.0 s).
+    const int blocks = static_cast<int>(2.5 * kRate / kBlock);
     const std::vector<float> tail = renderTap(network, release, blocks);
 
     const std::vector<float> lastBlock(tail.end() - kBlock, tail.end());

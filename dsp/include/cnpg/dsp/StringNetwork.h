@@ -67,8 +67,8 @@
 //     octave) and it attenuated the OUTPUT while leaving the string's stored energy untouched, so
 //     a note-off was inaudible to energyEstimate() until the state clear caught up with it.
 //   - Silence watchdog (P2.2). A damped string still has to LEAVE the loop eventually, and the
-//     damper cannot promise that: a point contact at p has exact nodes (p = 0.15 puts one on
-//     partial 20) that it can never touch, so those partials decay on loop loss alone. The
+//     damper cannot promise that: a point contact at p has exact nodes (one on every partial
+//     n = k/p) that it can never touch, so those partials decay on loop loss alone. The
 //     watchdog is therefore a level observation, not a timer -- see kSilenceWindowSeconds below.
 //   - Bridge (P2.4). BIDIRECTIONAL. The network owns a BridgeJunction and runs it as its default
 //     port: every sample it gathers each string's outgoing bridge wave, scatters them through the
@@ -160,7 +160,42 @@ struct StringNetworkParams {
     // DamperJunction::currentPosition01() reports the validated target it is gliding toward. There
     // is one validation point (the junction's own setParams clamp) and the smoother sits
     // downstream of it, so the two cannot disagree about anything but the glide.
-    float damperPosition01 = 0.15f;
+    //
+    // ---- WHY 1/25, AND WHAT IT COST (revised after the P2.9 exit, on a listening finding) ------
+    // The default was 0.15 through P2.9 and it was audibly wrong. A point damper dissipates mode n
+    // in proportion to sin^2(n*pi*p), so it is EXACTLY BLIND to every partial with a node at p, and
+    // 0.15 is a comb: partial 20's node sits at 3/20 = 0.150 exactly, and partials 7 and 13 sit
+    // within 0.008 of one. Measured on C3 at the shipping exciter/pickup geometry, a note-off there
+    // collapses onto partial 7 (915.7 Hz), which ends up 24.1 dB ABOVE the fundamental before the
+    // string leaves the loop -- the "weird harmonics" the author heard on eight recorded strikes.
+    //
+    // The criterion that fixes it is closed form rather than fitted. Requiring every partial in a
+    // band [2, N] to be damped AT LEAST AS HARD as the fundamental,
+    //
+    //     sin^2(n*pi*p) >= sin^2(pi*p)   for all n in [2, N]     <=>     p <= 1/(N + 1)
+    //
+    // (the binding partial is n = N, whose argument reaches pi - pi*p exactly at p = 1/(N+1)), and
+    // the margin that criterion can deliver is capped at 4x no matter how small p gets, because
+    // sin^2(2*pi*p)/sin^2(pi*p) -> 4 as p -> 0. p = 1/25 = 0.04 reaches 3.94x -- 98.4% of that
+    // ceiling -- over [2, 20], guarantees the whole band [2, 24], and puts the first exact node on
+    // partial 25 (3270 Hz at C3, where the loop filter has already taken it). Going lower buys at
+    // most 1.6% more margin and pays for it as 1/p^2 in note-off time; the knee is at p = 0.0453,
+    // and 1/25 is one derived step past it so that the guaranteed band survives the bridge
+    // admittance shifting the mode shapes (couplingStrength is still PROVISIONAL, ADR 0007 D4).
+    //
+    // THE COST IS REAL AND IT IS NOT COMPENSABLE. Coupling to the fundamental is sin^2(pi*p), so
+    // this is 13.1x weaker than 0.15, and a C3 note-off now takes 0.650 s to fall 60 dB instead of
+    // 0.200 s (the same note undamped takes 2.03 s, so the felt still does 3.1x the work of
+    // nothing). There is NO depth or felt headroom to spend against that: maxLoss = 1 is already
+    // the matched resistive termination -- measured monotone in depth at both positions, and past
+    // it the junction turns into a rigid pin (DamperJunction.h) -- and taking the felt time from
+    // 40 ms to its 20 ms floor moves the same measurement by 0 to 12 ms. Position is the only
+    // knob, which is why the durable fix is a damper with FINITE CONTACT WIDTH (a real palm never
+    // vanishes at a node) and is scoped separately.
+    //
+    // Both halves are gated: tests/dsp/DamperReleaseSpectrumTests.cpp measures the release spectrum
+    // and pins the closed form above, and both of its cases are demonstrated RED at p = 0.15.
+    float damperPosition01 = 0.04f;
     StringMaterialParams stringMaterial; // one global shared physics set
     BridgeAdmittanceParams bridge;       // consumed by BridgeJunction (P2.4)
     PluckExciterParams exciter;
@@ -585,10 +620,10 @@ template <typename SampleT> class StringNetwork {
     // The silence watchdog that replaced P1's release envelope (Task P2.2). A released string is
     // damped by physics now, so nothing counts it down: it leaves the loop when it is OBSERVED
     // silent, which is the only honest criterion once a point damper is doing the damping. A
-    // damper at p has exact nodes at every partial n = k/p (p = 0.15 puts one on partial 20) and
-    // is blind to them by construction, so those partials ride the loop loss down on their own
-    // schedule and a fixed release time would either cut them off audibly or hold every released
-    // string in the trip count for the worst case.
+    // damper at p has exact nodes at every partial n = k/p (the shipping default puts the first on
+    // partial 25) and is blind to them by construction, so those partials ride the loop loss down
+    // on their own schedule and a fixed release time would either cut them off audibly or hold
+    // every released string in the trip count for the worst case.
     //
     // Measured as a WINDOWED PEAK rather than an instantaneous level or a one-pole follower.
     // Instantaneous fails at every zero crossing; a follower needs a seed value, and any seed is

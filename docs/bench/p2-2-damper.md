@@ -55,7 +55,10 @@ release envelope a released string was cleared 460 ms after its note-off by a fi
 Under the real damper it leaves the loop when the silence watchdog observes it below
 -100 dBFS -- measured at ~0.5 s for a mid note, and longer for low ones, because a point damper
 at p = 0.15 has an exact node on partial 20 and cannot touch it at all, so that partial rides
-the loop loss down on its own schedule. Released strings therefore occupy the per-sample loop
+the loop loss down on its own schedule. (That node is the defect the damper default was later
+revised for; the CPU consequence recorded here got *larger*, not smaller, because the revised
+default damps the fundamental 13.1x more weakly and the watchdog therefore waits longer still.
+See `docs/bench/p2-exit.md` and the task note it points to.) Released strings therefore occupy the per-sample loop
 for longer than they used to, which raises the average number of strings the loop is actually
 rendering. This is not overhead that can be optimised away without changing the physics; it is
 the physics being honest about when a string has stopped ringing.

@@ -23,6 +23,7 @@ add_executable(cnpg_tests
     dsp/DamperEnergyTests.cpp
     dsp/DamperFeltTimeTests.cpp
     dsp/DamperNodeSuppressionTests.cpp
+    dsp/DamperReleaseSpectrumTests.cpp
     dsp/DenormalTests.cpp
     dsp/EventQueueTests.cpp
     dsp/MidiTranslationTests.cpp

@@ -685,3 +685,49 @@ rather than a memory. Each is a live finding from an earlier task's review, not 
 - It does **not** treat CI green, `pluginval` green or 16× performance headroom as evidence about any
   of the above. They are evidence that the code runs, is fast, and does not regress — which is a
   different question from whether it is the right instrument.
+
+---
+
+## 10. Appended after the exit: the damper default was revised on a listening finding
+
+**This section does not amend §1–§9.** Every verdict above stands exactly as it was recorded on
+2026-08-03, including the exception this document exits with. What follows is a fact that arrived
+after that exit and is recorded here because §9's first line is the reason it could: *"It does not
+claim the instrument sounds right. Nobody listened."* Somebody then listened.
+
+The author recorded eight strikes of **C3 (130.81 Hz)** through the plugin and heard the release turn
+into "a weird harmonics-like sound" whenever a released note was still ongoing. It is real, it is the
+damper, and it was reachable at the shipped default in one strike:
+
+- A point damper dissipates mode *n* in proportion to `sin^2(n*pi*p)`, so it is **exactly blind** to
+  every partial with a node at *p*.
+- `damperPosition01` defaulted to **0.15**, and 3/20 = 0.150 exactly — partial 20's node — with
+  partials 7 (1/7) and 13 (2/13) within 0.008 of one.
+- Measured on C3 at the shipping exciter/pickup geometry (both 0.5), a note-off at 0.15 collapses onto
+  **partial 7 at 915.7 Hz, 24.1 dB ABOVE the fundamental**, inside the note's own audible life.
+
+The default is now **1/25 = 0.04**, derived from a closed form rather than fitted: requiring every
+partial in `[2, N]` to be damped at least as hard as the fundamental gives `p <= 1/(N+1)`, and 1/25
+guarantees the band `[2, 24]` at 98.4% of the 4x margin that criterion can ever deliver. The same
+measurement then reads **−12.7 dB**, a 36.7 dB improvement.
+
+**It is not free, and the exit gate's own numbers are the ones it costs.** Coupling to the
+fundamental is `sin^2(pi*p)`, so the felt is **13.1x weaker** on it: a C3 note-off falls 60 dB in
+**0.650 s** instead of 0.200 s (the same note undamped takes 2.03 s), the silence watchdog holds a
+released string in the per-sample loop about **2.5x longer**, which is a direct addition to the CPU
+figure §3 reports, and a note-after-note re-strike 50–100 ms after a release now truncates a tail
+**13 dB louder**. There is no depth or felt-time headroom to spend against any of that — `maxLoss = 1`
+is already the matched termination and is measured monotone in depth, and the 40 → 20 ms felt floor
+moves the note-off by 0–12 ms. Only position moves it, which is why the durable fix is a damper with
+finite contact width and is scoped separately.
+
+Two `[contract]` gates now hold the finding, both demonstrated RED at p = 0.15 in their own bodies:
+`tests/dsp/DamperReleaseSpectrumTests.cpp`. Four existing gates were re-pointed deliberately and
+every one of them is recorded with both readings. Full derivation, the whole-slider sweep, the trade
+table and the re-pointing ledger:
+`.superpowers/sdd/2026-07-30-pm-guitar-synth-p0-p2-plan/task-damper-node-comb.md`.
+
+**What this changes about the exception above: nothing.** The voicing sign-off is still not performed,
+`couplingStrength = 0.35` is still PROVISIONAL, and `docs/listening/P2-20260803.md` is still empty.
+One defect found by one ear on one note is not an audition. If anything it is evidence for §9's
+first line rather than against it — a green board did not catch this, and was never going to.

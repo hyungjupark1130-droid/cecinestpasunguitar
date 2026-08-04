@@ -115,6 +115,18 @@ loudest surviving partial being H4, H3, H4 and H5 at p = 1/2, 1/3, 1/4 and 1/5 r
 one exactly the partial whose node the damper is sitting on — and the 0.15 control leaving the
 fundamental loudest.
 
+> **The 0.15 lane is a control, and it is no longer the shipping default.** It was when this phrase
+> was authored, and the lane is retained unchanged at 0.15 so corpus version 2 stays re-derivable
+> byte-for-byte — this phrase renders bit-identically before and after the default moved. What the
+> lane demonstrates is unaffected: at this phrase's resolution 0.15 has no node below partial 20 and
+> leaves the fundamental loudest. It is not nodeless, though — partial 20's node sits at
+> 3/20 = 0.150 exactly — and that is the finding that moved the default to 1/25. See
+> `.superpowers/sdd/2026-07-30-pm-guitar-synth-p0-p2-plan/task-damper-node-comb.md`.
+>
+> The same note applies to `04_palm_mute_chug`, which pins `damperPosition01 = 0.92`: by the
+> symmetry of `sin^2(n*pi*p)` that is the mirror of 0.08, whose first node is partial 12.5. It too
+> renders bit-identically and is deliberately left alone here.
+
 ## Manifest fields
 
 | Field | Meaning |

@@ -58,7 +58,10 @@ TEST_CASE("StringNetworkParams: nests StringMaterialParams and PluckExciterParam
 
 TEST_CASE("DamperJunctionParams: default-constructs to its documented defaults", "[contract]") {
     constexpr DamperJunctionParams params;
-    STATIC_REQUIRE(params.position01 == 0.15f);
+    // 1/25 -- the derivation lives on StringNetworkParams::damperPosition01, which this field
+    // mirrors, and it is gated by tests/dsp/DamperReleaseSpectrumTests.cpp rather than by this
+    // equality. Revised from 0.15 after the P2.9 exit on a listening finding.
+    STATIC_REQUIRE(params.position01 == 0.04f);
     STATIC_REQUIRE(params.maxLoss == 1.0f);
     // The centre of the validated 20..100 ms window, and deliberately the same 40 ms the P1
     // placeholder release envelope used, so Task P2.2 replacing that envelope with a real damper

@@ -70,7 +70,13 @@ NoteEvent noteOff(int sampleOffset, int midiNote, int stringIndex = 0) {
     return event;
 }
 
-StringNetworkParams paramsWith(float feltTimeConstantMs, float damperPosition01 = 0.15f) {
+// The damper position deliberately follows the SHIPPING default rather than restating a number:
+// this file is about how long a note-off takes on the instrument as shipped, and a hard-coded
+// position would go on measuring an instrument nobody has. It tracked 0.15 until the default moved
+// to 1/25 (see StringNetworkParams::damperPosition01 for that derivation); every timing figure in
+// this file moved with it, and the re-pointed gates say by how much where they are asserted.
+StringNetworkParams paramsWith(float feltTimeConstantMs,
+                               float damperPosition01 = StringNetworkParams{}.damperPosition01) {
     StringNetworkParams params;
     params.pickupPosition01 = kPickup;
     params.damperPosition01 = damperPosition01;
@@ -210,7 +216,23 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a note-off reaches silence in a time set 
     constexpr double kTotalSeconds = 3.0;
     constexpr double kSilenceDbfs = -60.0;
     const double kOnePoleRatioCeiling = std::sqrt(5.0); // 2.236, derived above
-    constexpr double kRequiredRatio = 1.50;             // see below for the two effects that compress it
+
+    // RE-POINTED, DELIBERATELY, WHEN THE DAMPER DEFAULT MOVED TO p = 1/25, and by the same
+    // derivation that set it. alpha = D/(k*tau) with k the FULL-ENGAGEMENT damping rate in dB/s,
+    // and the ratio 5*u(alpha/5)/u(alpha) is monotone DECREASING in alpha -- so a weaker damper
+    // means a larger alpha means a ratio nearer 1, with no implementation change whatsoever.
+    // Coupling to the fundamental is sin^2(pi*p), so k fell by 13.1x and alpha rose by 13.1x.
+    //
+    // Measured at MIDI 69 on sustain material, both readings, p = 0.15 -> p = 1/25:
+    //
+    //     absolute -60 dBFS   1.9167 -> 1.4468
+    //     relative -60 dB     1.6296 -> 1.2188   <- the binding one, then and now
+    //
+    // The gate moves from 1.50 to 1.12, which keeps the same 8.7% of headroom under the binding
+    // reading that 1.50 had under 1.6296. The DIRECTION of the move is asserted at the bottom of
+    // this case rather than asserted about: the same measurement at p = 0.15 must still read higher
+    // than the shipping one, or the mechanism above is wrong and this is a loosening in disguise.
+    constexpr double kRequiredRatio = 1.12;
 
     const double threshold = std::pow(10.0, kSilenceDbfs / 20.0);
 
@@ -237,8 +259,10 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a note-off reaches silence in a time set 
     // whole dynamic range to work in. Both readings are gated.
     constexpr double kMinimumHeadroomDb = 18.0;
 
-    auto measure = [&](float feltMs, int midiNote, bool relative, bool sustain = true) {
-        const StringNetworkParams params = sustain ? sustaining(paramsWith(feltMs)) : paramsWith(feltMs);
+    auto measure = [&](float feltMs, int midiNote, bool relative, bool sustain = true,
+                       float position = StringNetworkParams{}.damperPosition01) {
+        const StringNetworkParams params =
+            sustain ? sustaining(paramsWith(feltMs, position)) : paramsWith(feltMs, position);
         const NoteOffRender rendered = renderNoteOff(params, kNoteOffSeconds, kTotalSeconds, true, midiNote);
         REQUIRE(rendered.engagementBefore == 0.0f);
         REQUIRE(rendered.engagementOneBlockAfter > 0.0f);
@@ -301,12 +325,32 @@ TEST_CASE("CONTRACT: DamperFeltTime -- a note-off reaches silence in a time set 
     std::cout << "[contract] felt time -> note-off silence (MIDI 45, -60 dB relative): 20 ms -> " << lowFast
               << " s, 100 ms -> " << lowSlow << " s; ratio " << (lowSlow / lowFast) << "\n";
     REQUIRE(lowSlow > lowFast);
+
+    // WHY kRequiredRatio MOVED, measured on the same lambda at the position this default replaced.
+    // The gate above was 1.50 and is now 1.12, and the whole of that is the damper getting weaker
+    // on the fundamental: alpha = D/(k*tau) rose with 1/k and the one-pole ratio is monotone
+    // decreasing in alpha. If this stopped holding, the re-point would be an unexplained loosening
+    // rather than a consequence, and this is what would say so.
+    const double oldFast = measure(20.0f, 69, false, true, 0.15f);
+    const double oldSlow = measure(100.0f, 69, false, true, 0.15f);
+    const double newFast = measure(20.0f, 69, false);
+    const double newSlow = measure(100.0f, 69, false);
+    const double oldRatio = oldSlow / oldFast;
+    const double newRatio = newSlow / newFast;
+    std::cout << "[contract] the felt-time ratio against the damper position (MIDI 69, absolute): p = 0.15 -> "
+              << oldRatio << ", shipping p = " << StringNetworkParams{}.damperPosition01 << " -> " << newRatio
+              << " (gate " << kRequiredRatio << "); the compression is " << (oldRatio - newRatio)
+              << ", and it is the 1/k in alpha\n";
+    INFO("old ratio " << oldRatio << ", new ratio " << newRatio);
+    REQUIRE(oldRatio > newRatio);
+    REQUIRE(newRatio >= kRequiredRatio);
+    REQUIRE(oldRatio <= kOnePoleRatioCeiling * 1.02);
 }
 
 TEST_CASE("CONTRACT: DamperFeltTime -- a note-off eventually clears the string completely", "[contract]") {
     // The silence watchdog that replaced P1's release envelope. A damped string has to leave the
-    // loop, and with a POINT damper that cannot be a timer: partial 20 sits exactly on the node of
-    // the default p = 0.15 junction and rides the loop loss down on its own. So the watchdog waits
+    // loop, and with a POINT damper that cannot be a timer: partial 25 sits exactly on the node of
+    // the default p = 1/25 junction and rides the loop loss down on its own. So the watchdog waits
     // for an observation, and this pins both halves -- it does happen, and it happens only once
     // the string is genuinely inaudible.
     const NoteOffRender rendered = renderNoteOff(paramsWith(40.0f), 0.3, 3.0);
@@ -391,11 +435,11 @@ TEST_CASE("CONTRACT: DamperFeltTime -- the note-off is continuous, sample by sam
 
     // ...and the two renders really do separate afterwards, so the identity above is a property of
     // the ramp's phasing rather than of a damper that never engaged. The separation does not begin
-    // on the very next sample and should not be expected to: the junction sits at p = 0.15 and the
-    // tap reads at 0.87, so whatever the junction changes has to TRAVEL the 0.72 of a rail span
-    // between them -- ~157 samples at MIDI 45 / 48 kHz -- before the tap can see it. That
-    // propagation delay is the waveguide working, and asserting against it would be asserting that
-    // the string is instantaneous.
+    // on the very next sample and should not be expected to: the junction sits at the shipping
+    // default (1/25) and the tap reads at 0.87, so whatever the junction changes has to TRAVEL the
+    // 0.83 of a rail span between them -- ~181 samples at MIDI 45 / 48 kHz -- before the tap can
+    // see it. That propagation delay is the waveguide working, and asserting against it would be
+    // asserting that the string is instantaneous.
     std::size_t firstDifference = 0;
     for (std::size_t i = damped.noteOffSample + 1; i < damped.tap.size(); ++i) {
         if (damped.tap[i] != reference.tap[i]) {
@@ -456,12 +500,13 @@ struct ClickReadings {
 
 // Both ClickMetric readings for a damper engagement of depth `maxLoss`, plus the hard-mute
 // negative control, over the same span.
-ClickReadings measureNoteOffClick(float maxLoss, double postSeconds) {
+ClickReadings measureNoteOffClick(float maxLoss, double postSeconds,
+                                  float damperPosition01 = StringNetworkParams{}.damperPosition01) {
     constexpr double kNoteOffSeconds = 0.5;
     constexpr double kTotalSeconds = 1.5;
     constexpr double kPreSeconds = 0.25; // ringing before the change, which sets the denominator
 
-    StringNetworkParams params = paramsWith(20.0f); // the fastest legal felt: the worst case
+    StringNetworkParams params = paramsWith(20.0f, damperPosition01); // the fastest legal felt: the worst case
     params.damper.maxLoss = maxLoss;
     // Sustain material for the same documented reason the P2.1 click gate and the [tuning] sweep
     // use it: the denominator has to describe the signal AT the change, and at the default
@@ -564,24 +609,30 @@ TEST_CASE("CONTRACT: DamperFeltTime -- damper engagement passes the click metric
     // progressive level change divides out of exactly. Both are documented in
     // tests/support/ClickMetric.h.
     //
-    // WHERE THAT COMPANION STOPS DISCRIMINATING, measured rather than assumed. |dx| is a
+    // WHERE THAT COMPANION USED TO STOP DISCRIMINATING, AND WHY IT NO LONGER DOES. |dx| is a
     // frequency-weighted quantity -- a band-limited waveform's peak|dx|/peak|x| is about
     // 2*pi*f_max/fs -- and a point damper does not attenuate uniformly: it annihilates the partials
-    // with antinodes at p and leaves the ones with nodes there, which at p = 0.15 are partial 20 and
-    // up. So a fully engaged damper leaves a residue that is genuinely BRIGHTER than the note was,
-    // and the companion reads that brightness exactly as it would read a step. At the palm-mute
-    // depths the low partials are still present and it is sharp; at full depth it saturates on the
-    // residue, so the full note-off is gated by reading (b), by the structural bound on the
-    // coefficient's per-sample step (tests/dsp/DamperEnergyTests.cpp) and by the sample-by-sample
-    // continuity case above. The next case is what shows the companion has teeth where it is
-    // relied upon.
+    // with antinodes at p and leaves the ones with nodes there. At the p = 0.15 default this file
+    // was written against, the lowest node was partial 20, so a fully engaged damper left a residue
+    // that was genuinely BRIGHTER than the note had been, and the companion read that brightness
+    // exactly as it would read a step: it SATURATED at full depth, and the full note-off had to be
+    // carved out and gated by reading (b) and by the continuity case below instead.
+    //
+    // That carve-out was a symptom of the defect the damper default was later revised to fix, not a
+    // property of the metric. At the shipping p = 1/25 every partial in [2, 24] is damped HARDER
+    // than the fundamental (StringNetworkParams::damperPosition01 carries the derivation;
+    // tests/dsp/DamperReleaseSpectrumTests.cpp gates it), so the residue is DARKER than the note
+    // rather than brighter, the companion does not saturate, and the exception is gone: all three
+    // depths are gated on it. Measured at full depth: 0.0104 dB of excess against a 3 dB limit,
+    // where the same reading at p = 0.15 is 7.74 dB -- asserted below, not asserted about.
+    // The `companionDiscriminates` flag this table used to carry is gone rather than set to true
+    // everywhere: a per-row bool that is now uniformly true would be a field asserting its own
+    // initializer, which is not a test of anything.
     struct Depth {
         float maxLoss;
         const char* name;
-        bool companionDiscriminates;
     };
-    const Depth depths[] = {
-        {0.05f, "light palm mute", true}, {0.25f, "palm mute", true}, {1.0f, "full note-off", false}};
+    const Depth depths[] = {{0.05f, "light palm mute"}, {0.25f, "palm mute"}, {1.0f, "full note-off"}};
 
     for (const Depth& depth : depths) {
         const ClickReadings readings = measureNoteOffClick(depth.maxLoss, 0.12);
@@ -612,10 +663,21 @@ TEST_CASE("CONTRACT: DamperFeltTime -- damper engagement passes the click metric
         REQUIRE(readings.nonFinite == 0);
         REQUIRE(readings.subnormal == 0);
 
-        if (depth.companionDiscriminates)
-            REQUIRE(readings.levelExcessDb <= cnpg::test::kClickMetricToleranceDb);
-        else
-            REQUIRE(readings.levelExcessDb > cnpg::test::kClickMetricToleranceDb); // saturated; see above
+        // THE COMPANION, at every depth -- no carve-out any more; see the header.
+        REQUIRE(readings.levelExcessDb <= cnpg::test::kClickMetricToleranceDb);
+
+        // ...AND THE CARVE-OUT REALLY WAS THE DEFECT AND NOT THE METRIC, measured on the same
+        // function at the position this default replaced. p = 0.15 leaves partial 20 exactly
+        // undamped, the residue is brighter than the note, and the companion saturates on it --
+        // which is the reading that forced the full note-off to be excluded here until now. If
+        // this ever stopped failing, the paragraph in this case's header would be a story.
+        if (depth.maxLoss == 1.0f) {
+            const ClickReadings atOldDefault = measureNoteOffClick(depth.maxLoss, 0.12, 0.15f);
+            std::cout << "[contract] ...and at the p = 0.15 default this replaced, the same reading is "
+                      << "SATURATED at " << atOldDefault.levelExcessDb << " dB, on a residue brighter than the note\n";
+            INFO("p = 0.15 companion reading " << atOldDefault.levelExcessDb << " dB");
+            REQUIRE(atOldDefault.levelExcessDb > cnpg::test::kClickMetricToleranceDb);
+        }
     }
 }
 
@@ -638,7 +700,13 @@ TEST_CASE("CONTRACT: DamperFeltTime -- the level-normalised reading catches a st
     constexpr float kMaxLoss = 0.25f; // palm-mute depth, where the companion discriminates
     constexpr double kBlindSpotDropDb = -30.0;
     constexpr double kNoteOffSeconds = 0.5;
-    constexpr double kTotalSeconds = 1.5;
+    // 4.0 s rather than 1.5, and it is the damper-position revision that needed it rather than
+    // slack: the step is placed by LEVEL, at the first moment the felt has taken the note 30 dB
+    // down, and at p = 1/25 with a palm-mute depth on sustain material that moment arrives at
+    // ~1.13 s instead of ~0.35 s (coupling to the fundamental is sin^2(pi*p), 13.1x weaker than at
+    // 0.15). At 1.5 s total the search ran off the end of the render and secondsUntilBelow returned
+    // -1, which is the level-placement rule failing closed exactly as it should.
+    constexpr double kTotalSeconds = 4.0;
     constexpr double kPreSeconds = 0.25;
 
     StringNetworkParams params = paramsWith(20.0f);
@@ -689,12 +757,29 @@ TEST_CASE("CONTRACT: DamperFeltTime -- the level-normalised reading catches a st
     const double steppedExcessDb = cnpg::test::clickExcessDb(steppedMeasurement, referenceMeasurement);
     const double dampedLevelDb = cnpg::test::clickExcessAgainstLevelDb(dampedAfter, referenceAfter);
     const double steppedLevelDb = cnpg::test::clickExcessAgainstLevelDb(steppedAfter, referenceAfter);
+    // THE READING THE DAMPER-POSITION REVISION MADE NECESSARY, and it is the one ClickMetric.h's own
+    // convention asks for: the perturbed render against THE SAME RENDER WITHOUT THE PERTURBATION.
+    //
+    // Both readings above use the UNDAMPED note as their denominator, which was fair while the
+    // default sat at p = 0.15: the damped residue there was as bright as the note, so the damped
+    // render's own level-normalised reading sat near 0 dB and a 6 dB step pushed it straight
+    // through the 3 dB criterion (25.73 dB, the P2.2 figure). At the shipping p = 1/25 the residue
+    // is DARKER than the note -- every partial in [2, 24] is damped harder than the fundamental --
+    // so the damped render now reads -24.16 dB against that denominator, i.e. it starts 24 dB of
+    // slack below the criterion, and the same 6 dB step lands at 1.22 dB and would NOT trip it.
+    //
+    // That is a property of the denominator, not of the step or of the metric: the step's own
+    // effect is 25.38 dB, unchanged. So the gated reading moves to the denominator that isolates
+    // the perturbation, and the against-the-undamped-note pair stays printed and stays asserted for
+    // what it still shows -- that reading (b) is blind and that the un-stepped render is fair.
+    const double steppedAgainstDampedDb = cnpg::test::clickExcessAgainstLevelDb(steppedAfter, dampedAfter);
 
     std::cout << "[contract] blind-spot demonstration (maxLoss " << kMaxLoss << ", 6 dB step at " << secondsToTarget
               << " s after the note-off, where the damper has taken " << kBlindSpotDropDb
               << " dB out): reading (b) damped " << dampedExcessDb << " dB -> stepped " << steppedExcessDb
               << " dB (MISSED, limit " << cnpg::test::kClickMetricToleranceDb << "); level-normalised damped "
-              << dampedLevelDb << " dB -> stepped " << steppedLevelDb << " dB (CAUGHT)\n";
+              << dampedLevelDb << " dB -> stepped " << steppedLevelDb << " dB against the undamped note, and "
+              << steppedAgainstDampedDb << " dB against the un-stepped damped render (CAUGHT)\n";
 
     INFO("(b): " << dampedExcessDb << " -> " << steppedExcessDb << " dB; level: " << dampedLevelDb << " -> "
                  << steppedLevelDb << " dB");
@@ -707,9 +792,17 @@ TEST_CASE("CONTRACT: DamperFeltTime -- the level-normalised reading catches a st
     // THE BLIND SPOT, measured: reading (b) does not merely pass the step, it barely notices it.
     REQUIRE(steppedExcessDb <= cnpg::test::kClickMetricToleranceDb);
 
-    // THE COMPANION EARNING ITS PLACE: the same step, on the same render, over the same span.
-    REQUIRE(steppedLevelDb > cnpg::test::kClickMetricToleranceDb);
-    REQUIRE(steppedLevelDb > dampedLevelDb + 10.0);
+    // THE COMPANION EARNING ITS PLACE: the same step, on the same render, over the same span,
+    // against the un-stepped damped render -- which is what isolates the perturbation. Reading (b)
+    // over exactly that pair is blind (asserted above); this one clears the criterion by 22 dB.
+    REQUIRE(steppedAgainstDampedDb > cnpg::test::kClickMetricToleranceDb);
+    // ...and it is not the criterion being generous: the step moves it by more than 20 dB.
+    REQUIRE(steppedAgainstDampedDb > 20.0);
+    // The against-the-undamped-note reading responds to the step by the same order, which is what
+    // says the 24 dB of slack described above is a shift of the baseline and not a loss of
+    // sensitivity. Only the ABSOLUTE crossing of the 3 dB criterion moved, and the assertion that
+    // used to depend on it is the one that moved with it.
+    REQUIRE(steppedLevelDb > dampedLevelDb + 20.0);
 }
 
 // ---------------------------------------------------------------------------------------------

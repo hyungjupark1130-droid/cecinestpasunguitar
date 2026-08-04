@@ -111,8 +111,9 @@ struct DamperJunctionParams {
     // per-sample smooths toward it. StringNetwork mirrors its own
     // StringNetworkParams::damperPosition01 into this field (docs/plan.md section 2.7), so on the
     // network's surface that one is the single source of truth and this is the one validation point
-    // the network's smoother then sits downstream of.
-    float position01 = 0.15f;
+    // the network's smoother then sits downstream of. The value here MIRRORS
+    // StringNetworkParams::damperPosition01, whose comment carries the derivation of 1/25.
+    float position01 = 0.04f;
 
     // Loss depth when fully engaged, 0..1. 1 is the matched resistive termination (see above):
     // the deepest loss a point contact can produce, not an arbitrary maximum.
@@ -222,7 +223,7 @@ template <typename SampleT> class DamperJunction {
 
     double sampleRate_ = 44100.0;
 
-    float position01_ = 0.15f;
+    float position01_ = 0.04f;
     float feltTimeConstantMs_ = 40.0f; // the VALIDATED value, not the raw parameter
 
     double engagement_ = 0.0;       // the ramp's current value, 0..1
