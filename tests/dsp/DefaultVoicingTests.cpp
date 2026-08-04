@@ -514,18 +514,17 @@ TEST_CASE("REPORT: voicing -- what the criterion costs in loudness", "[.][report
         const cnpg::test::Spectrum s = cnpg::test::computeSpectrum(sustain, kRate, 65536);
         auto band = [&](double lo, double hi) {
             double sum = 0.0;
-            for (auto b = static_cast<std::size_t>(s.hzToBin(lo)); b <= static_cast<std::size_t>(s.hzToBin(hi)) &&
-                                                                   b < s.magnitudeSquared.size();
-                 ++b)
+            for (auto b = static_cast<std::size_t>(s.hzToBin(lo));
+                 b <= static_cast<std::size_t>(s.hzToBin(hi)) && b < s.magnitudeSquared.size(); ++b)
                 sum += s.magnitudeSquared[b];
             return sum > 0.0 ? 10.0 * std::log10(sum) : -300.0;
         };
-        const double fundLoss = 20.0 * std::log10(std::sin(3.14159265358979323846 * g.de) *
-                                                  std::sin(3.14159265358979323846 * g.dp));
+        const double fundLoss =
+            20.0 * std::log10(std::sin(3.14159265358979323846 * g.de) * std::sin(3.14159265358979323846 * g.dp));
         const Rendered one = render(p, {{0, 0, 40, 0.8f}}, 3.0, 1);
         std::cout << g.label << std::setw(10) << fundLoss << std::setw(9) << band(80.0, 200.0) << std::setw(9)
-                  << band(200.0, 500.0) << std::setw(10) << band(500.0, 1500.0) << std::setw(9)
-                  << band(1500.0, 4000.0) << std::setw(12) << peakDbfs(r.out) << std::setw(14)
+                  << band(200.0, 500.0) << std::setw(10) << band(500.0, 1500.0) << std::setw(9) << band(1500.0, 4000.0)
+                  << std::setw(12) << peakDbfs(r.out) << std::setw(14)
                   << worstEvenPartialDeficitDb(one.out, cnpg::test::midiNoteToHz(40)) << "\n";
     }
 }

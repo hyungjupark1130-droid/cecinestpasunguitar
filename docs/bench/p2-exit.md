@@ -834,7 +834,7 @@ stays at 0.5 / 0.5 / 0.0; both are argued with measurements in the task note rat
 | **Peak level and headroom** | **unchanged.** Single string MIDI 45 at velocity 1.0 stays inside the −18 dBFS ±1 dB gate; a six-string open chord at velocity 1.0 peaks −11.36 dBFS, **11.06 dB under the limiter ceiling**. |
 | **Calibration rate-independence** | `kNominalPickupTrimDb`'s three-rate spread widens from **0.08 dB to 0.844 dB**, because a near-bridge tap weights the upper partials and those are the rate-sensitive ones. The constant is now a compromise across rates rather than a measurement that agreed three times. |
 | **Corpus** | every phrase moved; worst RMS move **−8.78 dB** (`02_open_chords`), worst peak move **−5.68 dB** (`01_chromatic_singles`). |
-| **Goldens** | **did not move.** `worst |golden diff| 0` on both layers, because `StringIrScenarios` pins its own geometry (pluck 0.28, tap 0.87, noise 0.25) and never reads these defaults. |
+| **Goldens** | **did not move.** Worst \|golden diff\| **0** on both layers, because `StringIrScenarios` pins its own geometry (pluck 0.28, tap 0.87, noise 0.25) and never reads these defaults. |
 
 ### Three `[contract]` gates now hold it, each shown RED at 0.5 / 0.5 in its own body
 

@@ -30,7 +30,8 @@ namespace cnpg::dsp {
 //
 // That is where this default sat through P2.9, and the pickup tap sat there too, so the two combs
 // COINCIDED and every null was squared. Measured on the low open E through the shipping chain, the
-// even partials came out 43 to 64 dB below their odd neighbours: an odd-harmonic-only spectrum,
+// even partials 2/4/6/8/10 came out 48.9 / 43.1 / 48.1 / 43.5 / 63.9 dB below the loudest partial
+// in the note, i.e. 39 to 49 dB below their own odd neighbours: an odd-harmonic-only spectrum,
 // which is a clarinet, not a guitar. docs/listening/physical-plausibility-checklist.md item 7
 // already names the pathology -- "near-middle plucks are hollow, with suppressed even harmonics" --
 // and the shipped default WAS the near-middle pluck.

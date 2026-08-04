@@ -149,7 +149,7 @@ inline constexpr double kSynthFadeSeconds = 0.002;
 // exactly {b, 2b, 3b, ...}. d = 1/2 is therefore the worst point on the whole slider -- onset 2,
 // density 1/2 -- and it is where this default sat through P2.9, coincident with the exciter's, so
 // the two combs multiplied into a single squared null on every even partial. Measured through the
-// shipping chain at the low open E, partials 2/4/6/8 came out 43 / 43 / 48 / 44 dB below the loudest
+// shipping chain at the low open E, partials 2/4/6/8 came out 48.9 / 43.1 / 48.1 / 43.5 dB below the loudest
 // partial. Half the harmonic series was not attenuated; it was absent.
 //
 // A pickup comb is CHARACTERISTIC and is not the defect -- it is most of what distinguishes one
