@@ -133,7 +133,7 @@ Release renderRelease(float damperPosition01, int midiNote = kMidiC3, double not
     params.damper.feltTimeConstantMs = 40.0f;
     params.exciter.noiseAmount = 0.0f; // a deterministic partial spectrum to measure
     // DECOUPLED, for the reason DamperFeltTimeTests states at the same seam: every claim in this
-    // file is about ONE STRING's release, and couplingStrength = 0.35 is PROVISIONAL, so no number
+    // file is about ONE STRING's release, and couplingStrength is still unconfirmed by ear, so no number
     // here may be derived from it in a way that breaks when it moves.
     params.bridge.couplingStrength = 0.0f;
 

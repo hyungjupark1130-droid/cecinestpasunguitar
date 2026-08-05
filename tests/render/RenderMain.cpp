@@ -1641,8 +1641,11 @@ constexpr RenderVariant kRenderVariants[] = {
     //   0.30  where the two string materials DISAGREE: 0.003 cents at the sustain material,
     //         25.14 cents at the default one. The most informative single point in the set.
     //   0.32  the highest DEFAULT-material value measured not to lock (25.18 cents).
-    //   0.35  the provisional default, which locks at both materials (0.33 cents at the default
-    //         material, a +24.67-cent pull).
+    //   0.35  the value that shipped as the default through 2026-08-04, which locks at both
+    //         materials (0.33 cents at the default material, a +24.67-cent pull). It is ALSO
+    //         kBridgeNormalCouplingMax, and it is no longer the default: on 2026-08-05 the default
+    //         moved to 0.20 -- the 0.20 rung above -- by author delegation (ADR 0007 D7.2). The
+    //         ladder is unchanged, because what it exists to compare is the slider, not the default.
     {"02_open_chords.mid",
      "coupling000",
      "coupling 0.00 -- the decoupled control",
@@ -1666,7 +1669,7 @@ constexpr RenderVariant kRenderVariants[] = {
      {{"bridgeCoupling", 0.32}}},
     {"02_open_chords.mid",
      "coupling035",
-     "coupling 0.35 -- the PROVISIONAL default; locks at both materials",
+     "coupling 0.35 -- the Normal-range ceiling and the pre-2026-08-05 default; locks at both materials",
      nullptr,
      {{"bridgeCoupling", 0.35}}},
 

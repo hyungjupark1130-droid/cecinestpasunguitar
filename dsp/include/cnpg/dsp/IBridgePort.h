@@ -44,7 +44,45 @@ struct BridgeAdmittanceParams { // tunable positive-real 2nd-order load (P2.4)
     // -feed feature would be disabled by a default rather than by a decision. The value is
     // measured, not guessed -- see the ADR for the sympathetic-response, beat-rate, T60 and
     // tuning-shift numbers behind it.
-    float couplingStrength = 0.35f;
+    //
+    // ---- 0.35 -> 0.20, AND HOW THIS WAS SETTLED ------------------------------------------------
+    //
+    // *** SETTLED BY AUTHOR DELEGATION ON 2026-08-05. NOT SETTLED BY EAR. *** ADR 0007 D4 reserves
+    // this value for a recorded listening sign-off and reserved it across three separate rulings.
+    // THAT SIGN-OFF WAS NEVER PERFORMED: docs/listening/P2-20260803.md is still marked NOT
+    // PERFORMED with every verdict field blank, and nothing here fills it. D4's condition was
+    // WAIVED, not met, and the distinction is the point of this paragraph -- a later reader must
+    // not be able to mistake this for a value an ear confirmed.
+    //
+    // WHAT THE MEASUREMENT SAYS, which is why 0.20 and not some other waiver. ADR 0007 D5's
+    // criterion (4) is that near-unison strings ~25 cents apart must not involuntarily mode-lock,
+    // and it is measured on two topologies:
+    //
+    //   isolated pair, MIDI 45, +25 cents on one string (D7.0): separation 25.045 cents at 0.20 and
+    //     25.099 at 0.25, then 0.003 cents at 0.30 and 0.35 -- a total collapse, with the whole
+    //     25 cents landing as a +25.0-cent pull on the string NOBODY detuned;
+    //   shipping six strings on one bridge (D7.1): the detuned partner is absorbed progressively
+    //     -- -0.3 dB at 0.00, -1.8 at 0.10, -6.8 at 0.20 -- and is GONE at 0.30 and above.
+    //     Separation 23.612 cents at 0.20; ONE PEAK at 0.30.
+    //
+    // 0.20 is the LARGEST MEASURED POINT at which criterion (4) holds on the topology that ships.
+    // It is not an interpolation: the boundary lies somewhere in (0.20, 0.30) and no point inside
+    // that interval has been measured on six strings, so the value is placed at the last reading
+    // that passes rather than at a guessed edge. The margin is therefore ZERO in the only direction
+    // that matters, and D7.1's own question -- whether a partner 6.8 dB down is still the chord
+    // that was played -- is still a listening question and is still unanswered.
+    //
+    // WHAT IT COSTS. Coupling IS the mechanism of sympathetic resonance: less of it means less of
+    // one string in the others, and it is the feed ADR 0004's later body/chamber rides on. What it
+    // buys back, measured: on a six-C3 unison stack the 1-3 s tail is 8.3 dB LOUDER at 0.20 than at
+    // 0.35 (-80.4 vs -88.7 dBFS), and ADR 0006's beat depth runs the same way (10.08 dB at 0.10
+    // against 3.59 at 0.35), so on the evidence that exists the sympathetic character does not
+    // obviously degrade here. That is one measurement of one phenomenon and it is not the ear.
+    //
+    // THE DECLARED NORMAL RANGE IS NOT MOVED BY THIS. kBridgeNormalCouplingMax stays at 0.35: it is
+    // the criterion-(1) (+/-2 cent tuning) boundary, it is still measured to hold there, and ADR
+    // 0007 D7/D7.0 now record what this default's move does and does not change about it.
+    float couplingStrength = 0.20f;
 };
 
 static_assert(std::is_trivially_copyable_v<BridgeAdmittanceParams>,

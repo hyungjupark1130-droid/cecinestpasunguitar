@@ -180,8 +180,71 @@ inline constexpr double kSynthFadeSeconds = 0.002;
 // its octave is not a guitar note while a note with a weak fundamental is one every electric
 // guitarist has played. What it does NOT cost is the gain staging: the six-string open chord at the
 // default velocity still peaks 10.4 dB under the limiter ceiling. It DOES move the -18 dBFS
-// per-string calibration by 0.1 to 0.96 dB depending on sample rate, so kNominalPickupTrimDb was
-// re-derived from the same measurement that defines it -- 24.8 -> 25.3 dB, PickupTap.h.
+// per-string calibration, so kNominalPickupTrimDb is re-derived from the same measurement that
+// defines it whenever this value or the bridge coupling moves -- PickupTap.h.
+//
+// ---- 1/7 WAS PROPOSED AND IS REFUSED, ON MEASUREMENT (2026-08-05) ------------------------------
+//
+// The previous derivation named 1 - 1/7 = 0.857143 as "the fullest position that still clears the
+// criterion" and offered it as a one-line diff. IT DOES NOT CLEAR THE CRITERION IN THIS MODEL, and
+// the reason is a property of the waveguide rather than of the arithmetic.
+//
+// *** onset = 1/d IS A CONTINUOUS-STRING IDENTITY. THE REALISED ONSET IS LOWER. *** The tap is read
+// at delay `1.0 + position01 * positionSpan_` (WaveguideString.h), and positionSpan_ is ONE RAIL's
+// realized span -- it excludes the loss, dispersion, seam and bridge phase delays, which are part
+// of the acoustic loop but not of the rail. So the tap's acoustic distance from the bridge is
+// (1 + (1 - p)*S) samples out of a half-loop of (S + tau/2), not (1 - p) of it. The discrepancy is
+// an ABSOLUTE offset of about one sample, so it is a larger FRACTION of a shorter loop: it grows
+// toward the top of the register and toward the LOWEST supported sample rate.
+//
+// Closed form for what actually comes out, with S = positionSpan_ and L the loop length:
+//
+//     onset_realised  =  (L/2) / (1 + d*S)          instead of   1/d
+//
+// The worst point over the six default open strings is the SHORTEST loop at the LOWEST supported
+// rate -- MIDI 64 (E4) at 44.1 kHz, L = 133.79 samples -- and there it reads (S = 66.4, i.e. tau
+// ~ 1 sample; the numbers below move by under 0.1 across tau in [0.5, 2], so nothing here rests on
+// knowing tau exactly):
+//
+//     d       nominal onset   tap distance    REALISED onset
+//     1/7          7           10.49 samples      6.38   <-- INSIDE the band. This is the defect.
+//     1/7.5        7.5          9.85              6.79   <-- still inside
+//     1/8          8            9.30              7.19   <-- clears
+//     1/9          9            8.38              7.99
+//     1/16        16            5.15             12.99
+//
+// so the criterion onset_realised >= 7 becomes d <= 0.1289 = 1/7.76 rather than d <= 1/7. At 1/16
+// the offset costs three whole partials of onset and nothing notices, because the margin is ten. At
+// 1/7 the margin is zero by construction and the same offset puts the realised null ON PARTIAL 6 --
+// inside the identity band the criterion exists to protect.
+//
+// *** THE CLOSED FORM PREDICTS THE MEASURED BOUNDARY. *** It says the last admissible tap is near
+// 1/7.76; the render sweep says 1/7.5 still fails and 1/8 is clean. Measured, six open strings,
+// worst even-partial deficit (tests/dsp/DefaultVoicingTests.cpp, "the realised comb onset"):
+//
+//     tap        chain 48 kHz         raw tap 44.1 / 48 / 96 kHz
+//     1/7        21.72 dB (MIDI 59)   24.77 / 21.51 /  5.58     <-- FAILS the 18 dB [contract] gate
+//     1/7.5       5.13                18.76 /  5.38 /  5.78     <-- fails at 44.1 kHz only
+//     1/8         5.29                 6.23 /  5.54 /  5.91     <-- clean at every rate
+//     1/16        5.78                 6.74 /  6.03 /  6.32
+//
+// The rate dependence is what proves the attribution: the closed-form comb contains no sample rate,
+// so a reading that changes by 16 dB between 44.1 and 96 kHz is the discretisation and can be
+// nothing else.
+//
+// *** THE MEASUREMENT SUPPORTS 1/8, NOT 1/7, AND 1/8 IS NOT TAKEN HERE. *** 1/8 is the largest tap
+// distance clean at all three rates and would return 20*log10(sin(pi/8)/sin(pi/16)) = 5.85 dB of the
+// 6.94 dB fundamental that 1/7 was wanted for. It is a one-line change and it is the AUTHOR'S to
+// make: this task was asked to move the tap to a specific value, that value is not admissible, and
+// substituting a different number would be choosing the instrument's voice rather than refusing an
+// inadmissible one. The diff, for whoever takes it:
+//
+//     inline constexpr float kDefaultTapDistanceFromBridge01 = 1.0f / 8.0f;
+//
+// THE GENERAL LESSON, which outlives this value: the criterion needs a MARGIN OF ABOUT ONE PARTIAL
+// in this model, not zero. PluckExciter.h reached that conclusion independently for the pluck when
+// it declined the zero-margin 1/7 in favour of 1/9 -- which is why the pluck default is untouched
+// by any of this, and why its margin was worth what it cost.
 //
 // Written as a distance from the BRIDGE and subtracted: sin^2 is symmetric about 0.5 so 1 - 1/16
 // and 1/16 are acoustically near-identical (near-identical, not identical -- the bridge is
@@ -195,7 +258,8 @@ struct StringNetworkParams {
                                      // parameter -- the plugin drives it from the MIDI pitch
                                      // wheel via pitchWheelToSemitones() (MidiTranslation.h)
     // Tap position, 0 = nut, 1 = bridge; continuously modulatable while ringing. See the derivation
-    // immediately above this struct for where 1/16 comes from and what it cost.
+    // immediately above this struct for where 1/16 comes from, what it cost, and why the proposed
+    // move to 1/7 was refused on measurement.
     float pickupPosition01 = 1.0f - kDefaultTapDistanceFromBridge01;
 
     // Junction position, 0 = nut, 1 = bridge. Continuously modulatable while a note rings from
@@ -325,8 +389,22 @@ static_assert(std::is_trivially_copyable_v<StringNetworkParams>,
 // What is asserted here instead is the property the default was MOVED for, which nothing else in
 // the header would catch: the tap must not sit close enough to a termination's mirror point to null
 // a partial the instrument's identity depends on. It is not a gate that only passes -- at the value
-// this replaced, d = 1/2, the left-hand side is exactly 2.
-static_assert(1.0f / kDefaultTapDistanceFromBridge01 >= 7.0f,
+// this replaced, d = 1/2, the left-hand side is 0.5 against a limit of 0.142857.
+//
+// *** STATED AS d <= 1/7, NOT AS 1/d >= 7, AND THE FORM IS LOAD-BEARING. *** The two are the same
+// criterion over the reals and they are NOT the same predicate in float32. This assertion previously
+// read `1.0f / kDefaultTapDistanceFromBridge01 >= 7.0f`, and at d = 1.0f/7.0f -- the exact boundary,
+// which is the value a later task will reach for -- that expression evaluates to 6.99999952f and the
+// assertion FAILS TO COMPILE. float(1/7) rounds UP (0.14285714924...), so its float reciprocal
+// rounds DOWN through 7. The old form therefore rejected the boundary value for a floating-point
+// reason rather than a physical one; the form below compares the constant against the same
+// expression that defines the limit and is exact at equality.
+//
+// THIS ASSERTION IS NECESSARY AND NOT SUFFICIENT, and the derivation above says why: it holds the
+// CONTINUOUS-STRING onset, and the onset this waveguide REALISES is lower by about one sample of
+// tap distance. The rendered gate in tests/dsp/DefaultVoicingTests.cpp is what holds the realised
+// one, and it is the gate that caught 1/7.
+static_assert(kDefaultTapDistanceFromBridge01 <= 1.0f / 7.0f,
               "The default pickup tap must not null a partial in [2, 6] -- the partials that spell "
               "the intervals the instrument plays. See the derivation above StringNetworkParams.");
 

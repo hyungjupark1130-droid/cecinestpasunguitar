@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
-  "dspSourceSha256": "57f7b7253b17cce13ab565473fb03a147ad1cdbe07340db0c827ebbd76adda52",
-  "generatedUtc": "2026-08-02T01:28:53Z",
+  "dspSourceSha256": "36f129e65b7476693b1b75874dec891ed10c4f5f8666557730026591aba6540e",
+  "generatedUtc": "2026-08-05T05:39:24Z",
   "dspStateVersion": 1,
   "sampleRate": 44100,
   "variant": "thiran1",
@@ -15,8 +15,8 @@
   "lengthSamples": 132300,
   "atol": 1.0e-07,
   "partialHz": [0, 0, 0, 0, 0, 0, 0, 0],
-  "bandT60Seconds": [2.3673274, 1.6792455, 1.24291, 1.6036084, 1.8922364, 1.8436071, 1.3988082, 0.89069248],
-  "attackRmsDbfs": -24.951916,
+  "bandT60Seconds": [2.6306762, 1.9437893, 1.521285, 1.8090405, 1.9991505, 1.8270642, 1.3333549, 0.87337977],
+  "attackRmsDbfs": -24.416051,
   "bridgeBandT60Seconds": [],
   "bridgeAttackRmsDbfs": -300,
   "bridgeChecksum": ""

@@ -133,6 +133,15 @@ std::size_t analysisLengthFor(double sampleRate) {
 // would pre-empt that session. See ADR 0007 D7.0 for the table, and
 // tests/dsp/StringNetworkScaleTests.cpp for the standing gate that measures the lock.
 //
+// *** SINCE 2026-08-05 THE DEFAULT IS NO LONGER AT THIS CEILING (ADR 0007 D7.2). *** It moved to
+// 0.20 -- the largest value at which criterion (4) is measured to hold on the shipping six-string
+// topology -- by AUTHOR DELEGATION rather than by the listening pass D4 reserves, which is still not
+// performed. The shipped instrument therefore now sits where all four MEASURABLE criteria hold, and
+// the interval between the default and this ceiling IS the failing region. Two consequences for this
+// file: the "shipping default is inside the range" assertion below has stopped being a near-identity
+// and now carries real information, and the grid's SHIPPING point and its coupled corners measure
+// two genuinely different couplings instead of the same one twice.
+//
 // *** THE COUPLING CEILING IS A MEASURED BOUNDARY THAT HAPPENS TO COINCIDE WITH THE PROVISIONAL
 // DEFAULT, NOT THE DEFAULT WEARING A DIFFERENT HAT. *** It is written as a literal here, never as
 // BridgeAdmittanceParams{}.couplingStrength, precisely so the two can be seen to move independently:

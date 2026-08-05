@@ -845,12 +845,14 @@ TEST_CASE("CONTRACT: a fresh attack on a sympathetically ringing string truncate
     // *** THAT NUMBER IS PRINTED AND NO LONGER ASSERTED, AND THE DEMOTION IS DELIBERATE. *** The
     // assertion was `REQUIRE(truncatedDbfs > kP24SympatheticPeakDbfs)`, and it was wrong twice over:
     //
-    //   1. -53.5 dBFS is DERIVED FROM couplingStrength = 0.35, and ADR 0007 D4 makes that default
+    //   1. -53.5 dBFS is DERIVED FROM couplingStrength = 0.35, and ADR 0007 D4 made that default
     //      PROVISIONAL pending the P2.8 listening pass -- it is confirmed or replaced by ear, and
     //      lower values are explicitly on the table. truncatedDbfs scales with coupling too, so a
     //      test comparing one number derived from 0.35 against another derived from 0.35 breaks the
     //      moment the default moves, in a task that has nothing to do with retrigger semantics. No
     //      gate in this suite may depend on that constant in a way that a change to it turns red.
+    //      *** THE DEFAULT DID MOVE, 0.35 -> 0.20 on 2026-08-05 (ADR 0007 D7.2), AND THIS CASE DID
+    //      NOT NOTICE -- which is the demotion being right rather than lucky. ***
     //   2. Worse, the assertion was ABOUT the deferred rest-pitch finding below rather than about
     //      anything this case gates. The excess exists BECAUSE an untouched string still rests at
     //      MIDI 21. Fixing that -- which is P2.7's job, scheduled below -- drops truncatedDbfs well

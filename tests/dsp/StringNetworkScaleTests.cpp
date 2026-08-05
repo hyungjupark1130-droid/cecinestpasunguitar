@@ -442,14 +442,21 @@ TEST_CASE("TUNING: a per-string tuning offset detunes exactly one string of a un
     //
     // MEASURED WITH THE BRIDGE DECOUPLED, and that is a statement about what the criterion means
     // rather than a convenience (Task P2.4). "String 1's f0" is a well-posed quantity only while
-    // the strings are independent oscillators. Once the bridge couples them they are ONE system
-    // with two normal modes, both of which appear in BOTH taps, and the estimator -- which returns
-    // the strongest peak in its window -- then reports the same frequency for both channels
-    // whatever the per-string offset is. Measured at the shipping default that is exactly what
-    // happens: both taps read 111.30 Hz for a pair nominally at 110.00 and 111.60. Nothing is
-    // broken there; the criterion's question has simply stopped being about one string. The
-    // coupled behaviour is measured on its own terms in tests/dsp/CoupledStringsTests.cpp (beating,
-    // sympathetic response, two-stage decay) and reported at the end of this case.
+    // the strings are independent oscillators. Once the bridge couples them strongly they are ONE
+    // system with two normal modes, both of which appear in BOTH taps, and the estimator -- which
+    // returns the strongest peak in its window -- then reports the same frequency for both channels
+    // whatever the per-string offset is. Above the coupling boundary measured at the end of this
+    // case that is exactly what happens: both taps read one frequency for a pair nominally at
+    // 110.00 and 111.60. Nothing is broken there; the criterion's question has simply stopped being
+    // about one string, which is why the gate itself runs decoupled and stays a statement about the
+    // per-string offset. The coupled behaviour is measured on its own terms in
+    // tests/dsp/CoupledStringsTests.cpp (beating, sympathetic response, two-stage decay) and the
+    // boundary between the two regimes is gated at the end of this case.
+    //
+    // NOTE FOR ANYONE READING THE SHIPPING DEFAULT INTO THIS: since 2026-08-05 the shipping
+    // couplingStrength is BELOW that boundary, so the shipping instrument does NOT mode-lock a
+    // 25-cent pair. The locked regime is still reachable -- Bridge Coupling is a full 0..1 slider --
+    // and is still gated below.
     constexpr int kMidiNote = 45;
     constexpr float kOffsetCents = 25.0f;
     constexpr double kToleranceCents = 2.0;
@@ -521,58 +528,130 @@ TEST_CASE("TUNING: a per-string tuning offset detunes exactly one string of a un
     INFO("unoffset string measured " << plainErrorCents << " cents from nominal");
     REQUIRE(std::fabs(plainErrorCents) <= kToleranceCents);
 
-    // REPORTED, not gated: the same render at the shipping coupling, so the note at the top of this
-    // case is a measurement rather than an assertion about something nobody looked at.
-    StringNetworkParams coupledParams = params;
-    coupledParams.bridge.couplingStrength = StringNetworkParams{}.bridge.couplingStrength;
-    StringNetwork<float> coupled;
-    configure(coupled, coupledParams, 2);
-    BlockEventQueue coupledEvents;
-    coupledEvents.push(noteOn(0, kMidiNote, 0));
-    coupledEvents.push(noteOn(0, kMidiNote, 1));
-    std::vector<double> coupledA;
-    std::vector<double> coupledB;
-    std::size_t coupledRendered = 0;
-    while (coupledRendered < totalSamples && coupledA.size() < kAnalysisLength) {
-        coupled.process(coupledEvents, kBlock);
-        const float* a = coupled.tapBuffers().channel(0, 0);
-        const float* b = coupled.tapBuffers().channel(1, 0);
-        for (int n = 0; n < kBlock; ++n, ++coupledRendered) {
-            if (coupledRendered < discard || coupledA.size() >= kAnalysisLength)
-                continue;
-            coupledA.push_back(static_cast<double>(a[n]));
-            coupledB.push_back(static_cast<double>(b[n]));
-        }
-    }
-    const double coupledAHz = cnpg::test::findPeakHz(cnpg::test::computeSpectrum(coupledA, kRate, kAnalysisLength),
-                                                     nominalHz, cnpg::test::kTuningSearchCents);
-    const double coupledBHz = cnpg::test::findPeakHz(cnpg::test::computeSpectrum(coupledB, kRate, kAnalysisLength),
-                                                     detunedNominalHz, cnpg::test::kTuningSearchCents);
-    std::cout << "[tuning] the same pair at the shipping couplingStrength " << coupledParams.bridge.couplingStrength
-              << ": string 0 tap peaks at " << coupledAHz << " Hz, string 1 tap at " << coupledBHz << " Hz (nominals "
-              << nominalHz << " / " << detunedNominalHz
-              << ") -- one coupled system with shared normal modes, which is why the gate above runs decoupled\n";
-    REQUIRE(coupledAHz > 0.0);
-    REQUIRE(coupledBHz > 0.0);
+    // ---- MODE LOCKING: A BOUNDARY, NOT A DEFAULT ------------------------------------------------
+    //
+    // This block used to render ONE arm -- the shipping couplingStrength -- and assert that it
+    // locked. That was a gate on a VALUE: it said "the number currently in
+    // BridgeAdmittanceParams{} produces a lock", and it went vacuous the moment the number moved.
+    // It moved on 2026-08-05 (0.35 -> 0.20, ADR 0007 D4 by author delegation), and at 0.20 there is
+    // no lock left to assert -- the pair keeps its full 25 cents. Deleting the case would have
+    // deleted the only standing measurement of ADR 0007 D5's criterion (4); weakening it would have
+    // left a gate that cannot fail.
+    //
+    // What is gated instead is the PHYSICAL FACT the value was chosen against: there is a coupling
+    // BOUNDARY, the pair separates below it and locks above it, and the shipping default is on the
+    // separated side of it. Both sides are MEASURED, by the same code, on the same render protocol,
+    // in this case -- so each arm is the other's RED and the discrimination is demonstrated rather
+    // than asserted. That survives the default moving again, which is the whole point.
+    //
+    // The two probe values are LITERALS and are deliberately not read from the parameter struct:
+    // they bracket the boundary D7.0 measured on this exact topology (separation 25.099 cents at
+    // 0.25, 0.003 cents at 0.30), and a probe that tracked the default would stop being a probe.
+    // The default's relationship to them is a separate, arithmetic assertion.
+    constexpr float kSeparatedCoupling = 0.25f; // below the boundary: the pair must survive
+    constexpr float kLockedCoupling = 0.30f;    // above it: the pair must collapse
+    constexpr double kMinSurvivingSeparation = 0.8 * static_cast<double>(kOffsetCents);
+    constexpr double kLockedSeparation = 0.5 * static_cast<double>(kOffsetCents);
 
-    // MODE LOCKING, as a measured and gated fact rather than an anecdote (P2.4 review). Two strings
-    // 25 cents apart on a shared bridge PULL TOGETHER -- the other half of Weinreich's result -- so
-    // both taps report one frequency between the two nominals, and the string that was NOT offset is
-    // dragged off its own nominal by far more than the whole decoupled error budget. That is the
-    // part a player would notice, and it is why this is a listening question and not only a number.
-    const double pullOnPlain = cnpg::test::centsBetween(coupledAHz, nominalHz);
-    const double pullOnDetuned = cnpg::test::centsBetween(coupledBHz, detunedNominalHz);
-    const double coupledSeparation = cnpg::test::centsBetween(coupledBHz, coupledAHz);
-    std::cout << "[tuning] MODE LOCKING at couplingStrength " << coupledParams.bridge.couplingStrength
-              << ": the unoffset string is pulled " << pullOnPlain << " cents off its nominal, the offset one "
-              << pullOnDetuned << " cents off its own; measured separation " << coupledSeparation << " cents against "
-              << kOffsetCents
-              << " cents dialled in. *** P2.8 LISTENING ITEM: does a unison-adjacent voicing sound "
-                 "locked? ***\n";
-    // The separation really collapses...
-    REQUIRE(std::fabs(coupledSeparation) < 0.5 * static_cast<double>(kOffsetCents));
-    // ...and the pull lands on the string nobody detuned.
-    REQUIRE(std::fabs(pullOnPlain) > kToleranceCents);
+    struct PairReading {
+        double plainHz;
+        double detunedHz;
+        double separationCents;
+        double pullOnPlainCents;
+    };
+    auto measurePair = [&](float coupling) {
+        StringNetworkParams coupledParams = params;
+        coupledParams.bridge.couplingStrength = coupling;
+        StringNetwork<float> coupled;
+        configure(coupled, coupledParams, 2);
+        BlockEventQueue coupledEvents;
+        coupledEvents.push(noteOn(0, kMidiNote, 0));
+        coupledEvents.push(noteOn(0, kMidiNote, 1));
+        std::vector<double> coupledA;
+        std::vector<double> coupledB;
+        coupledA.reserve(kAnalysisLength);
+        coupledB.reserve(kAnalysisLength);
+        std::size_t coupledRendered = 0;
+        while (coupledRendered < totalSamples && coupledA.size() < kAnalysisLength) {
+            coupled.process(coupledEvents, kBlock);
+            const float* a = coupled.tapBuffers().channel(0, 0);
+            const float* b = coupled.tapBuffers().channel(1, 0);
+            for (int n = 0; n < kBlock; ++n, ++coupledRendered) {
+                if (coupledRendered < discard || coupledA.size() >= kAnalysisLength)
+                    continue;
+                coupledA.push_back(static_cast<double>(a[n]));
+                coupledB.push_back(static_cast<double>(b[n]));
+            }
+        }
+        PairReading r{};
+        r.plainHz = cnpg::test::findPeakHz(cnpg::test::computeSpectrum(coupledA, kRate, kAnalysisLength), nominalHz,
+                                           cnpg::test::kTuningSearchCents);
+        r.detunedHz = cnpg::test::findPeakHz(cnpg::test::computeSpectrum(coupledB, kRate, kAnalysisLength),
+                                             detunedNominalHz, cnpg::test::kTuningSearchCents);
+        r.separationCents = cnpg::test::centsBetween(r.detunedHz, r.plainHz);
+        r.pullOnPlainCents = cnpg::test::centsBetween(r.plainHz, nominalHz);
+        return r;
+    };
+
+    const float shippingCoupling = StringNetworkParams{}.bridge.couplingStrength;
+    const PairReading below = measurePair(kSeparatedCoupling);
+    const PairReading above = measurePair(kLockedCoupling);
+    const PairReading shipped = measurePair(shippingCoupling);
+
+    std::cout << "[tuning] CRITERION (4) BOUNDARY, isolated pair, MIDI " << kMidiNote << ", " << kOffsetCents
+              << " cents dialled in (ADR 0007 D5 criterion 4; the topology of D7.0):\n"
+              << "    coupling " << kSeparatedCoupling << " (below): " << below.plainHz << " / " << below.detunedHz
+              << " Hz, separation " << below.separationCents << " cents, pull on the string nobody detuned "
+              << below.pullOnPlainCents << "\n"
+              << "    coupling " << kLockedCoupling << " (above): " << above.plainHz << " / " << above.detunedHz
+              << " Hz, separation " << above.separationCents << " cents, pull " << above.pullOnPlainCents
+              << " -- LOCKED\n"
+              << "    SHIPPING default " << shippingCoupling << ":       " << shipped.plainHz << " / "
+              << shipped.detunedHz << " Hz, separation " << shipped.separationCents << " cents, pull "
+              << shipped.pullOnPlainCents << "\n"
+              << "    (this default was settled by AUTHOR DELEGATION on 2026-08-05, NOT by the listening pass ADR "
+                 "0007 D4 reserves; docs/listening/P2-20260803.md is still marked not performed)\n";
+
+    REQUIRE(below.plainHz > 0.0);
+    REQUIRE(below.detunedHz > 0.0);
+    REQUIRE(above.plainHz > 0.0);
+    REQUIRE(above.detunedHz > 0.0);
+    REQUIRE(shipped.plainHz > 0.0);
+    REQUIRE(shipped.detunedHz > 0.0);
+
+    // (a) BELOW the boundary the pair survives: it keeps most of the separation dialled in, and the
+    // string nobody detuned stays inside the same +/-2 cents the decoupled gate above holds it to.
+    INFO("below the boundary: separation " << below.separationCents << ", pull " << below.pullOnPlainCents);
+    REQUIRE(std::fabs(below.separationCents) > kMinSurvivingSeparation);
+    REQUIRE(std::fabs(below.pullOnPlainCents) <= kToleranceCents);
+
+    // (b) ABOVE it the pair collapses -- the other half of Weinreich's result. Both taps report one
+    // frequency, and the whole 25 cents lands on the string that was NOT offset, which is the part a
+    // player notices and is why D5 makes this a musical judgement rather than only a number.
+    INFO("above the boundary: separation " << above.separationCents << ", pull " << above.pullOnPlainCents);
+    REQUIRE(std::fabs(above.separationCents) < kLockedSeparation);
+    REQUIRE(std::fabs(above.pullOnPlainCents) > kToleranceCents);
+
+    // (c) NON-VACUITY, from the arms themselves rather than from a re-derivation: each arm's
+    // predicate must REJECT the other arm's measured numbers. If it did not, the pair of assertions
+    // above would be satisfiable by a system with no boundary in it at all.
+    REQUIRE_FALSE(std::fabs(below.separationCents) < kLockedSeparation);
+    REQUIRE_FALSE(std::fabs(below.pullOnPlainCents) > kToleranceCents);
+    REQUIRE_FALSE(std::fabs(above.separationCents) > kMinSurvivingSeparation);
+    REQUIRE_FALSE(std::fabs(above.pullOnPlainCents) <= kToleranceCents);
+
+    // (d) THE DEFAULT'S RELATIONSHIP TO THE BOUNDARY, which is what criterion (4) actually asks. It
+    // is asserted twice on purpose: as arithmetic (the value is on the separated side of the probe
+    // that is measured to separate) and as a measurement (the shipping value itself really does
+    // separate). The arithmetic clause is the one that fires if a later task raises the default past
+    // the measured boundary, in the same shape as the Normal-range assertion in
+    // tests/dsp/TuningAccuracyTests.cpp -- and per ADR 0007 D5 that would make the range ceiling and
+    // the default one decision again, to be RE-DERIVED rather than widened to fit.
+    INFO("shipping couplingStrength " << shippingCoupling << " must sit on the separated side of " << kSeparatedCoupling
+                                      << ", the largest probe measured to separate");
+    REQUIRE(shippingCoupling <= kSeparatedCoupling);
+    REQUIRE(std::fabs(shipped.separationCents) > kMinSurvivingSeparation);
+    REQUIRE(std::fabs(shipped.pullOnPlainCents) <= kToleranceCents);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -72,7 +72,7 @@ template <typename SampleT> struct StringTapBuffers; // full definition: StringN
 // note's fundamental. Measured end to end (StringNetwork -> PickupTap, every other parameter at its
 // default, MIDI 45 / A2 at velocity 1.0, 2 s render), that path delivers:
 //
-//   44.1 kHz: -42.917 dBFS    48 kHz: -43.092 dBFS    96 kHz: -43.761 dBFS
+//   44.1 kHz: -42.856 dBFS    48 kHz: -43.031 dBFS    96 kHz: -43.686 dBFS
 //
 // -- so ONE constant calibrates every supported rate, though no longer to the 0.08 dB the first
 // measurement of it enjoyed; see the re-derivation block below.
@@ -90,30 +90,37 @@ template <typename SampleT> struct StringTapBuffers; // full definition: StringN
 // calibration, the +16 dB multi-string summing budget), and the calibration reference is the
 // specific documented scenario above -- not an automatic gain control.
 //
-// ---- RE-DERIVED AFTER THE DEFAULT VOICING MOVED (after the P2.9 exit) ------------------------
+// ---- RE-DERIVED AFTER THE DEFAULT VOICING MOVED, AND AGAIN AFTER THE COUPLING DID -------------
 //
-// "Every other parameter at its default" INCLUDES THE TAP POSITION, and that is exactly what
-// changed: pickupPosition01 moved from the string's midpoint to 1/16 of the string from the bridge
-// (StringNetwork.h has the derivation). This constant is DEFINED by the measurement above, so it
-// had to be re-measured rather than inherited. It was 24.8 dB, against readings of
-// -42.80 / -42.82 / -42.74 dBFS.
+// "Every other parameter at its default" INCLUDES THE TAP POSITION AND THE BRIDGE COUPLING, and
+// both have been moved since the P2.9 exit. This constant is DEFINED by the measurement above, so
+// each time it must be RE-MEASURED rather than inherited -- it is forced, never chosen.
 //
-// Per rate the exact trims the new geometry asks for are 24.917 / 25.092 / 25.761 dB. One constant
-// cannot be all three, so it sits at the MIDPOINT OF THE EXTREMES, (24.917 + 25.761)/2 = 25.339,
-// rounded to 25.3 -- which is the value that maximises the SMALLER of the two margins against the
-// +/-1 dB acceptance (tests/dsp/MonitoringChainTests.cpp). That leaves the gate reading
-// -17.617 / -17.792 / -18.461 dBFS: worst deviation 0.461 dB, worst margin 0.539 dB.
+//   value  when                     tap        coupling  per-rate trims 44.1/48/96   spread
+//   24.8   through P2.9             0.5        0.35      24.90  / 24.92  / 24.84     0.08 dB
+//   25.3   2026-08-04 (dd73269)     1 - 1/16   0.35      24.917 / 25.092 / 25.761    0.844 dB
+//   25.3   2026-08-05 (this row)    1 - 1/16   0.20      24.856 / 25.031 / 25.686    0.830 dB
 //
-// Keeping 24.8 would NOT have failed the gate -- it would have read -18.12 / -18.29 / -18.96, i.e.
-// inside it at 96 kHz by 0.039 dB. That is a gate that passes rather than a calibration that holds,
-// and it is the reason this constant moved rather than being left alone.
+// Raw peaks at trim 0 for the current row: -42.856 / -43.031 / -43.686 dBFS. One constant cannot be
+// all three trims, so it sits at the MIDPOINT OF THE EXTREMES, (24.856 + 25.686)/2 = 25.271,
+// rounded to 25.3 at the 0.1 dB this constant is documented at -- the value that maximises the
+// SMALLER of the two margins against the +/-1 dB acceptance (tests/dsp/MonitoringChainTests.cpp).
+// That leaves the gate reading -17.556 / -17.731 / -18.386 dBFS: worst deviation 0.444 dB, worst
+// margin 0.556 dB.
 //
-// THE COST, because it is a real one: the rate spread widened from 0.08 dB to 0.844 dB. A tap 1/16
-// of the string from the bridge weights the UPPER partials -- its comb |sin(n*pi/16)| rises to its
-// peak at partial 8 -- and the upper partials are the ones whose loop-filter and fractional-delay
-// behaviour differs most between 44.1 and 96 kHz. So this is now a compromise across three rates
-// rather than a measurement that happened to agree at all three, and a future change that widens
-// the spread further will run out of margin here before it runs out anywhere else.
+// *** THE VALUE DID NOT MOVE ON THE THIRD ROW, AND THAT IS A MEASUREMENT AND NOT AN OMISSION. ***
+// Lowering couplingStrength from 0.35 to 0.20 leaves LESS energy in the bridge load and therefore
+// slightly MORE in the string, which raises the single-string peak by 0.055 to 0.075 dB depending
+// on rate. Rounded to the 0.1 dB this constant carries, 25.271 and 25.339 are the same number. The
+// re-derivation was performed, not skipped; it happened to land where it already was.
+//
+// THE COST, because it is a real one: the rate spread is 0.830 dB against the 0.08 dB the P2.9
+// geometry enjoyed. A tap 1/16 of the string from the bridge weights the UPPER partials -- its comb
+// |sin(n*pi/16)| rises to its peak at partial 8 -- and the upper partials are the ones whose
+// loop-filter and fractional-delay behaviour differs most between 44.1 and 96 kHz. So this is a
+// compromise across three rates rather than a measurement that happened to agree at all three, and
+// a future change that widens the spread further will run out of margin here before it runs out
+// anywhere else.
 inline constexpr float kNominalPickupTrimDb = 25.3f;
 
 struct PickupTapParams {

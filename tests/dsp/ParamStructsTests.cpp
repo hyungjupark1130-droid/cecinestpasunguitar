@@ -42,7 +42,9 @@ TEST_CASE("StringNetworkParams: nests StringMaterialParams and PluckExciterParam
     REQUIRE(params.retriggerMode == RetriggerMode::Physical);
     // 1/16 of the string from the BRIDGE -- 1.594" on a 25.5" scale, where a bridge single coil
     // sits. Also 0.5 through P2.9, coincident with the exciter above, which squared every even
-    // partial's null. See StringNetwork.h for the derivation and PluckExciter.h for the criterion.
+    // partial's null. A move to 1 - 1/7 was proposed on 2026-08-05 and REFUSED on measurement: the
+    // realised comb onset in this waveguide is lower than 1/d, so the zero-margin 1/7 nulls partial
+    // 6. See StringNetwork.h for that derivation and PluckExciter.h for the criterion.
     REQUIRE(params.pickupPosition01 == 1.0f - 1.0f / 16.0f);
     REQUIRE(params.stringMaterial.lossGainLow == 0.5f);
     REQUIRE(params.stringMaterial.lossGainHigh == 0.5f);

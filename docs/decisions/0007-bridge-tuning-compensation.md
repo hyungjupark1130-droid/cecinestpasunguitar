@@ -79,6 +79,13 @@ ADR 0006's default is **not final** and must not be treated as settled by any la
 including the P2.9 exit gate. It is confirmed or replaced only after the **P2.8 listening pass**,
 which must compare lower values and judge mode-locking in near-unison voicings by ear.
 
+> **SUPERSEDED IN PART, 2026-08-05 — see D7.2.** The default is now **0.20**, and it was settled by
+> **author delegation, not by ear**. The listening pass this section reserves the decision for has
+> still never been performed: `docs/listening/P2-20260803.md` remains marked NOT PERFORMED with
+> every verdict field blank. **D4's condition was WAIVED, not met.** What remains in force is the
+> prohibition above — no later task may treat the value as settled *by measurement*, and a green
+> board is still not a sign-off.
+
 Evidence motivating this: at 0.35, two strings tuned 25 cents apart **mode-lock** — both taps peak
 at 111.297 Hz for nominals 110.00/111.60, a **+20.286 cent pull** on the string nobody detuned, with
 the separation collapsing from 25 cents to 0.0029. Beat depth also falls sharply with coupling
@@ -127,12 +134,13 @@ so it can proceed; **P2.8 confirms or revises it** in the same session that sett
 `couplingStrength` default. Criterion 4 is the one that ties the range to D4: mode-locking is a
 coupling phenomenon, so the coupling default and the range ceiling are the same measurement.
 
-**Read D7.0 before D7's table, and D7.1 after it.** The region D7 declares is derived from
-criterion (1) alone, and **criterion (4) is measured to FAIL at its coupling ceiling** — so D7's box
-is not, today, the five-criteria region this section defines. That gap is the reason the range is
-provisional. D7.1 adds the same measurement on the **shipping six-string topology**, where the
-boundary is **lower still** (between 0.20 and 0.30, against 0.32–0.35 on an isolated pair). Closing
-the gap is P2.8's listening pass, which has not yet been performed.
+**Read D7.0 before D7's table, D7.1 after it, and D7.2 last.** The region D7 declares is derived
+from criterion (1) alone, and **criterion (4) is measured to FAIL at its coupling ceiling** — so
+D7's box is not the five-criteria region this section defines. D7.1 adds the same measurement on the
+**shipping six-string topology**, where the boundary is **lower still** (between 0.20 and 0.30,
+against 0.32–0.35 on an isolated pair). **D7.2 (2026-08-05) records what changed when the *default*
+moved to 0.20: the box still is not criterion-complete, but the shipped instrument no longer sits in
+the part of it that fails.** The listening pass has still not been performed.
 
 Settings **outside** the Normal range remain available as an **Extended (Effect) range**. They
 carry **no tuning guarantee** — this is where D3's bounded physical detuning lives, and it is a
@@ -241,6 +249,12 @@ statement of fact, which is this section.
 default sits OUTSIDE a criterion-complete Normal range.** It is inside the criterion-(1) box declared
 above, and outside the region where all five of D5's criteria hold. P2.8 settles both, together.
 
+> **THAT LAST PARAGRAPH IS NO LONGER TRUE OF THE SHIPPED DEFAULT, AND IS LEFT STANDING BECAUSE IT IS
+> STILL TRUE OF THE BOX.** As of 2026-08-05 the default is 0.20 and is measured to satisfy criterion
+> (4) on both topologies; the ceiling is unchanged at 0.35 and criterion (4) still fails there. The
+> gap between the default and the ceiling is now the whole of the failing region, and it is reachable
+> only by a user dragging the Bridge Coupling slider. See D7.2.
+
 *The rest of this section is D7's own derivation: how the box in the table above was arrived at, face
 by face. D7.1 below adds the second topology, and is placed after the derivation rather than before
 it so that the derivation stays contiguous with the box it derives.*
@@ -345,6 +359,88 @@ moves below 0.30 and D7's box is re-derived rather than edited; if it does not, 
 the measurement the judgement was made against. Either way the ADR now carries the topology that
 ships alongside the one that was convenient to measure.
 
+> **WHAT HAPPENED NEXT, 2026-08-05.** The author settled the **default** at **0.20** — the largest
+> value in the table above at which the pair survives on this topology — **by delegation, without
+> holding the listening pass**. The **ceiling** did not move and this table is unchanged. D7.2
+> carries the derivation, and the sentence above about what would follow "if the author's ear agrees"
+> is still awaiting an ear.
+
+#### D7.2 — the DEFAULT moves to 0.20 by author delegation; the CEILING does not move (2026-08-05)
+
+*Added by the post-exit default-diffs task. It records a decision and a re-derivation. It proposes
+nothing and it settles nothing by measurement.*
+
+**HOW THIS WAS SETTLED, first, because it is the part most likely to be misread later.** The author
+delegated the value on **2026-08-05** and the implementer applied it. **It was NOT settled by ear.**
+D4 reserves this value for a recorded listening sign-off and reserved it across three separate
+rulings; that sign-off has still never been performed, `docs/listening/P2-20260803.md` is still
+marked NOT PERFORMED with every verdict column blank, and nothing in this section fills it. **D4's
+condition was waived, not met.** Anyone citing 0.20 must cite it as a delegated decision resting on
+the measurements below, never as a listening result.
+
+**WHY 0.20 AND NOT ANOTHER WAIVER — the derivation.** D5's criterion (4) is the only one of the five
+that binds on coupling below the criterion-(1) ceiling, and it is measured on two topologies:
+
+| topology | largest measured coupling at which the 25-cent pair SURVIVES | first measured coupling at which it LOCKS |
+|---|---|---|
+| isolated pair, sustain material (D7.0) | **0.25** — separation 25.099 cents, pull −0.12 | 0.30 — separation 0.003, pull +24.99 |
+| isolated pair, default material (D7.0) | 0.32 — separation 25.18 | 0.35 — separation 0.33, pull +24.67 |
+| **shipping six strings on one bridge (D7.1)** | **0.20** — separation 23.612 cents, partner at −6.8 dB | 0.30 — ONE PEAK |
+
+**The binding topology is the one that ships**, so the criterion-(4)-satisfying region has a coupling
+ceiling of **0.20**, and the default is placed exactly on it. That placement is deliberate and its
+weakness is stated rather than smoothed: the true boundary lies somewhere in **(0.20, 0.30)** and no
+point inside that interval has ever been measured on six strings, so 0.20 is the **last reading that
+passes**, not an edge. **The margin is zero in the only direction that matters.**
+
+**WHAT THE CEILING IS NOW, and what binds it.** `kBridgeNormalCouplingMax` is **unchanged at 0.35**,
+and three things bind that decision rather than one:
+
+1. **Criterion (1) still holds there and is still measured there.** The ±2-cent tuning guarantee is
+   what D2 declares and what the grid gate enforces; its coupling face is at ≈0.405 (D7's own
+   measurement) and 0.35 sits inside it with about 16 % of headroom. Lowering the declared box to
+   0.20 would *withdraw* a tuning guarantee that is measured to hold — a different and unrequested
+   change, and a misleading one, because "Extended range" reads as *may detune* and 0.20–0.35 does
+   not detune.
+2. **The delegation named the default and only the default.** D5 ties the ceiling and the default to
+   the same *measurement*; it does not make them the same *decision*, and the standing project ruling
+   on this ADR is explicit that the ceiling is not to be lowered ahead of the ear.
+3. **Criterion (5) — "the bridge still behaves as an instrument component rather than an overt
+   resonant effect" — has never been judged at all.** A ceiling re-derived without it would be the
+   same category error D7.0 exists to name.
+
+**IS THE NORMAL RANGE CRITERION-COMPLETE NOW? At the default, yes on the four measurable criteria;
+as a box, no.** Precisely:
+
+| | at the shipping default 0.20 | over the declared box (coupling ≤ 0.35) |
+|---|---|---|
+| (1) ±2 cents | **holds** — 0.060 cents measured | **holds** — worst 0.770 cents |
+| (2) solver converges | **holds** — one iteration | **holds** — 1368/1368 gated points |
+| (3) live changes click-free | **holds** | **holds** — `BridgeTuningClickTests.cpp` |
+| (4) no involuntary mode-lock at ~25 cents | **HOLDS — this is what changed** | **FAILS above ≈0.20–0.25** |
+| (5) instrument component, not an effect | **NEVER JUDGED** | **NEVER JUDGED** |
+
+So the correct statement, and the one that replaces D7.0's closing paragraph for the shipped
+instrument: **the default now sits inside the region where every measurable criterion holds, for the
+first time since the bridge landed.** The box does not, and the difference between the two is now
+exactly the interval a user crosses by dragging Bridge Coupling above its default.
+
+**What it costs.** Coupling is the mechanism of sympathetic resonance and the feed ADR 0004's later
+body/chamber rides on, so less of it is less of one string in the others. The two measurements that
+exist both run the other way: on a six-C3 unison stack the 1–3 s tail is **8.3 dB louder** at 0.20
+than at 0.35 (−80.4 against −88.7 dBFS), and ADR 0006's beat depth is **10.08 dB at 0.10 against
+3.59 at 0.35**. Neither is an ear, and D7.1's own question stands unanswered: at 0.20 the detuned
+partner is present but **6.8 dB down**, and whether that is still the chord that was played is a
+listening judgement.
+
+**The standing gate moved with it, and was re-pointed rather than deleted.**
+`tests/dsp/StringNetworkScaleTests.cpp` asserted the lock **at the shipping default**; at 0.20 there
+is no lock, so that assertion would have gone vacuous. It now pins the **boundary** instead —
+separation preserved at a probe of 0.25, collapse at a probe of 0.30, both measured in the case, each
+arm asserted to reject the other's numbers, plus an arithmetic clause that the shipping default lies
+on the separated side. That is a gate on a physical fact rather than on a value, and it survives the
+default moving again.
+
 ### D8 — the gated note band moves in both directions (Task P2.7)
 
 §4.5 assigned "the full 88-note (21–108) × 3-rate ±2-cent assertion" to this task. P2.7 **widens** it
@@ -435,3 +531,11 @@ criterion (4) on the **shipping six-string topology**, where the boundary sits b
 `docs/listening/P2-20260803.md` is the prepared session sheet and every verdict column in it,
 including the `couplingStrength` value and the Normal range, is deliberately empty. Both remain
 provisional, and P2.9 must not treat a green board as confirmation of either (D4).
+
+**As of 2026-08-05 the DEFAULT is settled at 0.20 and the RANGE is not.** The default was settled by
+**author delegation, with the listening pass still unheld** — the sheet above is still marked NOT
+PERFORMED — so D4's condition was waived rather than discharged (D7.2). The declared box is unchanged
+at coupling ≤ 0.35 and is **still not D5-complete**: criterion (4) still fails above roughly 0.20–0.25
+and criterion (5) has still never been judged. What changed is that **the shipped instrument no longer
+sits in the failing part of its own declared range** — every measurable criterion holds at the
+default. The remaining work is unchanged in kind: an ear, and a re-derivation of the box against it.

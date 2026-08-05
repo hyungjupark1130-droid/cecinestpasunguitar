@@ -216,11 +216,24 @@ inline constexpr float kBridgeMaxMobilityRatio = 0.05f;
 //
 // The ceiling is NOT lowered here because D5's criterion (4) makes the ceiling and the
 // couplingStrength default THE SAME MEASUREMENT, and ADR 0007 D4 reserves that measurement for the
-// P2.8 listening pass. The consequence, stated rather than left to be discovered: THE PROVISIONAL
-// couplingStrength DEFAULT SITS OUTSIDE A CRITERION-COMPLETE NORMAL RANGE.
+// P2.8 listening pass.
 //
-// PROVISIONAL: P2.8 confirms or revises all five numbers, in the same session that settles the
-// couplingStrength default, because D5's criterion (4) -- near-unison mode-locking -- ties them.
+// *** UPDATED 2026-08-05 (ADR 0007 D7.2): THE DEFAULT LEFT THE FAILING REGION; THE CEILING DID NOT
+// MOVE. *** This block used to close by saying the provisional default sat OUTSIDE a
+// criterion-complete Normal range, because the default WAS this ceiling. The default is now 0.20 --
+// the largest value at which criterion (4) is measured to hold on the shipping six-string topology
+// (D7.1) -- so at the default every one of D5's four MEASURABLE criteria holds, for the first time
+// since the bridge landed. The BOX is still not criterion-complete: (4) still fails above roughly
+// 0.20-0.25 and (5), "an instrument component rather than an overt resonant effect", has still never
+// been judged. The gap between the default and the ceiling is now exactly the failing region, and it
+// is reachable only by dragging the Bridge Coupling slider above its default.
+//
+// The default was settled by AUTHOR DELEGATION, not by ear: docs/listening/P2-20260803.md is still
+// marked NOT PERFORMED. D4's condition was WAIVED, not met.
+//
+// PROVISIONAL: P2.8 confirms or revises all five numbers, in the same session that would settle the
+// couplingStrength default by ear, because D5's criterion (4) -- near-unison mode-locking -- ties
+// them.
 inline constexpr float kBridgeNormalCouplingMax = 0.35f;
 inline constexpr float kBridgeNormalResonanceMinHz = kBridgeMinResonanceHz;
 inline constexpr float kBridgeNormalResonanceMaxHz = 330.0f;

@@ -52,6 +52,21 @@ namespace cnpg::dsp {
 // 143, and on a 25.5" scale it is 2.833" from the bridge -- an ordinary picking position, between
 // the bridge pickup and the neck pickup where a player's hand actually is.
 //
+// *** THE MARGIN TURNED OUT TO BE LOAD-BEARING, AND THIS IS THE RECORD OF THAT (2026-08-05). ***
+// "Zero margin" above is written as if it were merely tight. It is worse than tight: onset = 1/d is
+// a CONTINUOUS-STRING identity, and this waveguide realises an onset LOWER than 1/d by about one
+// sample of contact distance, because the rails' `1.0 +` read floor and the loss/dispersion/seam/
+// bridge phase delays sit outside positionSpan_ (StringNetwork.h carries the full derivation, the
+// closed form and the measured table). A task that moved the TAP to the zero-margin 1/7 put the
+// realised null on PARTIAL 6, inside the identity band, reading 21.72 dB of even-partial deficit on
+// the open B string; the move was refused on that measurement.
+//
+// The same closed form, onset_realised = (L/2)/(1 + d*S), applied to a pluck at 1/9 at the worst
+// point over the six open strings (MIDI 64 at 44.1 kHz, the shortest loop at the lowest supported
+// rate) gives 7.99 -- outside [2, 6] with a whole partial to spare, where 1/7 would give 6.38. THAT
+// IS WHAT THE MARGIN BOUGHT, and it is why this default is untouched by the finding that cost the
+// tap its move.
+//
 // THE COST, stated because it is real: coupling to the FUNDAMENTAL is sin(pi*d), so moving off the
 // midpoint costs 20*log10(sin(pi/9)) = 9.4 dB of it. The midpoint is the unique position that
 // maximises the fundamental, and it buys that by deleting every even partial. This trade is the
@@ -73,8 +88,14 @@ struct PluckExciterParams {
 
 // The criterion above, pinned on the shipped value rather than on a literal, so a future edit that
 // walks the default back toward the midpoint fails here instead of in somebody's ears. It is not
-// vacuous: at the old default d = 1/2 the left-hand side is 2.
-static_assert(1.0f / kDefaultPluckDistanceFromBridge01 >= 7.0f,
+// vacuous: at the old default d = 1/2 the left-hand side is 0.5 against a limit of 0.142857.
+//
+// Written as d <= 1/7 rather than as 1/d >= 7 for the reason StringNetwork.h's companion assertion
+// spells out: the two are the same criterion over the reals and NOT the same predicate in float32,
+// and the reciprocal form rejects d = 1.0f/7.0f -- the exact boundary -- because float(1/7) rounds
+// up and its reciprocal therefore rounds down through 7. 1/9 is not on the boundary, so this
+// assertion holds either way; the form is matched to its companion so the trap is not left half set.
+static_assert(kDefaultPluckDistanceFromBridge01 <= 1.0f / 7.0f,
               "The default pluck must not null a partial in [2, 6] -- the partials that spell the "
               "intervals the instrument plays. See the derivation above this struct.");
 

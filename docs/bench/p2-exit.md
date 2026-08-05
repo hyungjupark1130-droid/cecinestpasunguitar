@@ -891,3 +891,194 @@ are exactly two of them.
 performed, `couplingStrength = 0.35` is still PROVISIONAL and is still the author's alone, and
 `docs/listening/P2-20260803.md` is still empty. Two defects found from one recording is still not an
 audition — it is two more reasons §9's first line was the right thing to write.
+
+---
+
+## 12. Appended after the exit: `couplingStrength` was SETTLED BY DELEGATION, and a second voicing change was REFUSED
+
+**Same standing as §10 and §11: this does not amend §1–§9.** The exit gate closed on 2026-08-03
+without an audition; §9's first line records that nobody listened. This section records the third
+thing to come out of the same listening finding, and the first thing this branch has refused.
+
+### 12.1 `couplingStrength` 0.35 → 0.20 — settled, but NOT by ear
+
+| | |
+|---|---|
+| What changed | `BridgeAdmittanceParams::couplingStrength` **0.35 → 0.20** (`dsp/include/cnpg/dsp/IBridgePort.h`) |
+| How it was settled | **Author delegation on 2026-08-05.** Not by the listening pass ADR 0007 **D4** reserves it for |
+| State of that pass | **STILL NOT PERFORMED.** `docs/listening/P2-20260803.md` is still marked NOT PERFORMED with every verdict field blank, and this change did not fill one |
+| Therefore | **D4's condition was WAIVED, not met.** Nobody may cite 0.20 as a listening result |
+| Declared Normal range | **coupling ceiling UNCHANGED at 0.35.** ADR 0007 **D7.2** carries the re-derivation |
+
+**§2.2 above says `couplingStrength = 0.35` remains PROVISIONAL. That sentence is superseded as to
+the value and NOT as to its status.** The value is 0.20; it is still unconfirmed by ear.
+
+**Why 0.20 and not another waiver.** D5's criterion (4) — near-unison strings ~25 cents apart must
+not involuntarily mode-lock — is the only one of the five that binds coupling below the criterion-(1)
+ceiling, and it is measured on two topologies. On the **shipping six-string instrument** (ADR 0007
+D7.1) the pair survives at 0.20 with 23.612 cents of separation and its partner 6.8 dB down, and is a
+**single locked peak** at 0.30. 0.20 is therefore **the largest measured point at which criterion (4)
+holds on the topology that ships** — the last reading that passes, not an interpolated edge, because
+nothing between 0.20 and 0.30 has ever been measured on six strings. **The margin is zero in the only
+direction that matters**, and D7.1's own question — whether a partner 6.8 dB down is still the chord
+that was played — is still unanswered.
+
+**What the Normal range's character is now.** ADR 0007 D7.2 re-derives it rather than re-adjectiving
+it. The short form:
+
+| D5 criterion | at the shipping default 0.20 | over the declared box (coupling ≤ 0.35) |
+|---|---|---|
+| (1) ±2 cents | holds — 0.060 cents | holds — worst 0.770 cents |
+| (2) solver converges | holds | holds — 1368/1368 points |
+| (3) live changes click-free | holds | holds |
+| (4) no involuntary mode-lock | **HOLDS — this is what changed** | **FAILS above ≈0.20–0.25** |
+| (5) instrument, not effect | **never judged** | **never judged** |
+
+So: **for the first time since the bridge landed, the shipped instrument sits where every MEASURABLE
+criterion holds.** The *box* is still not criterion-complete, and the gap between the default and the
+ceiling is now exactly the failing region — reachable only by dragging the Bridge Coupling slider
+above its default. §2.3's "criterion (4) is still failing" therefore stands for the range and no
+longer for the shipped default.
+
+**The standing mode-lock gate was RE-POINTED, not deleted.** `tests/dsp/StringNetworkScaleTests.cpp`
+asserted the lock **at the shipping default**; at 0.20 there is no lock, so that assertion would have
+gone vacuous — this branch's recurring failure mode for the tenth time, and the first time it was
+named in advance rather than found after the fact. It now pins the **boundary**: separation
+preserved at a 0.25 probe, collapse
+at a 0.30 probe, both measured in the case, each arm asserted to reject the other arm's numbers, plus
+an arithmetic clause that the shipping default lies on the separated side. Three RED arms were
+constructed and run: swapping the probes fails the separated clause at **0.00304 cents against a
+20-cent limit**; pointing the locked probe below the boundary fails at **25.0986 cents against 12.5**;
+and raising the default to 0.30 fails the arithmetic clause at `0.300000012f <= 0.25f`. That is a gate
+on a physical fact rather than on a value, and it survives the default moving again.
+
+### 12.2 The tap was to move to 1 − 1/7. It was REFUSED, on measurement.
+
+§11 closed by naming `1 − 1/7 = 0.857143` as *"the fullest position that still clears the criterion"*
+and offering it as a one-line diff. **It does not clear the criterion in this model, and the reason
+is a property of the waveguide rather than of the arithmetic.**
+
+`onset = 1/d` is a **continuous-string identity**. `WaveguideString` reads a tap at delay
+`1.0 + position01 * positionSpan_`, and `positionSpan_` is one rail's realized span — it excludes the
+loss, dispersion, seam and bridge phase delays, which are part of the acoustic loop but not of the
+rail. The tap's acoustic distance from the bridge is therefore `(1 + (1 − p)·S)` samples out of a
+half-loop of `(S + tau/2)`, so **the realised onset is LOWER than 1/d by an absolute offset of about
+one sample** — a larger fraction of a shorter loop, i.e. worse at the top of the register and at the
+lowest sample rate.
+
+Closed form, with `S = positionSpan_` and `L` the loop length: `onset_realised = (L/2)/(1 + d·S)`
+instead of `1/d`. At the worst point over the six default open strings — MIDI 64 at 44.1 kHz, the
+shortest loop at the lowest supported rate — that reads **6.38 at d = 1/7**, 6.79 at 1/7.5, 7.19 at
+1/8 and 12.99 at 1/16, so the criterion becomes **`d ≤ 1/7.76`**, not `d ≤ 1/7`. At 1/16 the offset
+costs three whole partials of onset and nothing notices, because the margin is ten. At the
+**zero-margin** 1/7 it puts the realised null **on partial 6, inside the identity band [2, 6]**.
+
+**The closed form predicts the measured boundary** — 1/7.76 against a render sweep that finds 1/7.5
+failing and 1/8 clean. Worst even-partial deficit over the six default open strings:
+
+| tap | chain, 48 kHz | raw tap, 44.1 / 48 / 96 kHz |
+|---|---|---|
+| **1/7** | **21.72 dB at MIDI 59** — fails the 18 dB `[contract]` gate | **24.77 / 21.51 / 5.58** |
+| 1/7.5 | 5.13 | 18.76 / 5.38 / 5.78 — fails at 44.1 kHz only |
+| **1/8** | 5.29 | **6.23 / 5.54 / 5.91 — clean at every rate** |
+| 1/16 (shipped) | 5.78 | 6.74 / 6.03 / 6.32 |
+
+**The rate dependence is the attribution**: the closed-form comb contains no sample rate, so a
+reading that moves 16 dB between 44.1 and 96 kHz is the discretisation and can be nothing else. The
+hole is present in the **raw tap with the bridge decoupled**, so it is neither the chain nor the
+coupling. It is one of the six default open strings, and it is the same defect class §11 exists to
+remove — one partial instead of half the series, ~20 dB instead of ~45. (An intermediate run, taken
+while `kNominalPickupTrimDb` was mid-re-derivation at 22.3 dB, read 21.65 rather than 21.72: the
+statistic is a ratio between partials, but the chain it is measured through has a triode and a
+limiter in it, so 3 dB of level is worth 0.07 dB of deficit. 21.72 is the figure at the shipping
+trim.)
+
+**What the measurement supports instead is 1/8, and 1/8 was NOT taken.** It is the largest tap
+distance clean at all three rates and returns `20*log10(sin(pi/8)/sin(pi/16)) = 5.85 dB` of the
+6.94 dB of fundamental that 1/7 was wanted for. Substituting it would be choosing the instrument's
+voice rather than refusing an inadmissible value, so it is left as a one-line diff for the author:
+
+```
+-inline constexpr float kDefaultTapDistanceFromBridge01 = 1.0f / 16.0f;
++inline constexpr float kDefaultTapDistanceFromBridge01 = 1.0f / 8.0f;
+```
+
+**The durable lesson, which outlives this value: the criterion needs a margin of about ONE PARTIAL in
+this model, not zero.** `PluckExciter.h` reached that conclusion independently for the pluck when it
+declined the zero-margin 1/7 in favour of 1/9 — which is why the pluck default is untouched by this
+finding, and what its margin bought. The sweep is kept re-derivable as
+`REPORT: voicing -- the realised comb onset is lower than 1/d, and by how much`.
+
+**A second, smaller defect found in the same place.** The `static_assert` §11 shipped read
+`1.0f / kDefaultTapDistanceFromBridge01 >= 7.0f`. At `d = 1.0f/7.0f` — the exact boundary, i.e. the
+one value the author was going to reach for — that expression evaluates to **6.99999952f and the
+assertion FAILS TO COMPILE**: `float(1/7)` rounds up, so its float reciprocal rounds down through 7.
+The criterion was stated in a form that rejects its own boundary, for a floating-point reason and not
+a physical one. Both `static_assert`s and the closed-form `[contract]` clause are re-pointed to
+`d <= 1.0f/7.0f`, which is exact at equality. Non-vacuity is unchanged: at `d = 1/2` the reading is
+0.5 against 0.142857.
+
+### 12.3 What it measured
+
+| gate | result |
+|---|---|
+| Release suite | **285 cases / 5 480 612 assertions, all passed** (parent `ebe5484`: 285 / 5 480 584) |
+| Assertion accounting | the parent's exact total was **reproduced on this tree** by reverting only the coupling literal, the goldens and the two edited test files. The default move plus the regeneration accounts for **+13**, all of it inside `[contract]` — `[energy]`, `[tuning]`, `[regression]`, `[denormal]` and `[aliasing]` are unchanged to the assertion. The two edited test files account for the remaining **+15**. **The case carrying the +13 was not isolated**, and that is the one accounting item left open |
+| Debug suite | §12.4 |
+| `ctest -C Release` | **100% tests passed out of 285**, running `build/bin/Release/cnpg_tests.exe` out of the generated `cnpg_tests-b12d07c_tests-Release.cmake` (`DISCOVERY_MODE PRE_TEST`) |
+| clang-format | clean over all **98** files under `dsp/ plugin/ tests/` (LLVM 20.1.8, the repo `.clang-format`), re-run **after** the last edit |
+| **Goldens** | **MOVED, and regenerated deliberately.** All 84 files (60 `string_ir`, 24 `chord_ir`), with a `Regenerate-Goldens:` trailer. `string_ir` worst \|sample diff\| **0.024005**, `chord_ir` tap worst **0.049788**, bridge channel worst **0.001689**. **LAYER (a) MOVED PAST ITS TOLERANCES TOO — see §12.5.** §11's goldens did **not** move because `StringIrScenarios` overrides the geometry; it does **not** override `couplingStrength`, and both scenarios render at the shipping admittance on purpose |
+| Corpus | 8/8 phrases, **all counters zero**, determinism verified, per-phrase deltas below |
+
+### 12.4 Corpus, the trim, and Debug
+
+`cnpg_render --corpus tests/corpus --samplerate 48000 --verify-determinism`, against `ebe5484`:
+
+| phrase | peak (old → new) | RMS (old → new) | ΔRMS | max abs sample diff |
+|---|---|---|---|---|
+| 01_chromatic_singles | −17.21 → −17.14 | −38.970 → −38.420 | **+0.550 dB** | −27.19 dBFS |
+| 02_open_chords | −11.22 → −11.21 | −40.500 → −39.540 | **+0.960** | −25.11 dBFS |
+| 03_legato_retrigger | −17.58 → −17.54 | −38.180 → −37.370 | +0.810 | −27.53 dBFS |
+| 04_palm_mute_chug | −13.87 → **−12.87** | −32.730 → −32.210 | +0.520 | −20.26 dBFS |
+| 05_low_string_bends | −17.43 → −17.38 | −40.470 → −39.620 | +0.850 | −27.56 dBFS |
+| 06_sustain_chords | −12.84 → −12.58 | −41.500 → −40.460 | +1.040 | −25.64 dBFS |
+| 07_param_sweeps_midnote | −14.63 → −14.37 | −38.880 → −37.760 | **+1.120** | −27.49 dBFS |
+| 08_harmonics_nodes | −15.97 → −15.92 | −38.470 → −37.670 | +0.800 | −25.89 dBFS |
+
+**Every phrase moved and every one got LOUDER**, which is the direction the physics predicts and the
+opposite of §11's column: less coupling means less of each string's energy dumped into the shared
+bridge load, so more of it stays on the string. The largest peak move is `04_palm_mute_chug` at
++1.00 dB; headroom is unaffected (worst peak −11.21 dBFS, 10.91 dB under the ceiling).
+
+`kNominalPickupTrimDb` was **re-derived and did not move**: at the new coupling the per-rate trims are
+24.856 / 25.031 / 25.686 dB, whose midpoint-of-extremes is 25.271, which rounds to the 25.3 already
+shipping. The re-derivation was performed, not skipped — lowering the coupling raises the
+single-string peak by 0.055–0.075 dB, which is below the 0.1 dB this constant is documented at.
+
+### 12.5 The goldens' layer-(a) features moved past their tolerances — this is a behaviour change
+
+`tests/data/golden/README.md`: *"Layer-(a) invariants are designed to stay green across a legitimate
+regeneration; if they move, the change is a behaviour change, not a refresh, and belongs in the
+commit message."* **They moved.** Layer (a) reads green on the shipping tree only because the
+sidecars were refreshed alongside the samples. Old sidecar against new, over all 84 files:
+
+| feature | tolerance | tap channel | bridge channel |
+|---|---|---|---|
+| attack RMS | ±1.5 dB | +0.44 … +0.54 dB — inside | **−4.38 dB (`chord_ir`) / −4.81 dB (`string_ir`) — OUTSIDE** |
+| per-band T60 | ±10 % | **+25.0 % / +23.8 % — OUTSIDE** | **+27.6 % / +26.1 % — OUTSIDE** |
+| partial 1 | ±2 cents | **−0.0084 … +0.0381 cents — inside by two orders** | — |
+| partials 2–8 | ±2 cents | **up to 2.8191 cents — OUTSIDE on 42 of 226 readings** | — |
+
+**All three are the intended physics, and none was known before this measurement.**
+
+- **T60 up ~25 %** is the sustain the change buys — less coupling, less energy leaving the string.
+  Same direction as ADR 0006's own T60 column (1.147 s at 0.2 against 1.009 s at 0.35), larger here
+  because the golden scenarios sit nearer the 180 Hz bridge resonance.
+- **Bridge output down ~4.5 dB** is `couplingStrength` doing what it is defined to do: it scales the
+  full load admittance and `bridgeOutput()` is the load's velocity.
+- **The fundamental holds to hundredths of a cent while partials 2–8 move up to 2.8**, and that is
+  ADR 0007 **D1** visible in the goldens for the first time. The compensation evaluates the junction's
+  reflection phase delay **at f0** and folds only that into the loop, so f0 is exact by construction
+  while the upper partials ride the bridge's frequency-dependent phase at their own frequencies.
+  **The ±2-cent `[tuning]` gate is a gate on f0 and is untouched** — worst 0.060 cents at the shipping
+  admittance. What is new is knowing that the partials move ~2.8 cents for a 0.15 change in coupling.

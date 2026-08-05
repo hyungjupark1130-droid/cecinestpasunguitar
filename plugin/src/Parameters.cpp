@@ -71,7 +71,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
                                                            juce::AudioParameterFloatAttributes().withLabel("dB")));
     // Same rule as the exciter position above and the damper position below: the default is read
     // from the dsp-side struct, never retyped. See StringNetwork.h for why the tap sits 1/16 of the
-    // string from the bridge instead of on the midpoint it occupied through P2.9.
+    // string from the bridge instead of on the midpoint it occupied through P2.9, and why the
+    // proposed move to 1/7 was refused on measurement.
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::pickupPosition01), "Pickup Position",
                                                            unitRange,
                                                            cnpg::dsp::StringNetworkParams{}.pickupPosition01));
@@ -121,15 +122,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
     //
     // *** WHAT THE GUARANTEE IS AND IS NOT. *** It is the +/-2 cent TUNING bound -- ADR 0007 D5's
     // criterion (1) -- and nothing else. D5 defines the Normal range as the region where all FIVE of
-    // its criteria hold at once, and the box above is not that region: criterion (4), "near-unison
-    // strings ~25 cents apart do not involuntarily mode-lock", is measured to FAIL at
-    // kBridgeNormalCouplingMax, which is also this slider's default. Two strings 25 cents apart
-    // collapse to a 0.003-cent separation there. See ADR 0007 D7.0. A UI marker drawn from these
-    // constants would therefore be marking the in-tune sub-range, not a "safe" one.
+    // its criteria hold at once, and the box above is STILL not that region: criterion (4),
+    // "near-unison strings ~25 cents apart do not involuntarily mode-lock", is measured to FAIL at
+    // kBridgeNormalCouplingMax. Two strings 25 cents apart collapse to a 0.003-cent separation there.
+    // See ADR 0007 D7.0. A UI marker drawn from these constants would therefore be marking the
+    // in-tune sub-range, not a "safe" one.
     //
-    // Both the range and the coupling DEFAULT are provisional until the P2.8 listening pass, which
-    // settles them together (ADR 0007 D4/D5) -- and criterion (4) is precisely why they are one
-    // decision rather than two.
+    // *** WHAT CHANGED ON 2026-08-05: THE DEFAULT LEFT THE FAILING REGION; THE CEILING DID NOT MOVE.
+    // *** This slider's default WAS kBridgeNormalCouplingMax itself, so the shipped instrument sat on
+    // the one point of the box where criterion (4) is known to fail. It is now 0.20, which is the
+    // largest value at which criterion (4) is measured to HOLD on the shipping six-string topology
+    // (ADR 0007 D7.1: separation 23.612 cents, against a single locked peak at 0.30). So the default
+    // is inside the criterion-complete sub-region and the declared box still is not -- the gap
+    // between 0.20 and the ceiling is real and is what a user crosses by dragging this slider up.
+    //
+    // The default was settled by AUTHOR DELEGATION on 2026-08-05, NOT by the listening pass ADR 0007
+    // D4 reserves: docs/listening/P2-20260803.md is still marked not performed. D4's condition was
+    // waived, not met. The RANGE remains provisional and criterion (5) -- "the bridge still behaves
+    // as an instrument component rather than an overt resonant effect" -- has still never been judged.
     layout.add(std::make_unique<juce::AudioParameterFloat>(makeParameterID(ID::bridgeCoupling), "Bridge Coupling",
                                                            unitRange,
                                                            cnpg::dsp::BridgeAdmittanceParams{}.couplingStrength));

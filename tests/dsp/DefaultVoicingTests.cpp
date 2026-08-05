@@ -55,7 +55,9 @@
 //
 // Everything here is reproducible: build\bin\Release\cnpg_tests.exe "[report]" runs the hidden
 // sweeps every table in
-// .superpowers/sdd/2026-07-30-pm-guitar-synth-p0-p2-plan/task-default-voicing.md came from.
+// .superpowers/sdd/2026-07-30-pm-guitar-synth-p0-p2-plan/task-default-voicing.md came from, and
+// -- since 2026-08-05 -- the realised-onset sweep that task-default-diffs.md's REFUSAL of a
+// proposed tap at 1 - 1/7 rests on.
 
 using cnpg::dsp::BlockEventQueue;
 using cnpg::dsp::NoteEvent;
@@ -205,16 +207,25 @@ double worstEvenPartialDeficitDb(const std::vector<double>& out, double f0) {
 }
 
 // THE LIMIT, bracketed by measurement in both directions (both readings are reproduced by
-// "REPORT: voicing -- bracketing the comb-hole limit" below):
+// "REPORT: voicing -- bracketing the comb-hole limit" below, re-measured at couplingStrength 0.20):
 //
-//   healthy -- at the shipping geometry the six open strings read -1.46 .. +5.29 dB, and widening
-//              to MIDI 36 and 72 only reaches +10.56;
-//   defect  -- at the geometry this replaced, the same six read +35.80 .. +50.76 dB.
+//   healthy -- at the shipping geometry the six open strings read -3.02 .. +5.78 dB, and widening
+//              to MIDI 36 and 72 only reaches +10.68;
+//   defect  -- at the geometry this replaced, the same six read +37.47 .. +46.25 dB.
 //
-// 18 dB therefore sits 12.7 dB above the worst healthy reading over the gated set and 17.8 dB below
+// 18 dB therefore sits 12.2 dB above the worst healthy reading over the gated set and 19.5 dB below
 // the weakest reading the defect produces. It is a ratio between partials of one note, so nothing
-// in it depends on level calibration, on kNominalPickupTrimDb, or on couplingStrength (ADR 0007 D4
-// -- still provisional, and no number here may lean on it).
+// in it depends on level calibration or on kNominalPickupTrimDb. It DOES move a little with
+// couplingStrength -- the readings above shifted by up to 2.6 dB when that default went 0.35 ->
+// 0.20 on 2026-08-05 -- so the numbers quoted here name the coupling they were taken at, and the
+// gate's own RED arm re-measures the defect on every run rather than quoting one. The readings
+// above moved by up to 4.5 dB when couplingStrength went 0.35 -> 0.20 on 2026-08-05.
+//
+// *** THIS GATE IS THE ONE THAT CAUGHT dp = 1/7. *** It is not decorative and it is not merely a
+// slower restatement of the closed form in case 2: the closed form is a continuous-string identity
+// and the onset this waveguide REALISES is lower than 1/d by about one sample of tap distance
+// (StringNetwork.h). A tap at the zero-margin 1/7 passes case 2 and reads 21.72 dB here, on the
+// open B string. See "REPORT: voicing -- the realised comb onset is lower than 1/d".
 constexpr double kMaxEvenPartialDeficitDb = 18.0;
 
 } // namespace
@@ -304,9 +315,28 @@ TEST_CASE("CONTRACT: DefaultVoicing -- both default positions clear the identity
     const double pluckDistance = 1.0 - pluck; // from the bridge, which is the nearer termination
     const double tapDistance = 1.0 - tap;
 
-    // (1) Neither comb nulls a partial in [2, 6].
+    // (1) Neither comb nulls a partial in [2, 6]. The onsets below are PRINTED; the criterion is
+    // GATED in the form d <= 1/7 rather than 1/d >= 7, and the difference is not pedantry.
+    //
+    // The two are the same criterion over the reals and are NOT the same predicate in floating
+    // point AT THE BOUNDARY -- which is where a proposed tap value sat on 2026-08-05 (1 - 1/7; the
+    // move was refused for a different and larger reason, see the realised-onset report below).
+    // float(1/7) rounds UP to 0.14285714924..., so its float reciprocal is 6.99999952f: the
+    // reciprocal form REJECTS the exact boundary value. In double,
+    // 1.0/(1.0 - double(1.0f - 1.0f/7.0f)) lands on 7.000000417 and therefore ACCEPTS it, by 4e-7
+    // of rounding rather than by any property of the instrument. A gate whose verdict at its own
+    // boundary is decided by which way a rounding went is not measuring the physics, so the clause
+    // below compares the shipped DISTANCE against the same expression that defines the limit, in
+    // the type the header declares it in, where equality is exact.
+    // dsp/include/cnpg/dsp/StringNetwork.h's static_assert carries the same correction -- in its
+    // previous form it would have FAILED TO COMPILE at d = 1/7.
     const double pluckOnset = 1.0 / pluckDistance;
     const double tapOnset = 1.0 / tapDistance;
+
+    // ...and the parameters really are derived from those constants rather than restating them, so
+    // gating the constants gates what the instrument uses.
+    REQUIRE(cnpg::dsp::PluckExciterParams{}.defaultPosition == 1.0f - cnpg::dsp::kDefaultPluckDistanceFromBridge01);
+    REQUIRE(cnpg::dsp::StringNetworkParams{}.pickupPosition01 == 1.0f - cnpg::dsp::kDefaultTapDistanceFromBridge01);
 
     // (2) The two combs are not COINCIDENT, and their null sets do not meet inside the band the
     // render above speaks for. Coincidence is the mechanism, not a detail: it is why the old
@@ -349,19 +379,20 @@ TEST_CASE("CONTRACT: DefaultVoicing -- both default positions clear the identity
     INFO("pluck onset " << pluckOnset << ", tap onset " << tapOnset << ", worst in-band product " << worstInBand);
 
     // THE GATE.
-    REQUIRE(pluckOnset >= 7.0);
-    REQUIRE(tapOnset >= 7.0);
+    REQUIRE(cnpg::dsp::kDefaultPluckDistanceFromBridge01 <= 1.0f / 7.0f);
+    REQUIRE(cnpg::dsp::kDefaultTapDistanceFromBridge01 <= 1.0f / 7.0f);
     REQUIRE(firstSharedNull == 0);
     REQUIRE(worstInBand > 0.15);
 
     // THE RED, EVALUATED BY THE SAME EXPRESSIONS ON THE GEOMETRY THIS REPLACED. Every clause of the
-    // gate fails there, and the onset clause fails at the extreme value the criterion can take
-    // rather than marginally: 2 is the lowest onset any position on the slider can have.
+    // gate fails there, and the distance clause fails at the extreme value the criterion can take
+    // rather than marginally: 1/2 is the largest distance from a termination any position can have,
+    // i.e. onset 2, the lowest onset the slider admits.
     constexpr double kOldPosition = 0.5;
     const double oldDistance = 1.0 - kOldPosition;
     const double oldOnset = 1.0 / oldDistance;
     REQUIRE(oldOnset == 2.0);
-    REQUIRE_FALSE(oldOnset >= 7.0);
+    REQUIRE_FALSE(static_cast<float>(oldDistance) <= 1.0f / 7.0f);
     // Coincident combs, so the shared-null search finds the OCTAVE -- through the same lambda the
     // gate itself uses, not a hand-rolled restatement of the answer.
     REQUIRE(firstSharedNullAtOrBelow(oldDistance, oldDistance, 24) == 2);
@@ -449,8 +480,9 @@ TEST_CASE("REPORT: voicing -- bracketing the comb-hole limit", "[.][report]") {
         float exciter;
         float pickup;
     };
-    for (const Geom& g : std::vector<Geom>{{"OLD 0.5 / 0.5      ", 0.5f, 0.5f},
-                                           {"NEW 1-1/9 / 1-1/16 ", 1.0f - 1.0f / 9.0f, 1.0f - 1.0f / 16.0f}}) {
+    for (const Geom& g : std::vector<Geom>{{"P2.9   0.5 / 0.5   ", 0.5f, 0.5f},
+                                           {"SHIPPING 1-1/9 / 1-1/16", 1.0f - 1.0f / 9.0f, 1.0f - 1.0f / 16.0f},
+                                           {"REFUSED  1-1/9 / 1-1/7 ", 1.0f - 1.0f / 9.0f, 1.0f - 1.0f / 7.0f}}) {
         std::cout << g.label;
         for (int midi : {40, 45, 50, 55, 59, 64, 36, 72}) {
             P1ChainParams p = cnpg::test::makeDefaultP1ChainParams();
@@ -497,11 +529,11 @@ TEST_CASE("REPORT: voicing -- what the criterion costs in loudness", "[.][report
         double dp;
     };
     const std::vector<Geom> grid{
-        {"OLD   de 1/2  dp 1/2  (midpoint)  ", 0.5, 0.5},
+        {"P2.9  de 1/2  dp 1/2  (midpoint)  ", 0.5, 0.5},
         {"      de 1/8  dp 1/7  (min loss)  ", 1.0 / 8, 1.0 / 7},
-        {"      de 1/9  dp 1/7  (middle)    ", 1.0 / 9, 1.0 / 7},
+        {"REFD  de 1/9  dp 1/7  (middle)    ", 1.0 / 9, 1.0 / 7},
         {"      de 1/9  dp 1/10             ", 1.0 / 9, 1.0 / 10},
-        {"NEW   de 1/9  dp 1/16 (bridge)    ", 1.0 / 9, 1.0 / 16},
+        {"SHIP  de 1/9  dp 1/16 (bridge)    ", 1.0 / 9, 1.0 / 16},
     };
     std::array<int, 6> open{40, 45, 50, 55, 59, 64};
     std::cout << "six-string open chord, velocity 0.8, band energy over 0.3-3.0 s of the sustain (dB)\n";
@@ -698,15 +730,19 @@ TEST_CASE("REPORT: voicing -- the shortlist partial by partial", "[.][report]") 
         double dp;
     };
     const std::vector<Candidate> shortlist{
-        {"SHIPPING       de 1/2    dp 1/2   ", 0.5, 0.5},
-        {"bridge pickup  de 1/9    dp 1/16  ", 1.0 / 9, 1.0 / 16},
+        {"P2.9           de 1/2    dp 1/2   ", 0.5, 0.5},
+        {"SHIPPING       de 1/9    dp 1/16  ", 1.0 / 9, 1.0 / 16},
         {"bridge pickup  de 1/10   dp 1/16  ", 1.0 / 10, 1.0 / 16},
-        {"middle pickup  de 1/9    dp 1/7   ", 1.0 / 9, 1.0 / 7},
+        {"REFUSED        de 1/9    dp 1/7   ", 1.0 / 9, 1.0 / 7},
         {"middle-ish     de 1/9    dp 1/6   ", 1.0 / 9, 1.0 / 6},
         {"neck pickup    de 1/9    dp 1/4   ", 1.0 / 9, 1.0 / 4},
     };
 
-    for (int midi : {40, 48, 52}) {
+    // MIDI 59 is here because it is where the REFUSED dp = 1/7 row breaks: its realised comb null
+    // lands on partial 6 at this note, 21.72 dB below the mean of its odd neighbours, while every
+    // other open string reads 0.6 to 9.6 dB. A table without the binding note is a table about the
+    // easy cases. See "REPORT: voicing -- the realised comb onset is lower than 1/d".
+    for (int midi : {40, 48, 52, 59}) {
         const double f0 = cnpg::test::midiNoteToHz(midi);
         std::cout << "\n=== MIDI " << midi << " chain output, dB re the LOUDEST partial ===\n";
         std::cout << "                                     ";
@@ -817,8 +853,9 @@ TEST_CASE("REPORT: voicing -- coupling and the unison stack", "[.][report]") {
         float pickup;
     };
     const std::vector<Geom> geometries{
-        {"OLD 0.5 / 0.5      ", 0.5f, 0.5f},
-        {"NEW 1-1/9 / 1-1/16 ", 1.0f - 1.0f / 9.0f, 1.0f - 1.0f / 16.0f},
+        {"P2.9     0.5 / 0.5   ", 0.5f, 0.5f},
+        {"SHIPPING 1-1/9 / 1-1/16", 1.0f - 1.0f / 9.0f, 1.0f - 1.0f / 16.0f},
+        {"REFUSED  1-1/9 / 1-1/7 ", 1.0f - 1.0f / 9.0f, 1.0f - 1.0f / 7.0f},
     };
 
     for (bool sustain : {true, false}) {
@@ -826,7 +863,10 @@ TEST_CASE("REPORT: voicing -- coupling and the unison stack", "[.][report]") {
                   << ": two strings 25 cents apart ===\n";
         std::cout << "geometry              coupling   string 0 Hz   string 1 Hz   separation   pull on s0\n";
         for (const Geom& g : geometries) {
-            for (float coupling : {0.0f, 0.10f, 0.20f, 0.25f, 0.30f, 0.32f, 0.35f}) {
+            // Finer than D7.0's ladder between 0.25 and 0.30, because that interval is where the
+            // isolated pair's criterion-(4) boundary lives and the shipping default now sits below
+            // it: a bracket two steps wide is not evidence about where the edge is.
+            for (float coupling : {0.0f, 0.10f, 0.20f, 0.22f, 0.25f, 0.27f, 0.28f, 0.30f, 0.32f, 0.35f}) {
                 cnpg::dsp::StringNetworkParams params;
                 params.exciter.defaultPosition = g.exciter;
                 params.pickupPosition01 = g.pickup;
@@ -1018,6 +1058,107 @@ TEST_CASE("REPORT: voicing -- exciter noise", "[.][report]") {
         std::cout << std::setw(5) << noise << " ";
         for (int n = 1; n <= 16; ++n)
             std::cout << std::setw(7) << (partialDb(s, f0 * n, 60.0) - ref);
+        std::cout << "\n";
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE REALISED ONSET: why d <= 1/7 is NECESSARY BUT NOT SUFFICIENT in this waveguide
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("REPORT: voicing -- the realised comb onset is lower than 1/d, and by how much", "[.][report]") {
+    // *** THIS CASE IS THE EVIDENCE FOR A REFUSAL (2026-08-05). *** The tap was proposed to move
+    // from 1 - 1/16 to 1 - 1/7 on the strength of this file's own closed form, which says a tap
+    // 1/7 of the string from the bridge has its first null at partial 7 and therefore clears the
+    // identity band [2, 6] -- with, in the previous task's own words, ZERO MARGIN.
+    //
+    // THE CLOSED FORM IS A CONTINUOUS-STRING IDENTITY AND THIS INSTRUMENT IS A DISCRETE WAVEGUIDE.
+    // WaveguideString reads a tap at delay `1.0 + position01 * positionSpan_`
+    // (dsp/include/cnpg/dsp/WaveguideString.h), and `positionSpan_` is ONE RAIL's realized span --
+    // it excludes the loss, dispersion, seam and bridge phase delays, which are part of the
+    // acoustic loop but not of the rail. So the tap's acoustic distance from the bridge is
+    //
+    //     (1 + (1 - p) * S) samples   out of a half-loop of   (S + tau/2) samples
+    //
+    // rather than (1 - p) of it, and the realised onset is therefore LOWER than 1/d by an amount
+    // that is an ABSOLUTE offset of about one sample. An absolute offset is a bigger fraction of a
+    // shorter loop, so the error grows toward the top of the register and toward the LOWEST sample
+    // rate -- which is exactly what the second table below measures, and it is what says the effect
+    // is the discretisation and not the comb (the closed form contains no sample rate at all).
+    //
+    // MEASURED CONSEQUENCE. At 1/7 the realised null lands ON PARTIAL 6 -- inside the identity band
+    // -- on the open B string (MIDI 59), reading 21.72 dB of even-partial deficit through the chain
+    // against this file's 18 dB gate, and 24.77 dB on the raw tap at 44.1 kHz. At 96 kHz, where the
+    // loop is twice as long and the one-sample offset is half the fraction, the same note reads
+    // 5.58 dB. A geometry whose in-band spectrum depends on the sample rate that much is not a
+    // geometry that satisfies the criterion.
+    //
+    // WHAT THE MEASUREMENT SUPPORTS INSTEAD: 1/8. It is the largest tap distance that is clean at
+    // all three supported rates (6.23 / 5.54 / 5.91 dB), where 1/7.5 already reads 18.76 dB at
+    // 44.1 kHz. The margin the closed form needs here is about ONE PARTIAL, not zero -- which is
+    // the same conclusion PluckExciter.h reached for the PLUCK when it declined the zero-margin 1/7
+    // in favour of 1/9, and the reason the pluck default is unaffected by any of this.
+    std::cout << std::fixed << std::setprecision(2);
+    const std::vector<double> taps{1.0 / 6.0, 1.0 / 7.0,  1.0 / 7.5,  1.0 / 8.0,
+                                   1.0 / 9.0, 1.0 / 10.0, 1.0 / 12.0, 1.0 / 16.0};
+
+    std::cout << "\nCHAIN, 48 kHz, six open strings, pluck at its shipping 1/9: worst even-partial deficit\n"
+                 "(this is the statistic the [contract] gate above uses, and its limit is 18 dB)\n";
+    for (double dp : taps) {
+        double worst = -300.0;
+        int worstNote = 0;
+        for (int midi : kOpenStrings) {
+            P1ChainParams p = cnpg::test::makeDefaultP1ChainParams();
+            p.network.pickupPosition01 = static_cast<float>(1.0 - dp);
+            const Rendered r = render(p, {{0, 0, midi, 0.8f}}, 3.0, 1);
+            const double d = worstEvenPartialDeficitDb(r.out, cnpg::test::midiNoteToHz(midi));
+            if (d > worst) {
+                worst = d;
+                worstNote = midi;
+            }
+        }
+        std::cout << "  tap 1/" << std::setw(6) << (1.0 / dp) << "   worst " << std::setw(8) << worst << " dB at MIDI "
+                  << worstNote << "\n";
+    }
+
+    std::cout << "\nRAW TAP (no chain, so no pickup resonance and no triode in it), six open strings,\n"
+                 "worst even-partial deficit at each supported rate -- the rate dependence IS the finding\n"
+                 "    tap        44.1 kHz   48 kHz    96 kHz\n";
+    for (double dp : taps) {
+        std::cout << "  tap 1/" << std::setw(6) << (1.0 / dp);
+        for (double rate : {44100.0, 48000.0, 96000.0}) {
+            double worst = -300.0;
+            for (int midi : kOpenStrings) {
+                cnpg::dsp::StringNetwork<float> network;
+                network.prepare(rate, kBlock, cnpg::dsp::FractionalDelayKind::Lagrange3);
+                network.setNumStrings(1);
+                cnpg::dsp::StringNetworkParams np;
+                np.pickupPosition01 = static_cast<float>(1.0 - dp);
+                network.setParams(np);
+                network.reset();
+                BlockEventQueue events;
+                events.push(noteOn(0, 0, midi, 0.8f, cnpg::dsp::kUnspecifiedNoteParam));
+                std::vector<double> tap;
+                for (int k = 0; k < static_cast<int>(3.0 * rate); k += kBlock) {
+                    network.process(events, kBlock);
+                    const float* c = network.tapBuffers().channel(0, 0);
+                    for (int n = 0; n < kBlock; ++n)
+                        tap.push_back(c != nullptr ? static_cast<double>(c[n]) : 0.0);
+                }
+                const double f0 = cnpg::test::midiNoteToHz(midi);
+                const auto skip = static_cast<std::size_t>(0.20 * rate);
+                std::vector<double> w(tap.begin() + static_cast<std::ptrdiff_t>(skip), tap.end());
+                const cnpg::test::Spectrum spec = cnpg::test::computeSpectrum(w, rate, 65536);
+                double db[8];
+                for (int n = 1; n <= 8; ++n)
+                    db[static_cast<std::size_t>(n - 1)] = partialDb(spec, f0 * n);
+                for (int n = 2; n <= 6; n += 2)
+                    worst =
+                        std::max(worst, 0.5 * (db[static_cast<std::size_t>(n - 2)] + db[static_cast<std::size_t>(n)]) -
+                                            db[static_cast<std::size_t>(n - 1)]);
+            }
+            std::cout << std::setw(10) << worst;
+        }
         std::cout << "\n";
     }
 }

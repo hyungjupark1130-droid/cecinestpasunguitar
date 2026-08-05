@@ -89,6 +89,13 @@ at three sample rates; tier 2 worst per-block growth **6.4e-15** against a 1e-9 
 > judgement, and the measurements below establish the *range*, not the *choice*.
 >
 > The measurement-derived reasoning that follows remains valid and is what the listening pass should be read against.
+>
+> **REPLACED, 2026-08-05 — the default is now `0.20`** (`docs/decisions/0007-bridge-tuning-compensation.md`, **D7.2**).
+> It was settled by **author delegation, NOT by the listening pass** this note reserves it for: that pass has still
+> never been held and `docs/listening/P2-20260803.md` is still marked NOT PERFORMED. **D4's condition was waived, not
+> met**, and the prohibition above still stands — no later task may treat 0.20 as settled *by measurement*. The table
+> below is unchanged and is still the evidence: 0.20 is its `−58.0 dBFS` row, and the criterion-(4) measurement that
+> selected it is ADR 0007 D7.1's, on the shipping six-string topology.
 
 Chosen by measurement, not by taste. The number the knob maps to is a dimensionless *peak mobility
 ratio* against the string impedance,
